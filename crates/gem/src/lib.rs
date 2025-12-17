@@ -241,10 +241,8 @@ impl Gate {
             None => {
                 self.note_receipt_issue(ReceiptIssue::Missing);
                 return Err(GateResult::Denied {
-                    decision: self.receipt_blocked_decision(
-                        decision,
-                        &[RECEIPT_BLOCKED_REASON.to_string()],
-                    ),
+                    decision: self
+                        .receipt_blocked_decision(decision, &[RECEIPT_BLOCKED_REASON.to_string()]),
                 });
             }
         };
