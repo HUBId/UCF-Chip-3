@@ -10,3 +10,5 @@ gem = { path = "../gem" }
 pbm = { path = "../pbm" }
 tam = { path = "../tam" }
 ucf-protocol = { workspace = true }
+frames = { path = "../frames" }
+hex = "0.4"

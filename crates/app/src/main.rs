@@ -1,14 +1,22 @@
 #![forbid(unsafe_code)]
 
-use gem::{Gate, GateContext, GateResult, OutcomePacketStatus};
+use std::{
+    convert::TryFrom,
+    sync::{Arc, Mutex},
+};
+
+use frames::ShortWindowAggregator;
+use gem::{Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
 use tam::MockAdapter;
 use ucf_protocol::ucf;
 
 fn main() {
+    let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
     let gate = Gate {
         policy: PolicyEngine::new(),
         adapter: Box::new(MockAdapter),
+        aggregator: aggregator.clone(),
     };
 
     let action = ucf::v1::ActionSpec {
@@ -22,8 +30,21 @@ fn main() {
         allowed_tools: vec!["mock.read".to_string(), "mock.export".to_string()],
     };
 
-    let result = gate.handle_action_spec("session-1", "step-1", action, ctx);
-    print_result(result);
+    for i in 0..5 {
+        let result = gate.handle_action_spec(
+            "session-1",
+            &format!("step-{}", i + 1),
+            action.clone(),
+            ctx.clone(),
+        );
+        print_result(result);
+    }
+
+    let frames = aggregator.lock().expect("aggregator lock").force_flush();
+
+    for frame in frames {
+        print_frame_summary(&frame);
+    }
 }
 
 fn print_result(result: GateResult) {
@@ -53,9 +74,9 @@ fn print_result(result: GateResult) {
             );
         }
         GateResult::Executed { decision, outcome } => {
-            let outcome_status = match outcome.status {
-                OutcomePacketStatus::Success => "EXECUTED",
-                OutcomePacketStatus::Failure => "FAILED",
+            let outcome_status = match ucf::v1::OutcomeStatus::try_from(outcome.status) {
+                Ok(ucf::v1::OutcomeStatus::Success) => "EXECUTED",
+                _ => "FAILED",
             };
             let payload_str = String::from_utf8_lossy(&outcome.payload);
             let form_str = match decision.form {
@@ -72,4 +93,29 @@ fn print_result(result: GateResult) {
             );
         }
     }
+}
+
+fn print_frame_summary(frame: &ucf::v1::SignalFrame) {
+    let policy = frame.policy_stats.as_ref().unwrap();
+    let exec = frame.exec_stats.as_ref().unwrap();
+    let digest_hex = frame
+        .signal_frame_digest
+        .as_ref()
+        .map(|d| hex::encode(&d.value))
+        .unwrap_or_default();
+
+    println!(
+        "SIGNAL_FRAME window={} policy_allow={} policy_deny={} exec_success={} exec_failure={} top_rcs={:?} digest={}",
+        frame.window.as_ref().map(|w| w.window_id.clone()).unwrap_or_default(),
+        policy.allow_count,
+        policy.deny_count,
+        exec.success_count,
+        exec.failure_count,
+        policy
+            .top_reason_codes
+            .iter()
+            .map(|rc| rc.code.clone())
+            .collect::<Vec<_>>(),
+        digest_hex
+    );
 }

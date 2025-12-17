@@ -12,7 +12,9 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "frames",
  "gem",
+ "hex",
  "pbm",
  "tam",
  "thiserror",
@@ -95,7 +97,10 @@ checksum = "3a3076410a55c90011c298b04d0cfa770b00fa04e1e3c97d3f6c9de105a03844"
 name = "frames"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "pbm",
  "thiserror",
+ "ucf-protocol",
 ]
 
 [[package]]
@@ -103,6 +108,7 @@ name = "gem"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "frames",
  "pbm",
  "tam",
  "thiserror",
@@ -202,7 +208,9 @@ dependencies = [
 name = "tam"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "thiserror",
+ "ucf-protocol",
 ]
 
 [[package]]

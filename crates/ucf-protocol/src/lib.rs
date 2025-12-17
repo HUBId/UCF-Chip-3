@@ -32,6 +32,13 @@ pub mod ucf {
             #[prost(string, repeated, tag = "1")]
             pub codes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
         }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ReasonCodeCount {
+            #[prost(string, tag = "1")]
+            pub code: ::prost::alloc::string::String,
+            #[prost(uint64, tag = "2")]
+            pub count: u64,
+        }
         #[derive(
             Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
         )]
@@ -65,6 +72,41 @@ pub mod ucf {
             Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
         )]
         #[repr(i32)]
+        pub enum OutcomeStatus {
+            Unspecified = 0,
+            Success = 1,
+            Failure = 2,
+            Timeout = 3,
+            Partial = 4,
+            ToolUnavailable = 5,
+        }
+        impl OutcomeStatus {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    OutcomeStatus::Unspecified => "OUTCOME_STATUS_UNSPECIFIED",
+                    OutcomeStatus::Success => "OUTCOME_STATUS_SUCCESS",
+                    OutcomeStatus::Failure => "OUTCOME_STATUS_FAILURE",
+                    OutcomeStatus::Timeout => "OUTCOME_STATUS_TIMEOUT",
+                    OutcomeStatus::Partial => "OUTCOME_STATUS_PARTIAL",
+                    OutcomeStatus::ToolUnavailable => "OUTCOME_STATUS_TOOL_UNAVAILABLE",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "OUTCOME_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+                    "OUTCOME_STATUS_SUCCESS" => Some(Self::Success),
+                    "OUTCOME_STATUS_FAILURE" => Some(Self::Failure),
+                    "OUTCOME_STATUS_TIMEOUT" => Some(Self::Timeout),
+                    "OUTCOME_STATUS_PARTIAL" => Some(Self::Partial),
+                    "OUTCOME_STATUS_TOOL_UNAVAILABLE" => Some(Self::ToolUnavailable),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
         pub enum DecisionForm {
             Unspecified = 0,
             Allow = 1,
@@ -86,6 +128,35 @@ pub mod ucf {
                     "DECISION_FORM_ALLOW" => Some(Self::Allow),
                     "DECISION_FORM_DENY" => Some(Self::Deny),
                     "DECISION_FORM_REQUIRE_APPROVAL" => Some(Self::RequireApproval),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum IntegrityState {
+            Unspecified = 0,
+            Ok = 1,
+            Degraded = 2,
+            Fail = 3,
+        }
+        impl IntegrityState {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    IntegrityState::Unspecified => "INTEGRITY_STATE_UNSPECIFIED",
+                    IntegrityState::Ok => "INTEGRITY_STATE_OK",
+                    IntegrityState::Degraded => "INTEGRITY_STATE_DEGRADED",
+                    IntegrityState::Fail => "INTEGRITY_STATE_FAIL",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "INTEGRITY_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                    "INTEGRITY_STATE_OK" => Some(Self::Ok),
+                    "INTEGRITY_STATE_DEGRADED" => Some(Self::Degraded),
+                    "INTEGRITY_STATE_FAIL" => Some(Self::Fail),
                     _ => None,
                 }
             }
@@ -377,6 +448,139 @@ pub mod ucf {
                     _ => None,
                 }
             }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ExecutionRequest {
+            #[prost(string, tag = "1")]
+            pub request_id: ::prost::alloc::string::String,
+            #[prost(bytes = "vec", tag = "2")]
+            pub action_digest: ::prost::alloc::vec::Vec<u8>,
+            #[prost(string, tag = "3")]
+            pub tool_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "4")]
+            pub action_name: ::prost::alloc::string::String,
+            #[prost(string, repeated, tag = "5")]
+            pub constraints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            #[prost(enumeration = "DataClass", tag = "6")]
+            pub data_class_context: i32,
+            #[prost(bytes = "vec", tag = "7")]
+            pub payload: ::prost::alloc::vec::Vec<u8>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct OutcomePacket {
+            #[prost(string, tag = "1")]
+            pub outcome_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub request_id: ::prost::alloc::string::String,
+            #[prost(enumeration = "OutcomeStatus", tag = "3")]
+            pub status: i32,
+            #[prost(bytes = "vec", tag = "4")]
+            pub payload: ::prost::alloc::vec::Vec<u8>,
+            #[prost(message, optional, tag = "5")]
+            pub payload_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "DataClass", tag = "6")]
+            pub data_class: i32,
+            #[prost(message, optional, tag = "7")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct InputPacket {
+            #[prost(string, tag = "1")]
+            pub request_id: ::prost::alloc::string::String,
+            #[prost(bytes = "vec", tag = "2")]
+            pub payload: ::prost::alloc::vec::Vec<u8>,
+            #[prost(message, optional, tag = "3")]
+            pub payload_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "DataClass", tag = "4")]
+            pub data_class: i32,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct WindowMetadata {
+            #[prost(string, tag = "1")]
+            pub window_type: ::prost::alloc::string::String,
+            #[prost(uint64, tag = "2")]
+            pub max_events: u64,
+            #[prost(uint64, tag = "3")]
+            pub event_count: u64,
+            #[prost(string, tag = "4")]
+            pub window_id: ::prost::alloc::string::String,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct PolicyStats {
+            #[prost(uint64, tag = "1")]
+            pub allow_count: u64,
+            #[prost(uint64, tag = "2")]
+            pub deny_count: u64,
+            #[prost(uint64, tag = "3")]
+            pub require_approval_count: u64,
+            #[prost(uint64, tag = "4")]
+            pub require_simulation_count: u64,
+            #[prost(message, repeated, tag = "5")]
+            pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ExecStats {
+            #[prost(uint64, tag = "1")]
+            pub success_count: u64,
+            #[prost(uint64, tag = "2")]
+            pub failure_count: u64,
+            #[prost(uint64, tag = "3")]
+            pub timeout_count: u64,
+            #[prost(uint64, tag = "4")]
+            pub partial_count: u64,
+            #[prost(uint64, tag = "5")]
+            pub tool_unavailable_count: u64,
+            #[prost(message, repeated, tag = "6")]
+            pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct DlpStats {
+            #[prost(message, repeated, tag = "1")]
+            pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct BudgetStats {
+            #[prost(uint64, tag = "1")]
+            pub budget_exhausted_count: u64,
+            #[prost(message, repeated, tag = "2")]
+            pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct HumanStats {
+            #[prost(uint64, tag = "1")]
+            pub approval_denied_count: u64,
+            #[prost(bool, tag = "2")]
+            pub stop: bool,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct SignalFrame {
+            #[prost(string, tag = "1")]
+            pub frame_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub window: ::core::option::Option<WindowMetadata>,
+            #[prost(enumeration = "IntegrityState", tag = "3")]
+            pub integrity_state: i32,
+            #[prost(message, optional, tag = "4")]
+            pub policy_stats: ::core::option::Option<PolicyStats>,
+            #[prost(message, optional, tag = "5")]
+            pub exec_stats: ::core::option::Option<ExecStats>,
+            #[prost(message, optional, tag = "6")]
+            pub dlp_stats: ::core::option::Option<DlpStats>,
+            #[prost(message, optional, tag = "7")]
+            pub budget_stats: ::core::option::Option<BudgetStats>,
+            #[prost(message, optional, tag = "8")]
+            pub human_stats: ::core::option::Option<HumanStats>,
+            #[prost(message, optional, tag = "9")]
+            pub signal_frame_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "10")]
+            pub signature: ::core::option::Option<Signature>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ControlFrame {
+            #[prost(string, tag = "1")]
+            pub frame_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub note: ::prost::alloc::string::String,
         }
     }
 }
