@@ -13,6 +13,7 @@ ucf-protocol = { workspace = true }
 frames = { path = "../frames" }
 control = { path = "../control" }
 pvgs_verify = { path = "../pvgs_verify" }
+trm = { path = "../trm" }
 
 [dev-dependencies]
 ed25519-dalek = "2"

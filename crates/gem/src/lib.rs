@@ -13,6 +13,7 @@ use pbm::{
 };
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore, VerifyError};
 use tam::ToolAdapter;
+use trm::ToolRegistry;
 use ucf_protocol::{canonical_bytes, digest32, ucf};
 
 const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
@@ -24,6 +25,7 @@ pub struct Gate {
     pub aggregator: Arc<Mutex<ShortWindowAggregator>>,
     pub control_store: Arc<Mutex<ControlFrameStore>>,
     pub receipt_store: Arc<PvgsKeyEpochStore>,
+    pub registry: Arc<ToolRegistry>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,28 +59,6 @@ pub enum GateResult {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolActionClass {
-    Read,
-    Write,
-    Execute,
-    Export,
-    Persist,
-    Other,
-}
-
-impl ToolActionClass {
-    fn requires_receipt(&self) -> bool {
-        matches!(
-            self,
-            ToolActionClass::Write
-                | ToolActionClass::Execute
-                | ToolActionClass::Export
-                | ToolActionClass::Persist
-        )
-    }
-}
-
 impl Gate {
     pub fn handle_action_spec(
         &self,
@@ -101,8 +81,11 @@ impl Gate {
             };
         }
 
-        let tool_id = action.verb.clone();
-        let action_class = classify_tool_action(&tool_id);
+        let (tool_id, action_id) = parse_tool_and_action(&action);
+        let tool_profile = self.registry.get(&tool_id, &action_id);
+        let action_type = tool_profile
+            .and_then(|tap| ucf::v1::ToolActionType::try_from(tap.action_type).ok())
+            .unwrap_or(ucf::v1::ToolActionType::Unspecified);
         let canonical = canonical_bytes(&action);
         let action_digest = digest32("UCF:HASH:ACTION_SPEC", "ActionSpec", "v1", &canonical);
 
@@ -122,13 +105,19 @@ impl Gate {
             charter_version_digest: ctx.charter_version_digest.clone(),
             allowed_tools: ctx.allowed_tools.clone(),
             control_frame: control_frame.clone(),
+            tool_action_type: action_type,
         };
 
-        let decision = self.policy.decide_with_context(PolicyEvaluationRequest {
+        let mut decision = self.policy.decide_with_context(PolicyEvaluationRequest {
             decision_id: format!("{session_id}:{step_id}"),
             query,
             context: policy_ctx,
         });
+
+        if tool_profile.is_none() {
+            decision =
+                self.deny_with_reasons(&decision, &["RC.PB.DENY.TOOL_NOT_ALLOWED".to_string()]);
+        }
 
         // TODO: budget accounting hook.
         // TODO: PVGS receipts hook.
@@ -141,16 +130,25 @@ impl Gate {
             DecisionForm::RequireApproval => GateResult::ApprovalRequired { decision },
             DecisionForm::RequireSimulationFirst => GateResult::SimulationRequired { decision },
             DecisionForm::Allow | DecisionForm::AllowWithConstraints => {
-                if let Err(result) =
-                    self.enforce_receipt_gate(action_class, action_digest, &action, &decision, &ctx)
-                {
-                    return result;
+                if let Some(tap) = tool_profile {
+                    if let Err(result) = self.enforce_receipt_gate(
+                        tap,
+                        action_type,
+                        action_digest,
+                        &action,
+                        &decision,
+                        &ctx,
+                    ) {
+                        return result;
+                    }
+                } else {
+                    return GateResult::Denied { decision };
                 }
 
                 let execution_request = self.build_execution_request(
                     action_digest,
-                    tool_id,
-                    action.verb,
+                    &tool_id,
+                    &action_id,
                     &decision,
                     session_id,
                     step_id,
@@ -167,8 +165,8 @@ impl Gate {
     fn build_execution_request(
         &self,
         action_digest: [u8; 32],
-        tool_id: String,
-        action_name: String,
+        tool_id: &str,
+        action_name: &str,
         decision: &PolicyDecisionRecord,
         session_id: &str,
         step_id: &str,
@@ -187,8 +185,8 @@ impl Gate {
         ucf::v1::ExecutionRequest {
             request_id,
             action_digest: action_digest.to_vec(),
-            tool_id,
-            action_name,
+            tool_id: tool_id.to_string(),
+            action_name: action_name.to_string(),
             constraints: constraints_sorted,
             data_class_context: ucf::v1::DataClass::Unspecified.into(),
             payload: Vec::new(),
@@ -227,13 +225,14 @@ impl Gate {
     #[allow(clippy::result_large_err)]
     fn enforce_receipt_gate(
         &self,
-        action_class: ToolActionClass,
+        tap: &ucf::v1::ToolActionProfile,
+        action_type: ucf::v1::ToolActionType,
         action_digest: [u8; 32],
         action: &ucf::v1::ActionSpec,
         decision: &PolicyDecisionRecord,
         ctx: &GateContext,
     ) -> Result<(), GateResult> {
-        if !action_class.requires_receipt() {
+        if !requires_receipt(action_type) {
             return Ok(());
         }
 
@@ -288,6 +287,18 @@ impl Gate {
             ));
         }
 
+        if !digest32_matches(
+            tap.profile_digest.as_ref(),
+            receipt.tool_profile_digest.as_ref(),
+        ) {
+            self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
+            return Err(self.receipt_gate_error(
+                decision,
+                &[RECEIPT_BLOCKED_REASON.to_string()],
+                action,
+            ));
+        }
+
         if let Some(expected_grant) = ctx.approval_grant_id.as_deref() {
             if receipt.grant_id != expected_grant {
                 self.note_receipt_issue(
@@ -311,7 +322,7 @@ impl Gate {
         }
     }
 
-    fn receipt_blocked_decision(
+    fn deny_with_reasons(
         &self,
         prior: &PolicyDecisionRecord,
         reason_codes: &[String],
@@ -331,6 +342,14 @@ impl Gate {
             decision_id: prior.decision_id.clone(),
             decision_digest: digest,
         }
+    }
+
+    fn receipt_blocked_decision(
+        &self,
+        prior: &PolicyDecisionRecord,
+        reason_codes: &[String],
+    ) -> PolicyDecisionRecord {
+        self.deny_with_reasons(prior, reason_codes)
     }
 
     fn receipt_gate_error(
@@ -358,24 +377,35 @@ impl Gate {
     }
 }
 
-fn classify_tool_action(tool_id: &str) -> ToolActionClass {
-    if tool_id.starts_with("mock.write") {
-        ToolActionClass::Write
-    } else if tool_id.starts_with("mock.exec") {
-        ToolActionClass::Execute
-    } else if tool_id.starts_with("mock.export") {
-        ToolActionClass::Export
-    } else if tool_id.starts_with("mock.persist") {
-        ToolActionClass::Persist
-    } else if tool_id.starts_with("mock.read") {
-        ToolActionClass::Read
-    } else {
-        ToolActionClass::Other
+fn digest_matches(opt: Option<&ucf::v1::Digest32>, expected: &[u8; 32]) -> bool {
+    opt.map(|d| d.value.as_slice() == expected).unwrap_or(false)
+}
+
+fn digest32_matches(
+    expected: Option<&ucf::v1::Digest32>,
+    actual: Option<&ucf::v1::Digest32>,
+) -> bool {
+    match (expected, actual) {
+        (Some(exp), Some(act)) => exp.value == act.value,
+        _ => false,
     }
 }
 
-fn digest_matches(opt: Option<&ucf::v1::Digest32>, expected: &[u8; 32]) -> bool {
-    opt.map(|d| d.value.as_slice() == expected).unwrap_or(false)
+fn parse_tool_and_action(action: &ucf::v1::ActionSpec) -> (String, String) {
+    action
+        .verb
+        .split_once('/')
+        .map(|(tool, action_name)| (tool.to_string(), action_name.to_string()))
+        .unwrap_or_else(|| (action.verb.clone(), action.verb.clone()))
+}
+
+fn requires_receipt(action_type: ucf::v1::ToolActionType) -> bool {
+    matches!(
+        action_type,
+        ucf::v1::ToolActionType::Write
+            | ucf::v1::ToolActionType::Execute
+            | ucf::v1::ToolActionType::Export
+    )
 }
 
 #[cfg(test)]
@@ -432,6 +462,7 @@ mod tests {
             store,
             Arc::new(PvgsKeyEpochStore::new()),
             Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+            Arc::new(trm::registry_fixture()),
         )
     }
 
@@ -440,6 +471,7 @@ mod tests {
         store: Arc<Mutex<ControlFrameStore>>,
         receipt_store: Arc<PvgsKeyEpochStore>,
         aggregator: Arc<Mutex<ShortWindowAggregator>>,
+        registry: Arc<ToolRegistry>,
     ) -> Gate {
         Gate {
             policy: PolicyEngine::new(),
@@ -447,6 +479,7 @@ mod tests {
             aggregator,
             control_store: store,
             receipt_store,
+            registry,
         }
     }
 
@@ -490,9 +523,31 @@ mod tests {
         }
     }
 
-    fn base_action(tool: &str) -> ucf::v1::ActionSpec {
+    fn control_frame_export_masked() -> ucf::v1::ControlFrame {
+        ucf::v1::ControlFrame {
+            frame_id: "cf-export-mask".to_string(),
+            note: String::new(),
+            active_profile: ucf::v1::ControlFrameProfile::M0Baseline.into(),
+            overlays: Some(ucf::v1::ControlFrameOverlays {
+                ovl_simulate_first: false,
+                ovl_export_lock: false,
+                ovl_novelty_lock: false,
+            }),
+            toolclass_mask: Some(ucf::v1::ToolClassMask {
+                enable_read: true,
+                enable_transform: true,
+                enable_export: false,
+                enable_write: true,
+                enable_execute: true,
+            }),
+            deescalation_lock: false,
+            reason_codes: None,
+        }
+    }
+
+    fn base_action(tool: &str, action_id: &str) -> ucf::v1::ActionSpec {
         ucf::v1::ActionSpec {
-            verb: tool.to_string(),
+            verb: format!("{tool}/{action_id}"),
             resources: vec!["target".to_string()],
         }
     }
@@ -584,11 +639,18 @@ mod tests {
         step_id: &str,
     ) -> PolicyDecisionRecord {
         let control_frame = gate.resolve_control_frame(ctx);
+        let (tool_id, action_id) = parse_tool_and_action(action);
+        let action_type = gate
+            .registry
+            .get(&tool_id, &action_id)
+            .and_then(|tap| ucf::v1::ToolActionType::try_from(tap.action_type).ok())
+            .unwrap_or(ucf::v1::ToolActionType::Unspecified);
         let policy_ctx = PolicyContext {
             integrity_state: ctx.integrity_state.clone(),
             charter_version_digest: ctx.charter_version_digest.clone(),
             allowed_tools: ctx.allowed_tools.clone(),
             control_frame,
+            tool_action_type: action_type,
         };
 
         gate.policy.decide_with_context(PolicyEvaluationRequest {
@@ -610,6 +672,7 @@ mod tests {
         decision_digest: [u8; 32],
         signer: &SigningKey,
         key_id: &str,
+        tool_profile_digest: &ucf::v1::Digest32,
     ) -> ucf::v1::PvgsReceipt {
         let mut receipt = ucf::v1::PvgsReceipt {
             receipt_epoch: "epoch-1".to_string(),
@@ -623,7 +686,7 @@ mod tests {
             policy_version_digest: Some(sample_digest(4)),
             prev_record_digest: Some(sample_digest(5)),
             profile_digest: Some(sample_digest(6)),
-            tool_profile_digest: Some(sample_digest(7)),
+            tool_profile_digest: Some(tool_profile_digest.clone()),
             reject_reason_codes: Vec::new(),
             signer: None,
         };
@@ -657,7 +720,7 @@ mod tests {
         let gate = gate_with_adapter(Box::new(counting.clone()));
         let mut ctx = ok_ctx();
         ctx.integrity_state = "FAIL".to_string();
-        let result = gate.handle_action_spec("s", "step", base_action("mock.read"), ctx);
+        let result = gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ctx);
 
         match result {
             GateResult::Denied { decision } => {
@@ -674,7 +737,8 @@ mod tests {
     #[test]
     fn executes_mock_read() {
         let gate = gate_with_adapter(Box::new(MockAdapter));
-        let result = gate.handle_action_spec("s", "step", base_action("mock.read"), ok_ctx());
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
         match result {
             GateResult::Executed { decision, outcome } => {
                 let codes = decision.decision.reason_codes.unwrap().codes;
@@ -696,15 +760,22 @@ mod tests {
     #[test]
     fn execution_request_is_deterministic() {
         let gate = gate_with_adapter(Box::new(MockAdapter));
-        let action = base_action("mock.read");
+        let action = base_action("mock.read", "get");
         let ctx = ok_ctx();
 
         let control_frame = gate.resolve_control_frame(&ctx);
+        let (tool_id, action_id) = parse_tool_and_action(&action);
+        let action_type = gate
+            .registry
+            .get(&tool_id, &action_id)
+            .and_then(|tap| ucf::v1::ToolActionType::try_from(tap.action_type).ok())
+            .unwrap_or(ucf::v1::ToolActionType::Unspecified);
         let policy_ctx = PolicyContext {
             integrity_state: ctx.integrity_state.clone(),
             charter_version_digest: ctx.charter_version_digest.clone(),
             allowed_tools: ctx.allowed_tools.clone(),
             control_frame: control_frame.clone(),
+            tool_action_type: action_type,
         };
 
         let canonical_action = canonical_bytes(&action);
@@ -729,16 +800,16 @@ mod tests {
 
         let req_a = gate.build_execution_request(
             action_digest,
-            action.verb.clone(),
-            action.verb.clone(),
+            &tool_id,
+            &action_id,
             &decision,
             "sid",
             "step",
         );
         let req_b = gate.build_execution_request(
             action_digest,
-            action.verb.clone(),
-            action.verb,
+            &tool_id,
+            &action_id,
             &decision,
             "sid",
             "step",
@@ -757,10 +828,12 @@ mod tests {
             open_control_store(),
             receipt_store,
             aggregator,
+            Arc::new(trm::registry_fixture()),
         );
 
         let ctx = ok_ctx();
-        let result = gate.handle_action_spec("s", "step", base_action("mock.write"), ctx.clone());
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.write", "apply"), ctx.clone());
 
         match result {
             GateResult::Denied { decision } => {
@@ -775,6 +848,39 @@ mod tests {
     }
 
     #[test]
+    fn export_requires_receipt() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, _, _) = receipt_store_with_key();
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store,
+            aggregator,
+            Arc::new(trm::registry_fixture()),
+        );
+
+        let ctx = ok_ctx();
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.export", "render"), ctx);
+
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![RECEIPT_BLOCKED_REASON.to_string()]
+                );
+            }
+            other => panic!("expected receipt gate denial, got {other:?}"),
+        }
+        assert_eq!(
+            counting.count(),
+            0,
+            "export adapter must not run without receipt"
+        );
+    }
+
+    #[test]
     fn blocks_side_effect_with_invalid_receipt() {
         let counting = CountingAdapter::default();
         let (receipt_store, signer, key_id) = receipt_store_with_key();
@@ -784,15 +890,21 @@ mod tests {
             open_control_store(),
             receipt_store,
             aggregator,
+            Arc::new(trm::registry_fixture()),
         );
 
         let mut ctx = ok_ctx();
-        let action = base_action("mock.write");
+        let action = base_action("mock.write", "apply");
         let action_digest = compute_action_digest(&action);
         let decision = policy_decision_for(&gate, &action, &ctx, "s", "step");
-        let mut receipt =
-            signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
-        receipt.charter_version_digest = Some(sample_digest(99));
+        let mismatched_profile = sample_digest(200);
+        let receipt = signed_receipt_for(
+            action_digest,
+            decision.decision_digest,
+            &signer,
+            &key_id,
+            &mismatched_profile,
+        );
         ctx.pvgs_receipt = Some(receipt);
 
         let result = gate.handle_action_spec("s", "step", action, ctx);
@@ -822,13 +934,23 @@ mod tests {
             open_control_store(),
             receipt_store,
             aggregator,
+            Arc::new(trm::registry_fixture()),
         );
 
         let mut ctx = ok_ctx();
-        let action = base_action("mock.write");
+        let action = base_action("mock.write", "apply");
         let action_digest = compute_action_digest(&action);
         let decision = policy_decision_for(&gate, &action, &ctx, "s", "step");
-        let receipt = signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
+        let receipt = signed_receipt_for(
+            action_digest,
+            decision.decision_digest,
+            &signer,
+            &key_id,
+            &gate
+                .registry
+                .tool_profile_digest("mock.write", "apply")
+                .expect("fixture digest"),
+        );
         ctx.pvgs_receipt = Some(receipt);
 
         let result = gate.handle_action_spec("s", "step", action.clone(), ctx);
@@ -857,11 +979,12 @@ mod tests {
             store,
             Arc::new(PvgsKeyEpochStore::new()),
             Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+            Arc::new(trm::registry_fixture()),
         );
 
         let ctx = ok_ctx();
         let sim_result =
-            gate.handle_action_spec("s", "step1", base_action("mock.read"), ctx.clone());
+            gate.handle_action_spec("s", "step1", base_action("mock.read", "get"), ctx.clone());
         match sim_result {
             GateResult::SimulationRequired { decision } => {
                 assert_eq!(
@@ -872,7 +995,8 @@ mod tests {
             other => panic!("expected simulation-required, got {other:?}"),
         }
 
-        let export_result = gate.handle_action_spec("s", "step2", base_action("mock.export"), ctx);
+        let export_result =
+            gate.handle_action_spec("s", "step2", base_action("mock.export", "render"), ctx);
         match export_result {
             GateResult::Denied { decision } => {
                 assert_eq!(
@@ -891,13 +1015,51 @@ mod tests {
     }
 
     #[test]
+    fn unknown_tool_fails_closed_and_counts_policy_deny() {
+        let counting = CountingAdapter::default();
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
+        );
+
+        let mut ctx = ok_ctx();
+        ctx.allowed_tools.push("unknown.tool".to_string());
+        let result = gate.handle_action_spec("s", "step", base_action("unknown.tool", "do"), ctx);
+
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec!["RC.PB.DENY.TOOL_NOT_ALLOWED".to_string()]
+                );
+            }
+            other => panic!("expected deny for unknown tool, got {other:?}"),
+        }
+        assert_eq!(counting.count(), 0, "unknown tools must not run");
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let top_policy_codes = frames
+            .first()
+            .and_then(|f| f.policy_stats.as_ref())
+            .map(|p| p.top_reason_codes.clone())
+            .unwrap_or_default();
+        assert!(top_policy_codes
+            .iter()
+            .any(|rc| rc.code == "RC.PB.DENY.TOOL_NOT_ALLOWED"));
+    }
+
+    #[test]
     fn simulate_first_overlay_blocks_execution() {
         let counting = CountingAdapter::default();
         let gate = gate_with_adapter(Box::new(counting.clone()));
         let mut ctx = ok_ctx();
         ctx.control_frame = Some(control_frame_locked_sim());
 
-        let result = gate.handle_action_spec("s", "step", base_action("mock.read"), ctx);
+        let result = gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ctx);
         match result {
             GateResult::SimulationRequired { decision } => {
                 assert_eq!(
@@ -921,7 +1083,8 @@ mod tests {
         let mut ctx = ok_ctx();
         ctx.control_frame = Some(control_frame_locked_sim());
 
-        let result = gate.handle_action_spec("s", "step", base_action("mock.export"), ctx);
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.export", "render"), ctx);
         match result {
             GateResult::Denied { decision } => {
                 assert_eq!(
@@ -935,6 +1098,27 @@ mod tests {
     }
 
     #[test]
+    fn toolclass_mask_blocks_export() {
+        let counting = CountingAdapter::default();
+        let gate = gate_with_adapter(Box::new(counting.clone()));
+        let mut ctx = ok_ctx();
+        ctx.control_frame = Some(control_frame_export_masked());
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.export", "render"), ctx);
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec!["RC.CD.DLP.EXPORT_BLOCKED".to_string()]
+                );
+            }
+            other => panic!("expected deny, got {other:?}"),
+        }
+        assert_eq!(counting.count(), 0, "adapter blocked by toolclass mask");
+    }
+
+    #[test]
     fn receipt_stats_recorded_in_signal_frame() {
         let counting = CountingAdapter::default();
         let (receipt_store, signer, key_id) = receipt_store_with_key();
@@ -944,10 +1128,11 @@ mod tests {
             open_control_store(),
             receipt_store.clone(),
             aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
         );
 
         let ctx = ok_ctx();
-        let action = base_action("mock.write");
+        let action = base_action("mock.write", "apply");
 
         for idx in 0..2 {
             let _ =
@@ -956,8 +1141,16 @@ mod tests {
 
         let action_digest = compute_action_digest(&action);
         let decision = policy_decision_for(&gate, &action, &ctx, "s", "invalid");
-        let mut receipt =
-            signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
+        let mut receipt = signed_receipt_for(
+            action_digest,
+            decision.decision_digest,
+            &signer,
+            &key_id,
+            &gate
+                .registry
+                .tool_profile_digest("mock.write", "apply")
+                .expect("fixture digest"),
+        );
         receipt.policy_version_digest = Some(sample_digest(10));
         let mut ctx_with_receipt = ctx.clone();
         ctx_with_receipt.pvgs_receipt = Some(receipt);
@@ -993,14 +1186,24 @@ mod tests {
             open_control_store(),
             Arc::new(PvgsKeyEpochStore::new()),
             aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
         );
 
         let mut ctx = ok_ctx();
-        let action = base_action("mock.write");
+        let action = base_action("mock.write", "apply");
         let action_digest = compute_action_digest(&action);
         let decision = policy_decision_for(&gate, &action, &ctx, "s", "step");
         let (signer, key_id) = signing_material();
-        let receipt = signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
+        let receipt = signed_receipt_for(
+            action_digest,
+            decision.decision_digest,
+            &signer,
+            &key_id,
+            &gate
+                .registry
+                .tool_profile_digest("mock.write", "apply")
+                .expect("fixture digest"),
+        );
         ctx.pvgs_receipt = Some(receipt);
 
         let result = gate.handle_action_spec("s", "step", action, ctx);
@@ -1049,6 +1252,7 @@ mod tests {
             aggregator: aggregator.clone(),
             control_store: store,
             receipt_store: Arc::new(PvgsKeyEpochStore::new()),
+            registry: Arc::new(trm::registry_fixture()),
         };
 
         let mut ctx = ok_ctx();
@@ -1058,7 +1262,7 @@ mod tests {
             let _ = gate.handle_action_spec(
                 "s",
                 &format!("step{idx}"),
-                base_action("mock.export"),
+                base_action("mock.export", "render"),
                 ctx.clone(),
             );
         }

@@ -249,6 +249,56 @@ pub mod ucf {
             #[prost(string, repeated, tag = "2")]
             pub resources: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
         }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ToolActionType {
+            Unspecified = 0,
+            Read = 1,
+            Write = 2,
+            Execute = 3,
+            Export = 4,
+            Transform = 5,
+        }
+        impl ToolActionType {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ToolActionType::Unspecified => "TOOL_ACTION_TYPE_UNSPECIFIED",
+                    ToolActionType::Read => "TOOL_ACTION_TYPE_READ",
+                    ToolActionType::Write => "TOOL_ACTION_TYPE_WRITE",
+                    ToolActionType::Execute => "TOOL_ACTION_TYPE_EXECUTE",
+                    ToolActionType::Export => "TOOL_ACTION_TYPE_EXPORT",
+                    ToolActionType::Transform => "TOOL_ACTION_TYPE_TRANSFORM",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "TOOL_ACTION_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+                    "TOOL_ACTION_TYPE_READ" => Some(Self::Read),
+                    "TOOL_ACTION_TYPE_WRITE" => Some(Self::Write),
+                    "TOOL_ACTION_TYPE_EXECUTE" => Some(Self::Execute),
+                    "TOOL_ACTION_TYPE_EXPORT" => Some(Self::Export),
+                    "TOOL_ACTION_TYPE_TRANSFORM" => Some(Self::Transform),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ToolActionProfile {
+            #[prost(string, tag = "1")]
+            pub tool_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub action_id: ::prost::alloc::string::String,
+            #[prost(enumeration = "ToolActionType", tag = "3")]
+            pub action_type: i32,
+            #[prost(message, optional, tag = "4")]
+            pub profile_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "5")]
+            pub input_schema: ::core::option::Option<Ref>,
+            #[prost(message, optional, tag = "6")]
+            pub output_schema: ::core::option::Option<Ref>,
+        }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ActionProgram {
             #[prost(message, repeated, tag = "1")]

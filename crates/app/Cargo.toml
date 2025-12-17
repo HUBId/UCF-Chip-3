@@ -16,3 +16,4 @@ hex = "0.4"
 pvgs_verify = { path = "../pvgs_verify" }
 pvgs_client = { path = "../pvgs_client" }
 ed25519-dalek = "2"
+trm = { path = "../trm" }
