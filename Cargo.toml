@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/wire",
+    "crates/pbm",
+    "crates/cdm",
+    "crates/gem",
+    "crates/trm",
+    "crates/tom",
+    "crates/tam",
+    "crates/frames",
+    "crates/pvgs_client",
+    "crates/app",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.76"
+
+[workspace.dependencies]
+thiserror = "1"
+
+[profile.release]
+opt-level = 3
