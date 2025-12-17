@@ -20,6 +20,8 @@ rust-version = "1.76"
 
 [workspace.dependencies]
 thiserror = "1"
+blake3 = "1"
+ucf-protocol = { git = "https://github.com/HUBId/UCF-protocol.git", rev = "57934aaf6ae0c8e63f59decb5dc771309232fddd" }
 
 [profile.release]
 opt-level = 3

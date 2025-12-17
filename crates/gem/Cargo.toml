@@ -6,3 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 thiserror = { workspace = true }
+blake3 = { workspace = true }
+pbm = { path = "../pbm" }
+tam = { path = "../tam" }
+ucf-protocol = { workspace = true }
