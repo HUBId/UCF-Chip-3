@@ -400,13 +400,33 @@ pub mod ucf {
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct PvgsReceipt {
-            #[prost(enumeration = "ReceiptStatus", tag = "1")]
-            pub status: i32,
-            #[prost(message, optional, tag = "2")]
-            pub program_digest: ::core::option::Option<Digest32>,
+            #[prost(string, tag = "1")]
+            pub receipt_epoch: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub receipt_id: ::prost::alloc::string::String,
             #[prost(message, optional, tag = "3")]
-            pub proof_digest: ::core::option::Option<Digest32>,
-            #[prost(message, optional, tag = "4")]
+            pub receipt_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "ReceiptStatus", tag = "4")]
+            pub status: i32,
+            #[prost(message, optional, tag = "5")]
+            pub action_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "6")]
+            pub decision_digest: ::core::option::Option<Digest32>,
+            #[prost(string, tag = "7")]
+            pub grant_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "8")]
+            pub charter_version_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "9")]
+            pub policy_version_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "10")]
+            pub prev_record_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "11")]
+            pub profile_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "12")]
+            pub tool_profile_digest: ::core::option::Option<Digest32>,
+            #[prost(string, repeated, tag = "13")]
+            pub reject_reason_codes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            #[prost(message, optional, tag = "14")]
             pub signer: ::core::option::Option<Signature>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
@@ -551,6 +571,15 @@ pub mod ucf {
             pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ReceiptStats {
+            #[prost(uint64, tag = "1")]
+            pub receipt_missing_count: u64,
+            #[prost(uint64, tag = "2")]
+            pub receipt_invalid_count: u64,
+            #[prost(message, repeated, tag = "3")]
+            pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct HumanStats {
             #[prost(uint64, tag = "1")]
             pub approval_denied_count: u64,
@@ -579,6 +608,8 @@ pub mod ucf {
             pub signal_frame_digest: ::core::option::Option<Digest32>,
             #[prost(message, optional, tag = "10")]
             pub signature: ::core::option::Option<Signature>,
+            #[prost(message, optional, tag = "11")]
+            pub receipt_stats: ::core::option::Option<ReceiptStats>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ControlFrame {

@@ -10,6 +10,7 @@ members = [
     "crates/tam",
     "crates/frames",
     "crates/pvgs_client",
+    "crates/pvgs_verify",
     "crates/app",
     "crates/ucf-protocol",
 ]

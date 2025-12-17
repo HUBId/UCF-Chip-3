@@ -13,3 +13,4 @@ ucf-protocol = { workspace = true }
 frames = { path = "../frames" }
 control = { path = "../control" }
 hex = "0.4"
+pvgs_verify = { path = "../pvgs_verify" }
