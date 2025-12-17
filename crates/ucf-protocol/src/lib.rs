@@ -112,6 +112,7 @@ pub mod ucf {
             Allow = 1,
             Deny = 2,
             RequireApproval = 3,
+            RequireSimulationFirst = 4,
         }
         impl DecisionForm {
             pub fn as_str_name(&self) -> &'static str {
@@ -120,6 +121,9 @@ pub mod ucf {
                     DecisionForm::Allow => "DECISION_FORM_ALLOW",
                     DecisionForm::Deny => "DECISION_FORM_DENY",
                     DecisionForm::RequireApproval => "DECISION_FORM_REQUIRE_APPROVAL",
+                    DecisionForm::RequireSimulationFirst => {
+                        "DECISION_FORM_REQUIRE_SIMULATION_FIRST"
+                    }
                 }
             }
             pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
@@ -128,6 +132,7 @@ pub mod ucf {
                     "DECISION_FORM_ALLOW" => Some(Self::Allow),
                     "DECISION_FORM_DENY" => Some(Self::Deny),
                     "DECISION_FORM_REQUIRE_APPROVAL" => Some(Self::RequireApproval),
+                    "DECISION_FORM_REQUIRE_SIMULATION_FIRST" => Some(Self::RequireSimulationFirst),
                     _ => None,
                 }
             }
@@ -581,6 +586,64 @@ pub mod ucf {
             pub frame_id: ::prost::alloc::string::String,
             #[prost(string, tag = "2")]
             pub note: ::prost::alloc::string::String,
+            #[prost(enumeration = "ControlFrameProfile", tag = "3")]
+            pub active_profile: i32,
+            #[prost(message, optional, tag = "4")]
+            pub overlays: ::core::option::Option<ControlFrameOverlays>,
+            #[prost(message, optional, tag = "5")]
+            pub toolclass_mask: ::core::option::Option<ToolClassMask>,
+            #[prost(bool, tag = "6")]
+            pub deescalation_lock: bool,
+            #[prost(message, optional, tag = "7")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ControlFrameOverlays {
+            #[prost(bool, tag = "1")]
+            pub ovl_simulate_first: bool,
+            #[prost(bool, tag = "2")]
+            pub ovl_export_lock: bool,
+            #[prost(bool, tag = "3")]
+            pub ovl_novelty_lock: bool,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ToolClassMask {
+            #[prost(bool, tag = "1")]
+            pub enable_read: bool,
+            #[prost(bool, tag = "2")]
+            pub enable_transform: bool,
+            #[prost(bool, tag = "3")]
+            pub enable_export: bool,
+            #[prost(bool, tag = "4")]
+            pub enable_write: bool,
+            #[prost(bool, tag = "5")]
+            pub enable_execute: bool,
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ControlFrameProfile {
+            Unspecified = 0,
+            M0Baseline = 1,
+            M1Restricted = 2,
+        }
+        impl ControlFrameProfile {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ControlFrameProfile::Unspecified => "PROFILE_UNSPECIFIED",
+                    ControlFrameProfile::M0Baseline => "PROFILE_M0_BASELINE",
+                    ControlFrameProfile::M1Restricted => "PROFILE_M1_RESTRICTED",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "PROFILE_UNSPECIFIED" => Some(Self::Unspecified),
+                    "PROFILE_M0_BASELINE" => Some(Self::M0Baseline),
+                    "PROFILE_M1_RESTRICTED" => Some(Self::M1Restricted),
+                    _ => None,
+                }
+            }
         }
     }
 }

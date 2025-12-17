@@ -5,8 +5,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use control::ControlFrameStore;
 use frames::ShortWindowAggregator;
-use pbm::{DecisionForm, PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest};
+use pbm::{
+    DecisionForm, PolicyContext, PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest,
+};
 use tam::ToolAdapter;
 use ucf_protocol::{canonical_bytes, digest32, ucf};
 
@@ -14,6 +17,7 @@ pub struct Gate {
     pub policy: PolicyEngine,
     pub adapter: Box<dyn ToolAdapter>,
     pub aggregator: Arc<Mutex<ShortWindowAggregator>>,
+    pub control_store: Arc<Mutex<ControlFrameStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +25,7 @@ pub struct GateContext {
     pub integrity_state: String,
     pub charter_version_digest: String,
     pub allowed_tools: Vec<String>,
+    pub control_frame: Option<ucf::v1::ControlFrame>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,12 +84,19 @@ impl Gate {
             reason_codes: None,
         };
 
+        let control_frame = self.resolve_control_frame(&ctx);
+
+        let policy_ctx = PolicyContext {
+            integrity_state: ctx.integrity_state.clone(),
+            charter_version_digest: ctx.charter_version_digest.clone(),
+            allowed_tools: ctx.allowed_tools.clone(),
+            control_frame: control_frame.clone(),
+        };
+
         let decision = self.policy.decide_with_context(PolicyEvaluationRequest {
             decision_id: format!("{session_id}:{step_id}"),
             query,
-            integrity_state: ctx.integrity_state,
-            charter_version_digest: ctx.charter_version_digest,
-            allowed_tools: ctx.allowed_tools,
+            context: policy_ctx,
         });
 
         // TODO: budget accounting hook.
@@ -174,6 +186,19 @@ impl Gate {
             );
         }
     }
+
+    fn resolve_control_frame(&self, ctx: &GateContext) -> ucf::v1::ControlFrame {
+        if let Some(cf) = ctx.control_frame.clone() {
+            return cf;
+        }
+
+        let guard = self.control_store.lock().expect("control frame store lock");
+
+        guard
+            .current()
+            .cloned()
+            .unwrap_or_else(|| guard.strict_fallback())
+    }
 }
 
 #[cfg(test)]
@@ -211,10 +236,66 @@ mod tests {
     }
 
     fn gate_with_adapter(adapter: Box<dyn ToolAdapter>) -> Gate {
+        let store = Arc::new(Mutex::new(ControlFrameStore::default()));
+        {
+            let mut guard = store.lock().expect("control frame store lock");
+            guard
+                .update(control_frame_open())
+                .expect("valid control frame");
+        }
+
+        gate_with_adapter_and_store(adapter, store)
+    }
+
+    fn gate_with_adapter_and_store(
+        adapter: Box<dyn ToolAdapter>,
+        store: Arc<Mutex<ControlFrameStore>>,
+    ) -> Gate {
         Gate {
             policy: PolicyEngine::new(),
             adapter,
             aggregator: Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+            control_store: store,
+        }
+    }
+
+    fn control_frame_open() -> ucf::v1::ControlFrame {
+        ucf::v1::ControlFrame {
+            frame_id: "cf-open".to_string(),
+            note: String::new(),
+            active_profile: ucf::v1::ControlFrameProfile::M0Baseline.into(),
+            overlays: None,
+            toolclass_mask: Some(ucf::v1::ToolClassMask {
+                enable_read: true,
+                enable_transform: true,
+                enable_export: true,
+                enable_write: true,
+                enable_execute: true,
+            }),
+            deescalation_lock: false,
+            reason_codes: None,
+        }
+    }
+
+    fn control_frame_locked_sim() -> ucf::v1::ControlFrame {
+        ucf::v1::ControlFrame {
+            frame_id: "cf-locked".to_string(),
+            note: String::new(),
+            active_profile: ucf::v1::ControlFrameProfile::M1Restricted.into(),
+            overlays: Some(ucf::v1::ControlFrameOverlays {
+                ovl_simulate_first: true,
+                ovl_export_lock: true,
+                ovl_novelty_lock: false,
+            }),
+            toolclass_mask: Some(ucf::v1::ToolClassMask {
+                enable_read: true,
+                enable_transform: true,
+                enable_export: false,
+                enable_write: false,
+                enable_execute: false,
+            }),
+            deescalation_lock: true,
+            reason_codes: None,
         }
     }
 
@@ -230,6 +311,7 @@ mod tests {
             integrity_state: "OK".to_string(),
             charter_version_digest: "charter".to_string(),
             allowed_tools: vec!["mock.read".to_string(), "mock.export".to_string()],
+            control_frame: None,
         }
     }
 
@@ -281,6 +363,14 @@ mod tests {
         let action = base_action("mock.read");
         let ctx = ok_ctx();
 
+        let control_frame = gate.resolve_control_frame(&ctx);
+        let policy_ctx = PolicyContext {
+            integrity_state: ctx.integrity_state.clone(),
+            charter_version_digest: ctx.charter_version_digest.clone(),
+            allowed_tools: ctx.allowed_tools.clone(),
+            control_frame: control_frame.clone(),
+        };
+
         let canonical_action = canonical_bytes(&action);
         let action_digest = digest32(
             "UCF:HASH:ACTION_SPEC",
@@ -298,9 +388,7 @@ mod tests {
                 data_class: ucf::v1::DataClass::Unspecified.into(),
                 reason_codes: None,
             },
-            integrity_state: ctx.integrity_state,
-            charter_version_digest: ctx.charter_version_digest,
-            allowed_tools: ctx.allowed_tools,
+            context: policy_ctx,
         });
 
         let req_a = gate.build_execution_request(
@@ -321,5 +409,136 @@ mod tests {
         );
 
         assert_eq!(canonical_bytes(&req_a), canonical_bytes(&req_b));
+    }
+
+    #[test]
+    fn fallback_store_enforces_fail_closed() {
+        let counting = CountingAdapter::default();
+        let store = Arc::new(Mutex::new(ControlFrameStore::default()));
+        let gate = gate_with_adapter_and_store(Box::new(counting.clone()), store);
+
+        let ctx = ok_ctx();
+        let sim_result =
+            gate.handle_action_spec("s", "step1", base_action("mock.read"), ctx.clone());
+        match sim_result {
+            GateResult::SimulationRequired { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec!["RC.PB.REQ_SIMULATION.COMPLEX_CHAIN".to_string()]
+                );
+            }
+            other => panic!("expected simulation-required, got {other:?}"),
+        }
+
+        let export_result = gate.handle_action_spec("s", "step2", base_action("mock.export"), ctx);
+        match export_result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec!["RC.CD.DLP.EXPORT_BLOCKED".to_string()]
+                );
+            }
+            other => panic!("expected deny for export, got {other:?}"),
+        }
+
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run under fallback locks"
+        );
+    }
+
+    #[test]
+    fn simulate_first_overlay_blocks_execution() {
+        let counting = CountingAdapter::default();
+        let gate = gate_with_adapter(Box::new(counting.clone()));
+        let mut ctx = ok_ctx();
+        ctx.control_frame = Some(control_frame_locked_sim());
+
+        let result = gate.handle_action_spec("s", "step", base_action("mock.read"), ctx);
+        match result {
+            GateResult::SimulationRequired { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec!["RC.PB.REQ_SIMULATION.COMPLEX_CHAIN".to_string()]
+                );
+            }
+            other => panic!("expected simulation required, got {other:?}"),
+        }
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter blocked by simulate-first overlay"
+        );
+    }
+
+    #[test]
+    fn export_lock_blocks_execution() {
+        let counting = CountingAdapter::default();
+        let gate = gate_with_adapter(Box::new(counting.clone()));
+        let mut ctx = ok_ctx();
+        ctx.control_frame = Some(control_frame_locked_sim());
+
+        let result = gate.handle_action_spec("s", "step", base_action("mock.export"), ctx);
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec!["RC.CD.DLP.EXPORT_BLOCKED".to_string()]
+                );
+            }
+            other => panic!("expected deny, got {other:?}"),
+        }
+        assert_eq!(counting.count(), 0, "adapter blocked by export lock");
+    }
+
+    #[test]
+    fn blocked_exports_show_in_signal_frame() {
+        let counting = CountingAdapter::default();
+        let store = Arc::new(Mutex::new(ControlFrameStore::default()));
+        {
+            let mut guard = store.lock().expect("control store lock");
+            guard
+                .update(control_frame_locked_sim())
+                .expect("valid control frame");
+        }
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = Gate {
+            policy: PolicyEngine::new(),
+            adapter: Box::new(counting.clone()),
+            aggregator: aggregator.clone(),
+            control_store: store,
+        };
+
+        let mut ctx = ok_ctx();
+        ctx.control_frame = None;
+
+        for idx in 0..3 {
+            let _ = gate.handle_action_spec(
+                "s",
+                &format!("step{idx}"),
+                base_action("mock.export"),
+                ctx.clone(),
+            );
+        }
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run when exports blocked"
+        );
+        let top_codes: Vec<_> = frames
+            .first()
+            .and_then(|f| f.policy_stats.as_ref())
+            .map(|p| p.top_reason_codes.clone())
+            .unwrap_or_default();
+
+        assert!(
+            top_codes
+                .iter()
+                .any(|c| c.code == "RC.CD.DLP.EXPORT_BLOCKED"),
+            "export blocked reason should appear in signal frame"
+        );
     }
 }

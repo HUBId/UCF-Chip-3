@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/control",
     "crates/wire",
     "crates/pbm",
     "crates/cdm",
@@ -23,6 +24,7 @@ rust-version = "1.76"
 thiserror = "1"
 blake3 = "1"
 ucf-protocol = { path = "crates/ucf-protocol" }
+control = { path = "crates/control" }
 
 [profile.release]
 opt-level = 3

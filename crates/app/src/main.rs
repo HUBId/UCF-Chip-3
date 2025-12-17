@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use control::ControlFrameStore;
 use frames::ShortWindowAggregator;
 use gem::{Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
@@ -13,32 +14,58 @@ use ucf_protocol::ucf;
 
 fn main() {
     let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+    let control_store = Arc::new(Mutex::new(ControlFrameStore::new()));
     let gate = Gate {
         policy: PolicyEngine::new(),
         adapter: Box::new(MockAdapter),
         aggregator: aggregator.clone(),
+        control_store: control_store.clone(),
     };
 
-    let action = ucf::v1::ActionSpec {
-        verb: "mock.read".to_string(),
-        resources: vec!["demo".to_string()],
-    };
+    let control_frame_m0 = control_frame_m0();
+    let control_frame_m1 = control_frame_m1();
+
+    {
+        control_store
+            .lock()
+            .expect("control store lock")
+            .update(control_frame_m0.clone())
+            .expect("valid control frame");
+    }
 
     let ctx = GateContext {
         integrity_state: "OK".to_string(),
         charter_version_digest: "charter-mvp".to_string(),
         allowed_tools: vec!["mock.read".to_string(), "mock.export".to_string()],
+        control_frame: None,
     };
 
-    for i in 0..5 {
-        let result = gate.handle_action_spec(
-            "session-1",
-            &format!("step-{}", i + 1),
-            action.clone(),
-            ctx.clone(),
-        );
-        print_result(result);
+    let read_action = ucf::v1::ActionSpec {
+        verb: "mock.read".to_string(),
+        resources: vec!["demo".to_string()],
+    };
+
+    let export_action = ucf::v1::ActionSpec {
+        verb: "mock.export".to_string(),
+        resources: vec!["demo".to_string()],
+    };
+
+    let result = gate.handle_action_spec("session-1", "step-1", read_action.clone(), ctx.clone());
+    print_result(result);
+
+    {
+        control_store
+            .lock()
+            .expect("control store lock")
+            .update(control_frame_m1.clone())
+            .expect("valid control frame");
     }
+
+    let result = gate.handle_action_spec("session-1", "step-2", read_action.clone(), ctx.clone());
+    print_result(result);
+
+    let result = gate.handle_action_spec("session-1", "step-3", export_action, ctx.clone());
+    print_result(result);
 
     let frames = aggregator.lock().expect("aggregator lock").force_flush();
 
@@ -118,4 +145,48 @@ fn print_frame_summary(frame: &ucf::v1::SignalFrame) {
             .collect::<Vec<_>>(),
         digest_hex
     );
+}
+
+fn control_frame_m0() -> ucf::v1::ControlFrame {
+    ucf::v1::ControlFrame {
+        frame_id: "cf-m0".to_string(),
+        note: "open profile".to_string(),
+        active_profile: ucf::v1::ControlFrameProfile::M0Baseline.into(),
+        overlays: Some(ucf::v1::ControlFrameOverlays {
+            ovl_simulate_first: false,
+            ovl_export_lock: false,
+            ovl_novelty_lock: false,
+        }),
+        toolclass_mask: Some(ucf::v1::ToolClassMask {
+            enable_read: true,
+            enable_transform: true,
+            enable_export: true,
+            enable_write: true,
+            enable_execute: true,
+        }),
+        deescalation_lock: false,
+        reason_codes: None,
+    }
+}
+
+fn control_frame_m1() -> ucf::v1::ControlFrame {
+    ucf::v1::ControlFrame {
+        frame_id: "cf-m1".to_string(),
+        note: "restricted overlays".to_string(),
+        active_profile: ucf::v1::ControlFrameProfile::M1Restricted.into(),
+        overlays: Some(ucf::v1::ControlFrameOverlays {
+            ovl_simulate_first: true,
+            ovl_export_lock: true,
+            ovl_novelty_lock: false,
+        }),
+        toolclass_mask: Some(ucf::v1::ToolClassMask {
+            enable_read: true,
+            enable_transform: true,
+            enable_export: true,
+            enable_write: true,
+            enable_execute: true,
+        }),
+        deescalation_lock: true,
+        reason_codes: None,
+    }
 }
