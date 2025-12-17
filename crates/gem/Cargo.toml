@@ -11,3 +11,4 @@ pbm = { path = "../pbm" }
 tam = { path = "../tam" }
 ucf-protocol = { workspace = true }
 frames = { path = "../frames" }
+control = { path = "../control" }
