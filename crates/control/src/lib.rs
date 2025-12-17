@@ -3,7 +3,9 @@
 use std::convert::TryFrom;
 
 use thiserror::Error;
-use ucf_protocol::ucf;
+use ucf_protocol::{canonical_bytes, digest32, ucf};
+
+const CONTROL_FRAME_HASH_DOMAIN: &str = "UCF:HASH:CONTROL_FRAME";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ControlFrameError {
@@ -67,6 +69,11 @@ impl ControlFrameStore {
             }),
         }
     }
+}
+
+pub fn control_frame_digest(control_frame: &ucf::v1::ControlFrame) -> [u8; 32] {
+    let canonical = canonical_bytes(control_frame);
+    digest32(CONTROL_FRAME_HASH_DOMAIN, "ControlFrame", "v1", &canonical)
 }
 
 #[cfg(test)]
@@ -144,5 +151,15 @@ mod tests {
             ucf::v1::ControlFrameProfile::try_from(fallback.active_profile),
             Ok(ucf::v1::ControlFrameProfile::M1Restricted)
         );
+    }
+
+    #[test]
+    fn control_frame_digest_is_deterministic() {
+        let frame = base_frame();
+        let digest_a = control_frame_digest(&frame);
+        let digest_b = control_frame_digest(&frame);
+
+        assert_eq!(digest_a, digest_b);
+        assert_ne!(digest_a, [0u8; 32]);
     }
 }

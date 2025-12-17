@@ -1,0 +1,12 @@
+[package]
+name = "ucf-test-utils"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+blake3.workspace = true
+control = { path = "../control" }
+ed25519-dalek = "2"
+pvgs_verify = { path = "../pvgs_verify" }
+ucf-protocol = { path = "../ucf-protocol" }

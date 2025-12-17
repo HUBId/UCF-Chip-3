@@ -99,6 +99,7 @@ impl Gate {
         };
 
         let control_frame = self.resolve_control_frame(&ctx);
+        let control_frame_digest = control::control_frame_digest(&control_frame);
 
         let policy_ctx = PolicyContext {
             integrity_state: ctx.integrity_state.clone(),
@@ -138,6 +139,7 @@ impl Gate {
                         &action,
                         &decision,
                         &ctx,
+                        &control_frame_digest,
                     ) {
                         return result;
                     }
@@ -222,7 +224,7 @@ impl Gate {
         }
     }
 
-    #[allow(clippy::result_large_err)]
+    #[allow(clippy::result_large_err, clippy::too_many_arguments)]
     fn enforce_receipt_gate(
         &self,
         tap: &ucf::v1::ToolActionProfile,
@@ -231,6 +233,7 @@ impl Gate {
         action: &ucf::v1::ActionSpec,
         decision: &PolicyDecisionRecord,
         ctx: &GateContext,
+        control_frame_digest: &[u8; 32],
     ) -> Result<(), GateResult> {
         if !requires_receipt(action_type) {
             return Ok(());
@@ -279,6 +282,15 @@ impl Gate {
         }
 
         if !digest_matches(receipt.decision_digest.as_ref(), &decision.decision_digest) {
+            self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
+            return Err(self.receipt_gate_error(
+                decision,
+                &[RECEIPT_BLOCKED_REASON.to_string()],
+                action,
+            ));
+        }
+
+        if !digest_matches(receipt.profile_digest.as_ref(), control_frame_digest) {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
@@ -501,6 +513,16 @@ mod tests {
         }
     }
 
+    fn control_frame_digest(frame: &ucf::v1::ControlFrame) -> ucf::v1::Digest32 {
+        ucf::v1::Digest32 {
+            value: control::control_frame_digest(frame).to_vec(),
+        }
+    }
+
+    fn open_control_frame_digest() -> ucf::v1::Digest32 {
+        control_frame_digest(&control_frame_open())
+    }
+
     fn control_frame_locked_sim() -> ucf::v1::ControlFrame {
         ucf::v1::ControlFrame {
             frame_id: "cf-locked".to_string(),
@@ -672,6 +694,7 @@ mod tests {
         decision_digest: [u8; 32],
         signer: &SigningKey,
         key_id: &str,
+        profile_digest: &ucf::v1::Digest32,
         tool_profile_digest: &ucf::v1::Digest32,
     ) -> ucf::v1::PvgsReceipt {
         let mut receipt = ucf::v1::PvgsReceipt {
@@ -685,7 +708,7 @@ mod tests {
             charter_version_digest: Some(sample_digest(3)),
             policy_version_digest: Some(sample_digest(4)),
             prev_record_digest: Some(sample_digest(5)),
-            profile_digest: Some(sample_digest(6)),
+            profile_digest: Some(profile_digest.clone()),
             tool_profile_digest: Some(tool_profile_digest.clone()),
             reject_reason_codes: Vec::new(),
             signer: None,
@@ -903,6 +926,7 @@ mod tests {
             decision.decision_digest,
             &signer,
             &key_id,
+            &open_control_frame_digest(),
             &mismatched_profile,
         );
         ctx.pvgs_receipt = Some(receipt);
@@ -946,6 +970,7 @@ mod tests {
             decision.decision_digest,
             &signer,
             &key_id,
+            &open_control_frame_digest(),
             &gate
                 .registry
                 .tool_profile_digest("mock.write", "apply")
@@ -1146,6 +1171,7 @@ mod tests {
             decision.decision_digest,
             &signer,
             &key_id,
+            &open_control_frame_digest(),
             &gate
                 .registry
                 .tool_profile_digest("mock.write", "apply")
@@ -1199,6 +1225,7 @@ mod tests {
             decision.decision_digest,
             &signer,
             &key_id,
+            &open_control_frame_digest(),
             &gate
                 .registry
                 .tool_profile_digest("mock.write", "apply")

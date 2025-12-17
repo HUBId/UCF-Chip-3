@@ -248,6 +248,7 @@ dependencies = [
  "thiserror",
  "trm",
  "ucf-protocol",
+ "ucf-test-utils",
 ]
 
 [[package]]
@@ -567,6 +568,17 @@ dependencies = [
  "blake3",
  "hex",
  "prost",
+]
+
+[[package]]
+name = "ucf-test-utils"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "control",
+ "ed25519-dalek",
+ "pvgs_verify",
+ "ucf-protocol",
 ]
 
 [[package]]
