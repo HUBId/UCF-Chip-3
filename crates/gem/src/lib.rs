@@ -384,7 +384,9 @@ mod tests {
 
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use pvgs_verify::pvgs_receipt_signing_preimage;
+    use pvgs_verify::{
+        pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
+    };
     use rand::rngs::StdRng;
     use rand::{RngCore, SeedableRng};
     use tam::MockAdapter;
@@ -536,10 +538,41 @@ mod tests {
         (sk, "pvgs-test-key".to_string())
     }
 
+    fn signed_key_epoch(
+        signing_key: &SigningKey,
+        key_id: &str,
+        epoch_id: u64,
+    ) -> ucf::v1::PvgsKeyEpoch {
+        let mut key_epoch = ucf::v1::PvgsKeyEpoch {
+            epoch_id,
+            attestation_key_id: key_id.to_string(),
+            attestation_public_key: signing_key.verifying_key().to_bytes().to_vec(),
+            announcement_digest: None,
+            signature: None,
+            timestamp_ms: 1_700_000_000_000,
+            vrf_key_id: None,
+        };
+
+        let digest = pvgs_key_epoch_digest(&key_epoch);
+        key_epoch.announcement_digest = Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        });
+
+        let sig = signing_key.sign(&pvgs_key_epoch_signing_preimage(&key_epoch));
+        key_epoch.signature = Some(ucf::v1::Signature {
+            algorithm: "ed25519".to_string(),
+            signer: key_id.as_bytes().to_vec(),
+            signature: sig.to_bytes().to_vec(),
+        });
+
+        key_epoch
+    }
+
     fn receipt_store_with_key() -> (Arc<PvgsKeyEpochStore>, SigningKey, String) {
         let (sk, key_id) = signing_material();
         let mut store = PvgsKeyEpochStore::new();
-        store.insert_key(key_id.clone(), sk.verifying_key().to_bytes());
+        let key_epoch = signed_key_epoch(&sk, &key_id, 1);
+        store.ingest_key_epoch(key_epoch).expect("valid key epoch");
         (Arc::new(store), sk, key_id)
     }
 
