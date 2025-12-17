@@ -30,6 +30,7 @@ pub struct PolicyContext {
     pub charter_version_digest: String,
     pub control_frame: ucf::v1::ControlFrame,
     pub allowed_tools: Vec<String>,
+    pub tool_action_type: ucf::v1::ToolActionType,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ impl PolicyEngine {
             charter_version_digest,
             control_frame,
             mut allowed_tools,
+            tool_action_type,
         } = context;
 
         allowed_tools.sort();
@@ -84,7 +86,7 @@ impl PolicyEngine {
             verb: String::new(),
             resources: Vec::new(),
         });
-        let tool_id = action.verb.clone();
+        let (tool_id, _action_id) = split_tool_and_action(&action.verb);
 
         let overlays = control_frame.overlays.clone().unwrap_or_default();
         let toolclass_mask = control_frame.toolclass_mask.clone().unwrap_or_default();
@@ -101,7 +103,7 @@ impl PolicyEngine {
                 ucf::v1::DecisionForm::Deny,
                 vec!["RC.PB.DENY.CHARTER_SCOPE".to_string()],
             )
-        } else if overlays.ovl_export_lock && is_export_tool(&tool_id) {
+        } else if overlays.ovl_export_lock && is_export_action(tool_action_type) {
             (
                 DecisionForm::Deny,
                 ucf::v1::DecisionForm::Deny,
@@ -125,23 +127,11 @@ impl PolicyEngine {
                 ucf::v1::DecisionForm::RequireSimulationFirst,
                 vec!["RC.PB.REQ_SIMULATION.COMPLEX_CHAIN".to_string()],
             )
-        } else if !toolclass_mask.enable_execute && is_execute_action(&tool_id) {
+        } else if let Some(reason) = toolclass_denied_reason(tool_action_type, &toolclass_mask) {
             (
                 DecisionForm::Deny,
                 ucf::v1::DecisionForm::Deny,
-                vec!["RC.PB.DENY.TOOL_NOT_ALLOWED".to_string()],
-            )
-        } else if !toolclass_mask.enable_export && is_export_tool(&tool_id) {
-            (
-                DecisionForm::Deny,
-                ucf::v1::DecisionForm::Deny,
-                vec!["RC.CD.DLP.EXPORT_BLOCKED".to_string()],
-            )
-        } else if tool_id == "mock.export" {
-            (
-                DecisionForm::RequireApproval,
-                ucf::v1::DecisionForm::RequireApproval,
-                vec!["RC.PB.REQ_APPROVAL.EXPORT_SENSITIVE".to_string()],
+                vec![reason],
             )
         } else {
             (
@@ -191,16 +181,36 @@ pub fn compute_decision_digest(
     *hasher.finalize().as_bytes()
 }
 
-fn is_export_tool(tool_id: &str) -> bool {
-    tool_id == "mock.export" || tool_id.starts_with("mock.export")
-}
-
-fn is_execute_action(tool_id: &str) -> bool {
-    tool_id == "execute" || tool_id.starts_with("mock.execute")
+fn is_export_action(action_type: ucf::v1::ToolActionType) -> bool {
+    matches!(action_type, ucf::v1::ToolActionType::Export)
 }
 
 fn is_new_source_action(tool_id: &str) -> bool {
     tool_id == "mock.newsource"
+}
+
+fn toolclass_denied_reason(
+    action_type: ucf::v1::ToolActionType,
+    mask: &ucf::v1::ToolClassMask,
+) -> Option<String> {
+    match action_type {
+        ucf::v1::ToolActionType::Execute if !mask.enable_execute => {
+            Some("RC.PB.DENY.TOOL_NOT_ALLOWED".to_string())
+        }
+        ucf::v1::ToolActionType::Export if !mask.enable_export => {
+            Some("RC.CD.DLP.EXPORT_BLOCKED".to_string())
+        }
+        ucf::v1::ToolActionType::Write if !mask.enable_write => {
+            Some("RC.PB.DENY.TOOL_NOT_ALLOWED".to_string())
+        }
+        ucf::v1::ToolActionType::Read if !mask.enable_read => {
+            Some("RC.PB.DENY.TOOL_NOT_ALLOWED".to_string())
+        }
+        ucf::v1::ToolActionType::Transform if !mask.enable_transform => {
+            Some("RC.PB.DENY.TOOL_NOT_ALLOWED".to_string())
+        }
+        _ => None,
+    }
 }
 
 fn form_label(form: &DecisionForm) -> &'static str {
@@ -211,6 +221,12 @@ fn form_label(form: &DecisionForm) -> &'static str {
         DecisionForm::RequireSimulationFirst => "REQUIRE_SIMULATION_FIRST",
         DecisionForm::AllowWithConstraints => "ALLOW_WITH_CONSTRAINTS",
     }
+}
+
+fn split_tool_and_action(verb: &str) -> (String, String) {
+    verb.split_once('/')
+        .map(|(tool, action)| (tool.to_string(), action.to_string()))
+        .unwrap_or_else(|| (verb.to_string(), verb.to_string()))
 }
 
 #[cfg(test)]
@@ -250,6 +266,14 @@ mod tests {
     }
 
     fn request(tool_id: &str) -> PolicyEvaluationRequest {
+        let (tool_name, _action_id) = split_tool_and_action(tool_id);
+        let tool_action_type = match tool_name.as_str() {
+            "mock.read" => ucf::v1::ToolActionType::Read,
+            "mock.export" => ucf::v1::ToolActionType::Export,
+            "mock.write" => ucf::v1::ToolActionType::Write,
+            _ => ucf::v1::ToolActionType::Unspecified,
+        };
+
         PolicyEvaluationRequest {
             decision_id: "dec1".to_string(),
             query: base_query(tool_id),
@@ -258,6 +282,7 @@ mod tests {
                 charter_version_digest: "charter".to_string(),
                 allowed_tools: vec!["mock.read".to_string(), "mock.export".to_string()],
                 control_frame: control_frame_base(),
+                tool_action_type,
             },
         }
     }
@@ -276,14 +301,14 @@ mod tests {
     }
 
     #[test]
-    fn require_approval_for_mock_export() {
+    fn export_allows_with_constraints() {
         let engine = PolicyEngine::new();
-        let req = request("mock.export");
+        let req = request("mock.export/render");
         let record = engine.decide_with_context(req);
-        assert_eq!(record.form, DecisionForm::RequireApproval);
+        assert_eq!(record.form, DecisionForm::AllowWithConstraints);
         assert_eq!(
             record.decision.reason_codes.unwrap().codes,
-            vec!["RC.PB.REQ_APPROVAL.EXPORT_SENSITIVE".to_string()]
+            vec!["RC.PB.CONSTRAINT.SCOPE_SHRINK".to_string()]
         );
     }
 
@@ -317,7 +342,7 @@ mod tests {
     #[test]
     fn export_lock_denies_export() {
         let engine = PolicyEngine::new();
-        let mut req = request("mock.export");
+        let mut req = request("mock.export/render");
         req.context.control_frame.overlays = Some(ucf::v1::ControlFrameOverlays {
             ovl_simulate_first: false,
             ovl_export_lock: true,

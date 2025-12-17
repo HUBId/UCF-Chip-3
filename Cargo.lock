@@ -22,6 +22,7 @@ dependencies = [
  "pvgs_verify",
  "tam",
  "thiserror",
+ "trm",
  "ucf-protocol",
 ]
 
@@ -245,6 +246,7 @@ dependencies = [
  "rand",
  "tam",
  "thiserror",
+ "trm",
  "ucf-protocol",
 ]
 
@@ -549,6 +551,7 @@ name = "trm"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "ucf-protocol",
 ]
 
 [[package]]

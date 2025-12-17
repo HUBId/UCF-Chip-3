@@ -16,6 +16,7 @@ use pvgs_verify::{
     verify_pvgs_receipt, PvgsKeyEpochStore,
 };
 use tam::MockAdapter;
+use trm::registry_fixture;
 use ucf_protocol::ucf;
 
 fn main() {
@@ -28,6 +29,7 @@ fn main() {
         aggregator: aggregator.clone(),
         control_store: control_store.clone(),
         receipt_store: receipt_store.clone(),
+        registry: Arc::new(registry_fixture()),
     };
 
     let control_frame_m0 = control_frame_m0();
@@ -51,12 +53,12 @@ fn main() {
     };
 
     let read_action = ucf::v1::ActionSpec {
-        verb: "mock.read".to_string(),
+        verb: "mock.read/get".to_string(),
         resources: vec!["demo".to_string()],
     };
 
     let export_action = ucf::v1::ActionSpec {
-        verb: "mock.export".to_string(),
+        verb: "mock.export/render".to_string(),
         resources: vec!["demo".to_string()],
     };
 
