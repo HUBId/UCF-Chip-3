@@ -1,12 +1,19 @@
 #![forbid(unsafe_code)]
 
+use std::{
+    convert::TryFrom,
+    sync::{Arc, Mutex},
+};
+
+use frames::ShortWindowAggregator;
 use pbm::{DecisionForm, PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest};
-use tam::{ExecutionRequestLike, OutcomeLike, OutcomeStatus, ToolAdapter};
+use tam::ToolAdapter;
 use ucf_protocol::{canonical_bytes, digest32, ucf};
 
 pub struct Gate {
     pub policy: PolicyEngine,
     pub adapter: Box<dyn ToolAdapter>,
+    pub aggregator: Arc<Mutex<ShortWindowAggregator>>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,33 +40,8 @@ pub enum GateResult {
     },
     Executed {
         decision: PolicyDecisionRecord,
-        outcome: OutcomePacket,
+        outcome: ucf::v1::OutcomePacket,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutcomePacket {
-    pub status: OutcomePacketStatus,
-    pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutcomePacketStatus {
-    Success,
-    Failure,
-}
-
-impl From<OutcomeLike> for OutcomePacket {
-    fn from(value: OutcomeLike) -> Self {
-        let status = match value.status {
-            OutcomeStatus::Success => OutcomePacketStatus::Success,
-            OutcomeStatus::Failure => OutcomePacketStatus::Failure,
-        };
-        Self {
-            status,
-            payload: value.payload,
-        }
-    }
 }
 
 impl Gate {
@@ -109,21 +91,87 @@ impl Gate {
         // TODO: PVGS receipts hook.
         // TODO: DLP enforcement hook.
 
+        self.note_policy_decision(&decision);
+
         match decision.form {
             DecisionForm::Deny => GateResult::Denied { decision },
             DecisionForm::RequireApproval => GateResult::ApprovalRequired { decision },
             DecisionForm::RequireSimulationFirst => GateResult::SimulationRequired { decision },
             DecisionForm::Allow | DecisionForm::AllowWithConstraints => {
-                let outcome = self.adapter.execute(&ExecutionRequestLike {
+                let execution_request = self.build_execution_request(
                     action_digest,
                     tool_id,
-                    payload: Vec::new(),
-                });
-                GateResult::Executed {
-                    decision,
-                    outcome: outcome.into(),
-                }
+                    action.verb,
+                    &decision,
+                    session_id,
+                    step_id,
+                );
+
+                let outcome = self.adapter.execute(execution_request.clone());
+                self.note_execution_outcome(&outcome);
+
+                GateResult::Executed { decision, outcome }
             }
+        }
+    }
+
+    fn build_execution_request(
+        &self,
+        action_digest: [u8; 32],
+        tool_id: String,
+        action_name: String,
+        decision: &PolicyDecisionRecord,
+        session_id: &str,
+        step_id: &str,
+    ) -> ucf::v1::ExecutionRequest {
+        let request_id = format!("{session_id}:{step_id}");
+        let constraints = decision
+            .decision
+            .constraints
+            .as_ref()
+            .map(|c| c.constraints_added.clone())
+            .unwrap_or_default();
+
+        let mut constraints_sorted = constraints;
+        constraints_sorted.sort();
+
+        ucf::v1::ExecutionRequest {
+            request_id,
+            action_digest: action_digest.to_vec(),
+            tool_id,
+            action_name,
+            constraints: constraints_sorted,
+            data_class_context: ucf::v1::DataClass::Unspecified.into(),
+            payload: Vec::new(),
+        }
+    }
+
+    fn note_policy_decision(&self, decision: &PolicyDecisionRecord) {
+        let reason_codes = decision
+            .decision
+            .reason_codes
+            .as_ref()
+            .map(|rc| rc.codes.clone())
+            .unwrap_or_default();
+
+        if let Ok(mut agg) = self.aggregator.lock() {
+            agg.on_policy_decision(decision.form.clone(), &reason_codes);
+        }
+    }
+
+    fn note_execution_outcome(&self, outcome: &ucf::v1::OutcomePacket) {
+        let reason_codes = outcome
+            .reason_codes
+            .as_ref()
+            .map(|rc| rc.codes.clone())
+            .unwrap_or_default();
+
+        if let Ok(mut agg) = self.aggregator.lock() {
+            agg.on_execution_outcome(
+                ucf::v1::OutcomeStatus::try_from(outcome.status)
+                    .unwrap_or(ucf::v1::OutcomeStatus::Unspecified),
+                &reason_codes,
+            );
         }
     }
 }
@@ -133,7 +181,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use tam::{MockAdapter, OutcomeStatus};
+    use tam::MockAdapter;
 
     #[derive(Clone, Default)]
     struct CountingAdapter {
@@ -147,12 +195,17 @@ mod tests {
     }
 
     impl ToolAdapter for CountingAdapter {
-        fn execute(&self, _req: &ExecutionRequestLike) -> OutcomeLike {
+        fn execute(&self, req: ucf::v1::ExecutionRequest) -> ucf::v1::OutcomePacket {
             let mut guard = self.calls.lock().expect("count lock");
             *guard += 1;
-            OutcomeLike {
-                status: OutcomeStatus::Success,
+            ucf::v1::OutcomePacket {
+                outcome_id: format!("{}:outcome", req.request_id),
+                request_id: req.request_id,
+                status: ucf::v1::OutcomeStatus::Success.into(),
                 payload: Vec::new(),
+                payload_digest: None,
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
             }
         }
     }
@@ -161,6 +214,7 @@ mod tests {
         Gate {
             policy: PolicyEngine::new(),
             adapter,
+            aggregator: Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
         }
     }
 
@@ -211,10 +265,61 @@ mod tests {
                     vec!["RC.PB.CONSTRAINT.SCOPE_SHRINK".to_string()],
                     "expected constraint reason code"
                 );
-                assert_eq!(outcome.status, OutcomePacketStatus::Success);
+                assert_eq!(
+                    ucf::v1::OutcomeStatus::try_from(outcome.status),
+                    Ok(ucf::v1::OutcomeStatus::Success)
+                );
                 assert_eq!(outcome.payload, b"ok:read".to_vec());
             }
             other => panic!("expected execution result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn execution_request_is_deterministic() {
+        let gate = gate_with_adapter(Box::new(MockAdapter));
+        let action = base_action("mock.read");
+        let ctx = ok_ctx();
+
+        let canonical_action = canonical_bytes(&action);
+        let action_digest = digest32(
+            "UCF:HASH:ACTION_SPEC",
+            "ActionSpec",
+            "v1",
+            &canonical_action,
+        );
+        let decision = gate.policy.decide_with_context(PolicyEvaluationRequest {
+            decision_id: "sid:step".to_string(),
+            query: ucf::v1::PolicyQuery {
+                principal: "chip3".to_string(),
+                action: Some(action.clone()),
+                channel: ucf::v1::Channel::Unspecified.into(),
+                risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
+            },
+            integrity_state: ctx.integrity_state,
+            charter_version_digest: ctx.charter_version_digest,
+            allowed_tools: ctx.allowed_tools,
+        });
+
+        let req_a = gate.build_execution_request(
+            action_digest,
+            action.verb.clone(),
+            action.verb.clone(),
+            &decision,
+            "sid",
+            "step",
+        );
+        let req_b = gate.build_execution_request(
+            action_digest,
+            action.verb.clone(),
+            action.verb,
+            &decision,
+            "sid",
+            "step",
+        );
+
+        assert_eq!(canonical_bytes(&req_a), canonical_bytes(&req_b));
     }
 }
