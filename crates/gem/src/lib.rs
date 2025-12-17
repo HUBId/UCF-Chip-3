@@ -6,18 +6,23 @@ use std::{
 };
 
 use control::ControlFrameStore;
-use frames::ShortWindowAggregator;
+use frames::{ReceiptIssue, ShortWindowAggregator};
 use pbm::{
-    DecisionForm, PolicyContext, PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest,
+    compute_decision_digest, DecisionForm, PolicyContext, PolicyDecisionRecord, PolicyEngine,
+    PolicyEvaluationRequest,
 };
+use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore, VerifyError};
 use tam::ToolAdapter;
 use ucf_protocol::{canonical_bytes, digest32, ucf};
+
+const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
 
 pub struct Gate {
     pub policy: PolicyEngine,
     pub adapter: Box<dyn ToolAdapter>,
     pub aggregator: Arc<Mutex<ShortWindowAggregator>>,
     pub control_store: Arc<Mutex<ControlFrameStore>>,
+    pub receipt_store: Arc<PvgsKeyEpochStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +31,8 @@ pub struct GateContext {
     pub charter_version_digest: String,
     pub allowed_tools: Vec<String>,
     pub control_frame: Option<ucf::v1::ControlFrame>,
+    pub pvgs_receipt: Option<ucf::v1::PvgsReceipt>,
+    pub approval_grant_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +54,28 @@ pub enum GateResult {
         decision: PolicyDecisionRecord,
         outcome: ucf::v1::OutcomePacket,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolActionClass {
+    Read,
+    Write,
+    Execute,
+    Export,
+    Persist,
+    Other,
+}
+
+impl ToolActionClass {
+    fn requires_receipt(&self) -> bool {
+        matches!(
+            self,
+            ToolActionClass::Write
+                | ToolActionClass::Execute
+                | ToolActionClass::Export
+                | ToolActionClass::Persist
+        )
+    }
 }
 
 impl Gate {
@@ -72,6 +101,7 @@ impl Gate {
         }
 
         let tool_id = action.verb.clone();
+        let action_class = classify_tool_action(&tool_id);
         let canonical = canonical_bytes(&action);
         let action_digest = digest32("UCF:HASH:ACTION_SPEC", "ActionSpec", "v1", &canonical);
 
@@ -110,6 +140,12 @@ impl Gate {
             DecisionForm::RequireApproval => GateResult::ApprovalRequired { decision },
             DecisionForm::RequireSimulationFirst => GateResult::SimulationRequired { decision },
             DecisionForm::Allow | DecisionForm::AllowWithConstraints => {
+                if let Err(result) =
+                    self.enforce_receipt_gate(action_class, action_digest, &action, &decision, &ctx)
+                {
+                    return result;
+                }
+
                 let execution_request = self.build_execution_request(
                     action_digest,
                     tool_id,
@@ -187,6 +223,116 @@ impl Gate {
         }
     }
 
+    #[allow(clippy::result_large_err)]
+    fn enforce_receipt_gate(
+        &self,
+        action_class: ToolActionClass,
+        action_digest: [u8; 32],
+        action: &ucf::v1::ActionSpec,
+        decision: &PolicyDecisionRecord,
+        ctx: &GateContext,
+    ) -> Result<(), GateResult> {
+        if !action_class.requires_receipt() {
+            return Ok(());
+        }
+
+        let receipt = match ctx.pvgs_receipt.clone() {
+            Some(r) => r,
+            None => {
+                self.note_receipt_issue(ReceiptIssue::Missing);
+                return Err(GateResult::Denied {
+                    decision: self
+                        .receipt_blocked_decision(decision, &[RECEIPT_BLOCKED_REASON.to_string()]),
+                });
+            }
+        };
+
+        if let Err(err) = verify_pvgs_receipt(&receipt, &self.receipt_store) {
+            self.note_receipt_issue(ReceiptIssue::Invalid);
+            return Err(self.receipt_gate_error(decision, err, action));
+        }
+
+        if ucf::v1::ReceiptStatus::try_from(receipt.status) != Ok(ucf::v1::ReceiptStatus::Accepted)
+        {
+            self.note_receipt_issue(ReceiptIssue::Invalid);
+            return Err(self.receipt_gate_error(
+                decision,
+                VerifyError::Schema("receipt must be accepted".to_string()),
+                action,
+            ));
+        }
+
+        if !digest_matches(receipt.action_digest.as_ref(), &action_digest) {
+            self.note_receipt_issue(ReceiptIssue::Invalid);
+            return Err(self.receipt_gate_error(
+                decision,
+                VerifyError::Schema("action digest mismatch".to_string()),
+                action,
+            ));
+        }
+
+        if !digest_matches(receipt.decision_digest.as_ref(), &decision.decision_digest) {
+            self.note_receipt_issue(ReceiptIssue::Invalid);
+            return Err(self.receipt_gate_error(
+                decision,
+                VerifyError::Schema("decision digest mismatch".to_string()),
+                action,
+            ));
+        }
+
+        if let Some(expected_grant) = ctx.approval_grant_id.as_deref() {
+            if receipt.grant_id != expected_grant {
+                self.note_receipt_issue(ReceiptIssue::Invalid);
+                return Err(self.receipt_gate_error(
+                    decision,
+                    VerifyError::Schema("grant binding mismatch".to_string()),
+                    action,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn note_receipt_issue(&self, issue: ReceiptIssue) {
+        if let Ok(mut agg) = self.aggregator.lock() {
+            agg.on_receipt_issue(issue, &[RECEIPT_BLOCKED_REASON.to_string()]);
+        }
+    }
+
+    fn receipt_blocked_decision(
+        &self,
+        prior: &PolicyDecisionRecord,
+        reason_codes: &[String],
+    ) -> PolicyDecisionRecord {
+        let mut rc = reason_codes.to_vec();
+        rc.sort();
+        let digest = compute_decision_digest(&prior.decision_id, &DecisionForm::Deny, &rc);
+
+        PolicyDecisionRecord {
+            form: DecisionForm::Deny,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Deny.into(),
+                reason_codes: Some(ucf::v1::ReasonCodes { codes: rc.clone() }),
+                constraints: None,
+            },
+            policy_version_digest: prior.policy_version_digest.clone(),
+            decision_id: prior.decision_id.clone(),
+            decision_digest: digest,
+        }
+    }
+
+    fn receipt_gate_error(
+        &self,
+        prior: &PolicyDecisionRecord,
+        _error: VerifyError,
+        _action: &ucf::v1::ActionSpec,
+    ) -> GateResult {
+        GateResult::Denied {
+            decision: self.receipt_blocked_decision(prior, &[RECEIPT_BLOCKED_REASON.to_string()]),
+        }
+    }
+
     fn resolve_control_frame(&self, ctx: &GateContext) -> ucf::v1::ControlFrame {
         if let Some(cf) = ctx.control_frame.clone() {
             return cf;
@@ -201,11 +347,35 @@ impl Gate {
     }
 }
 
+fn classify_tool_action(tool_id: &str) -> ToolActionClass {
+    if tool_id.starts_with("mock.write") {
+        ToolActionClass::Write
+    } else if tool_id.starts_with("mock.exec") {
+        ToolActionClass::Execute
+    } else if tool_id.starts_with("mock.export") {
+        ToolActionClass::Export
+    } else if tool_id.starts_with("mock.persist") {
+        ToolActionClass::Persist
+    } else if tool_id.starts_with("mock.read") {
+        ToolActionClass::Read
+    } else {
+        ToolActionClass::Other
+    }
+}
+
+fn digest_matches(opt: Option<&ucf::v1::Digest32>, expected: &[u8; 32]) -> bool {
+    opt.map(|d| d.value.as_slice() == expected).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use pvgs_verify::pvgs_receipt_signing_preimage;
+    use rand::rngs::StdRng;
+    use rand::{RngCore, SeedableRng};
     use tam::MockAdapter;
 
     #[derive(Clone, Default)]
@@ -244,18 +414,26 @@ mod tests {
                 .expect("valid control frame");
         }
 
-        gate_with_adapter_and_store(adapter, store)
+        gate_with_components(
+            adapter,
+            store,
+            Arc::new(PvgsKeyEpochStore::new()),
+            Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+        )
     }
 
-    fn gate_with_adapter_and_store(
+    fn gate_with_components(
         adapter: Box<dyn ToolAdapter>,
         store: Arc<Mutex<ControlFrameStore>>,
+        receipt_store: Arc<PvgsKeyEpochStore>,
+        aggregator: Arc<Mutex<ShortWindowAggregator>>,
     ) -> Gate {
         Gate {
             policy: PolicyEngine::new(),
             adapter,
-            aggregator: Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+            aggregator,
             control_store: store,
+            receipt_store,
         }
     }
 
@@ -310,9 +488,123 @@ mod tests {
         GateContext {
             integrity_state: "OK".to_string(),
             charter_version_digest: "charter".to_string(),
-            allowed_tools: vec!["mock.read".to_string(), "mock.export".to_string()],
+            allowed_tools: vec![
+                "mock.read".to_string(),
+                "mock.export".to_string(),
+                "mock.write".to_string(),
+                "mock.exec".to_string(),
+                "mock.persist".to_string(),
+            ],
             control_frame: None,
+            pvgs_receipt: None,
+            approval_grant_id: None,
         }
+    }
+
+    fn open_control_store() -> Arc<Mutex<ControlFrameStore>> {
+        let store = Arc::new(Mutex::new(ControlFrameStore::default()));
+        {
+            let mut guard = store.lock().expect("control frame store lock");
+            guard
+                .update(control_frame_open())
+                .expect("valid control frame");
+        }
+        store
+    }
+
+    fn sample_digest(byte: u8) -> ucf::v1::Digest32 {
+        ucf::v1::Digest32 {
+            value: vec![byte; 32],
+        }
+    }
+
+    fn signing_material() -> (SigningKey, String) {
+        let mut seed = [0u8; 32];
+        StdRng::seed_from_u64(7).fill_bytes(&mut seed);
+        let sk = SigningKey::from_bytes(&seed);
+        (sk, "pvgs-test-key".to_string())
+    }
+
+    fn receipt_store_with_key() -> (Arc<PvgsKeyEpochStore>, SigningKey, String) {
+        let (sk, key_id) = signing_material();
+        let mut store = PvgsKeyEpochStore::new();
+        store.insert_key(key_id.clone(), sk.verifying_key().to_bytes());
+        (Arc::new(store), sk, key_id)
+    }
+
+    fn policy_decision_for(
+        gate: &Gate,
+        action: &ucf::v1::ActionSpec,
+        ctx: &GateContext,
+        session_id: &str,
+        step_id: &str,
+    ) -> PolicyDecisionRecord {
+        let control_frame = gate.resolve_control_frame(ctx);
+        let policy_ctx = PolicyContext {
+            integrity_state: ctx.integrity_state.clone(),
+            charter_version_digest: ctx.charter_version_digest.clone(),
+            allowed_tools: ctx.allowed_tools.clone(),
+            control_frame,
+        };
+
+        gate.policy.decide_with_context(PolicyEvaluationRequest {
+            decision_id: format!("{session_id}:{step_id}"),
+            query: ucf::v1::PolicyQuery {
+                principal: "chip3".to_string(),
+                action: Some(action.clone()),
+                channel: ucf::v1::Channel::Unspecified.into(),
+                risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
+            },
+            context: policy_ctx,
+        })
+    }
+
+    fn signed_receipt_for(
+        action_digest: [u8; 32],
+        decision_digest: [u8; 32],
+        signer: &SigningKey,
+        key_id: &str,
+    ) -> ucf::v1::PvgsReceipt {
+        let mut receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: "epoch-1".to_string(),
+            receipt_id: "receipt-1".to_string(),
+            receipt_digest: Some(sample_digest(9)),
+            status: ucf::v1::ReceiptStatus::Accepted.into(),
+            action_digest: Some(sample_digest(1)),
+            decision_digest: Some(sample_digest(2)),
+            grant_id: "grant-123".to_string(),
+            charter_version_digest: Some(sample_digest(3)),
+            policy_version_digest: Some(sample_digest(4)),
+            prev_record_digest: Some(sample_digest(5)),
+            profile_digest: Some(sample_digest(6)),
+            tool_profile_digest: Some(sample_digest(7)),
+            reject_reason_codes: Vec::new(),
+            signer: None,
+        };
+
+        receipt.action_digest = Some(ucf::v1::Digest32 {
+            value: action_digest.to_vec(),
+        });
+        receipt.decision_digest = Some(ucf::v1::Digest32 {
+            value: decision_digest.to_vec(),
+        });
+
+        let preimage = pvgs_receipt_signing_preimage(&receipt);
+        let sig = signer.sign(&preimage);
+        receipt.signer = Some(ucf::v1::Signature {
+            algorithm: "ed25519".to_string(),
+            signer: key_id.as_bytes().to_vec(),
+            signature: sig.to_bytes().to_vec(),
+        });
+
+        receipt
+    }
+
+    fn compute_action_digest(action: &ucf::v1::ActionSpec) -> [u8; 32] {
+        let canonical = canonical_bytes(action);
+        digest32("UCF:HASH:ACTION_SPEC", "ActionSpec", "v1", &canonical)
     }
 
     #[test]
@@ -412,10 +704,116 @@ mod tests {
     }
 
     #[test]
+    fn blocks_side_effect_without_receipt() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, _, _) = receipt_store_with_key();
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store,
+            aggregator,
+        );
+
+        let ctx = ok_ctx();
+        let result = gate.handle_action_spec("s", "step", base_action("mock.write"), ctx.clone());
+
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![RECEIPT_BLOCKED_REASON.to_string()]
+                );
+            }
+            other => panic!("expected receipt gate denial, got {other:?}"),
+        }
+        assert_eq!(counting.count(), 0, "adapter must not run without receipt");
+    }
+
+    #[test]
+    fn blocks_side_effect_with_invalid_receipt() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, signer, key_id) = receipt_store_with_key();
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store,
+            aggregator,
+        );
+
+        let mut ctx = ok_ctx();
+        let action = base_action("mock.write");
+        let action_digest = compute_action_digest(&action);
+        let decision = policy_decision_for(&gate, &action, &ctx, "s", "step");
+        let mut receipt =
+            signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
+        receipt.charter_version_digest = Some(sample_digest(99));
+        ctx.pvgs_receipt = Some(receipt);
+
+        let result = gate.handle_action_spec("s", "step", action, ctx);
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![RECEIPT_BLOCKED_REASON.to_string()]
+                );
+            }
+            other => panic!("expected receipt gate denial, got {other:?}"),
+        }
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run with invalid receipt"
+        );
+    }
+
+    #[test]
+    fn allows_side_effect_with_valid_receipt() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, signer, key_id) = receipt_store_with_key();
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store,
+            aggregator,
+        );
+
+        let mut ctx = ok_ctx();
+        let action = base_action("mock.write");
+        let action_digest = compute_action_digest(&action);
+        let decision = policy_decision_for(&gate, &action, &ctx, "s", "step");
+        let receipt = signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
+        ctx.pvgs_receipt = Some(receipt);
+
+        let result = gate.handle_action_spec("s", "step", action.clone(), ctx);
+        match result {
+            GateResult::Executed { decision, outcome } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec!["RC.PB.CONSTRAINT.SCOPE_SHRINK".to_string()]
+                );
+                assert_eq!(
+                    ucf::v1::OutcomeStatus::try_from(outcome.status),
+                    Ok(ucf::v1::OutcomeStatus::Success)
+                );
+            }
+            other => panic!("expected execution, got {other:?}"),
+        }
+        assert_eq!(counting.count(), 1, "adapter should run with valid receipt");
+    }
+
+    #[test]
     fn fallback_store_enforces_fail_closed() {
         let counting = CountingAdapter::default();
         let store = Arc::new(Mutex::new(ControlFrameStore::default()));
-        let gate = gate_with_adapter_and_store(Box::new(counting.clone()), store);
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            store,
+            Arc::new(PvgsKeyEpochStore::new()),
+            Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+        );
 
         let ctx = ok_ctx();
         let sim_result =
@@ -493,6 +891,56 @@ mod tests {
     }
 
     #[test]
+    fn receipt_stats_recorded_in_signal_frame() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, signer, key_id) = receipt_store_with_key();
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store.clone(),
+            aggregator.clone(),
+        );
+
+        let ctx = ok_ctx();
+        let action = base_action("mock.write");
+
+        for idx in 0..2 {
+            let _ =
+                gate.handle_action_spec("s", &format!("missing{idx}"), action.clone(), ctx.clone());
+        }
+
+        let action_digest = compute_action_digest(&action);
+        let decision = policy_decision_for(&gate, &action, &ctx, "s", "invalid");
+        let mut receipt =
+            signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
+        receipt.policy_version_digest = Some(sample_digest(10));
+        let mut ctx_with_receipt = ctx.clone();
+        ctx_with_receipt.pvgs_receipt = Some(receipt);
+
+        let _ = gate.handle_action_spec("s", "invalid", action, ctx_with_receipt);
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let receipt_stats = frames
+            .first()
+            .and_then(|f| f.receipt_stats.as_ref())
+            .cloned()
+            .expect("receipt stats present");
+
+        assert_eq!(receipt_stats.receipt_missing_count, 2);
+        assert_eq!(receipt_stats.receipt_invalid_count, 1);
+        assert!(receipt_stats
+            .top_reason_codes
+            .iter()
+            .any(|c| c.code == RECEIPT_BLOCKED_REASON && c.count == 3));
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run when receipts invalid or missing"
+        );
+    }
+
+    #[test]
     fn blocked_exports_show_in_signal_frame() {
         let counting = CountingAdapter::default();
         let store = Arc::new(Mutex::new(ControlFrameStore::default()));
@@ -508,6 +956,7 @@ mod tests {
             adapter: Box::new(counting.clone()),
             aggregator: aggregator.clone(),
             control_store: store,
+            receipt_store: Arc::new(PvgsKeyEpochStore::new()),
         };
 
         let mut ctx = ok_ctx();

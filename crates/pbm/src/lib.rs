@@ -175,7 +175,7 @@ impl PolicyEngine {
     }
 }
 
-fn compute_decision_digest(
+pub fn compute_decision_digest(
     decision_id: &str,
     form: &DecisionForm,
     reason_codes: &[String],

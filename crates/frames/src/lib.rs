@@ -47,6 +47,8 @@ struct WindowState {
     exec_counts: ExecCounts,
     policy_reasons: ReasonCounter,
     exec_reasons: ReasonCounter,
+    receipt_counts: ReceiptCounts,
+    receipt_reasons: ReasonCounter,
     integrity_state: ucf::v1::IntegrityState,
 }
 
@@ -59,6 +61,8 @@ impl WindowState {
             exec_counts: ExecCounts::default(),
             policy_reasons: ReasonCounter::default(),
             exec_reasons: ReasonCounter::default(),
+            receipt_counts: ReceiptCounts::default(),
+            receipt_reasons: ReasonCounter::default(),
             integrity_state: ucf::v1::IntegrityState::Ok,
         }
     }
@@ -79,6 +83,18 @@ struct ExecCounts {
     timeout: u64,
     partial: u64,
     tool_unavailable: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReceiptCounts {
+    missing: u64,
+    invalid: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReceiptIssue {
+    Missing,
+    Invalid,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +149,17 @@ impl ShortWindowAggregator {
         self.record_event();
     }
 
+    pub fn on_receipt_issue(&mut self, issue: ReceiptIssue, reason_codes: &[String]) {
+        match issue {
+            ReceiptIssue::Missing => self.state.receipt_counts.missing += 1,
+            ReceiptIssue::Invalid => self.state.receipt_counts.invalid += 1,
+        }
+        self.state
+            .receipt_reasons
+            .record(reason_codes.iter().cloned());
+        self.record_event();
+    }
+
     pub fn on_budget_event(&mut self) {
         self.record_event();
     }
@@ -181,6 +208,12 @@ impl ShortWindowAggregator {
             top_reason_codes: self.state.exec_reasons.top(10),
         };
 
+        let receipt_stats = ucf::v1::ReceiptStats {
+            receipt_missing_count: self.state.receipt_counts.missing,
+            receipt_invalid_count: self.state.receipt_counts.invalid,
+            top_reason_codes: self.state.receipt_reasons.top(10),
+        };
+
         let mut frame = ucf::v1::SignalFrame {
             frame_id: frame_id.clone(),
             window: Some(window_meta),
@@ -200,6 +233,7 @@ impl ShortWindowAggregator {
             }),
             signal_frame_digest: None,
             signature: None,
+            receipt_stats: Some(receipt_stats),
         };
 
         let digest = self.compute_signal_digest(&frame);

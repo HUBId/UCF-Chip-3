@@ -12,3 +12,8 @@ tam = { path = "../tam" }
 ucf-protocol = { workspace = true }
 frames = { path = "../frames" }
 control = { path = "../control" }
+pvgs_verify = { path = "../pvgs_verify" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+rand = "0.8"

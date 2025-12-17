@@ -9,6 +9,7 @@ use control::ControlFrameStore;
 use frames::ShortWindowAggregator;
 use gem::{Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
+use pvgs_verify::PvgsKeyEpochStore;
 use tam::MockAdapter;
 use ucf_protocol::ucf;
 
@@ -20,6 +21,7 @@ fn main() {
         adapter: Box::new(MockAdapter),
         aggregator: aggregator.clone(),
         control_store: control_store.clone(),
+        receipt_store: Arc::new(PvgsKeyEpochStore::new()),
     };
 
     let control_frame_m0 = control_frame_m0();
@@ -38,6 +40,8 @@ fn main() {
         charter_version_digest: "charter-mvp".to_string(),
         allowed_tools: vec!["mock.read".to_string(), "mock.export".to_string()],
         control_frame: None,
+        pvgs_receipt: None,
+        approval_grant_id: None,
     };
 
     let read_action = ucf::v1::ActionSpec {
