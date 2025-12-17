@@ -430,6 +430,23 @@ pub mod ucf {
             pub signer: ::core::option::Option<Signature>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct PvgsKeyEpoch {
+            #[prost(uint64, tag = "1")]
+            pub epoch_id: u64,
+            #[prost(string, tag = "2")]
+            pub attestation_key_id: ::prost::alloc::string::String,
+            #[prost(bytes = "vec", tag = "3")]
+            pub attestation_public_key: ::prost::alloc::vec::Vec<u8>,
+            #[prost(message, optional, tag = "4")]
+            pub announcement_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "5")]
+            pub signature: ::core::option::Option<Signature>,
+            #[prost(uint64, tag = "6")]
+            pub timestamp_ms: u64,
+            #[prost(string, optional, tag = "7")]
+            pub vrf_key_id: ::core::option::Option<::prost::alloc::string::String>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ProofReceipt {
             #[prost(enumeration = "ReceiptStatus", tag = "1")]
             pub status: i32,
