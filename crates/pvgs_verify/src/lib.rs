@@ -2,17 +2,21 @@
 
 use std::collections::HashMap;
 
+use blake3::Hasher;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use thiserror::Error;
 use ucf_protocol::ucf;
 
 const SIGNATURE_DOMAIN: &[u8] = b"UCF:SIGN:PVGS_RECEIPT";
+const KEY_EPOCH_HASH_DOMAIN: &[u8] = b"UCF:HASH:PVGS_KEY_EPOCH";
+const KEY_EPOCH_SIGN_DOMAIN: &[u8] = b"UCF:SIGN:PVGS_KEY_EPOCH";
 const ED25519: &str = "ed25519";
 
 #[derive(Debug, Default, Clone)]
 pub struct PvgsKeyEpochStore {
     keys: HashMap<String, [u8; 32]>,
     epoch_keys: HashMap<String, String>,
+    latest_epoch_id: Option<u64>,
 }
 
 impl PvgsKeyEpochStore {
@@ -20,6 +24,7 @@ impl PvgsKeyEpochStore {
         Self {
             keys: HashMap::new(),
             epoch_keys: HashMap::new(),
+            latest_epoch_id: None,
         }
     }
 
@@ -40,6 +45,41 @@ impl PvgsKeyEpochStore {
     pub fn get_epoch_key(&self, epoch_id: &str) -> Option<&String> {
         self.epoch_keys.get(epoch_id)
     }
+
+    pub fn latest_epoch_id(&self) -> Option<u64> {
+        self.latest_epoch_id
+    }
+
+    pub fn ingest_announcement(&mut self, ann: KeyEpochAnnouncement) -> Result<(), IngestError> {
+        if !verify_key_epoch_announcement(&ann) {
+            return Err(IngestError::InvalidAnnouncement);
+        }
+
+        self.insert_key(ann.key_id.clone(), ann.public_key);
+        match self.latest_epoch_id {
+            Some(current) if ann.epoch_id > current => self.latest_epoch_id = Some(ann.epoch_id),
+            None => self.latest_epoch_id = Some(ann.epoch_id),
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyEpochAnnouncement {
+    pub epoch_id: u64,
+    pub key_id: String,
+    pub public_key: [u8; 32],
+    pub announcement_digest: [u8; 32],
+    pub signature: Vec<u8>,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum IngestError {
+    #[error("invalid announcement")]
+    InvalidAnnouncement,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -173,12 +213,70 @@ fn digest_bytes(opt: &Option<ucf::v1::Digest32>) -> &[u8] {
         .unwrap_or_else(|| &[])
 }
 
+pub fn key_epoch_announcement_digest(ann: &KeyEpochAnnouncement) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(KEY_EPOCH_HASH_DOMAIN);
+    hasher.update(&ann.epoch_id.to_be_bytes());
+    hasher.update(ann.key_id.as_bytes());
+    hasher.update(&ann.public_key);
+    hasher.update(&ann.timestamp_ms.to_be_bytes());
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(hasher.finalize().as_bytes());
+    digest
+}
+
+pub fn key_epoch_announcement_preimage(ann: &KeyEpochAnnouncement) -> Vec<u8> {
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(KEY_EPOCH_SIGN_DOMAIN);
+    preimage.extend_from_slice(&ann.epoch_id.to_be_bytes());
+    preimage.extend_from_slice(ann.key_id.as_bytes());
+    preimage.extend_from_slice(&ann.public_key);
+    preimage.extend_from_slice(&ann.announcement_digest);
+    preimage.extend_from_slice(&ann.timestamp_ms.to_be_bytes());
+    preimage
+}
+
+pub fn verify_key_epoch_announcement(ann: &KeyEpochAnnouncement) -> bool {
+    if key_epoch_announcement_digest(ann) != ann.announcement_digest {
+        return false;
+    }
+
+    let preimage = key_epoch_announcement_preimage(ann);
+    let signature = match Signature::from_slice(&ann.signature) {
+        Ok(sig) => sig,
+        Err(_) => return false,
+    };
+
+    let verifying_key = match VerifyingKey::from_bytes(&ann.public_key) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+
+    verifying_key.verify(&preimage, &signature).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;
     use rand::rngs::StdRng;
     use rand::{RngCore, SeedableRng};
+
+    fn sample_announcement(signing_key: &ed25519_dalek::SigningKey) -> KeyEpochAnnouncement {
+        let mut ann = KeyEpochAnnouncement {
+            epoch_id: 1,
+            key_id: "pvgs-key-1".to_string(),
+            public_key: signing_key.verifying_key().to_bytes(),
+            announcement_digest: [0; 32],
+            signature: Vec::new(),
+            timestamp_ms: 1_700_000_000_000,
+        };
+
+        ann.announcement_digest = key_epoch_announcement_digest(&ann);
+        let sig = signing_key.sign(&key_epoch_announcement_preimage(&ann));
+        ann.signature = sig.to_bytes().to_vec();
+        ann
+    }
 
     fn sample_digest(seed: u8) -> ucf::v1::Digest32 {
         ucf::v1::Digest32 {
@@ -244,5 +342,67 @@ mod tests {
         receipt.charter_version_digest = Some(sample_digest(9));
         let result = verify_pvgs_receipt(&receipt, &store);
         assert!(matches!(result, Err(VerifyError::InvalidSignature)));
+    }
+
+    #[test]
+    fn ingest_and_verify_announcement_succeeds() {
+        let (sk, key_id) = keypair();
+        let announcement = sample_announcement(&sk);
+
+        let mut store = PvgsKeyEpochStore::new();
+        store.ingest_announcement(announcement.clone()).unwrap();
+
+        assert_eq!(
+            store.get_pubkey(&key_id),
+            Some(announcement.public_key),
+            "ingestor should populate store"
+        );
+        assert_eq!(store.latest_epoch_id(), Some(announcement.epoch_id));
+    }
+
+    #[test]
+    fn ingest_rejects_tampered_announcement() {
+        let (sk, _) = keypair();
+        let mut announcement = sample_announcement(&sk);
+        announcement.announcement_digest[0] ^= 0xFF;
+
+        let mut store = PvgsKeyEpochStore::new();
+        let err = store.ingest_announcement(announcement).unwrap_err();
+        assert_eq!(err, IngestError::InvalidAnnouncement);
+    }
+
+    #[test]
+    fn ingest_rejects_invalid_signature() {
+        let (sk, _) = keypair();
+        let mut announcement = sample_announcement(&sk);
+        announcement.signature.reverse();
+
+        let mut store = PvgsKeyEpochStore::new();
+        let err = store.ingest_announcement(announcement).unwrap_err();
+        assert_eq!(err, IngestError::InvalidAnnouncement);
+    }
+
+    #[test]
+    fn verify_receipt_requires_known_key() {
+        let receipt = sign_receipt(sample_receipt_template());
+        let store = PvgsKeyEpochStore::new();
+        let err = verify_pvgs_receipt(&receipt, &store).unwrap_err();
+        assert!(matches!(err, VerifyError::UnknownKeyId(_)));
+    }
+
+    #[test]
+    fn receipt_verification_succeeds_after_ingest() {
+        let (sk, key_id) = keypair();
+        let announcement = sample_announcement(&sk);
+
+        let mut store = PvgsKeyEpochStore::new();
+        store.ingest_announcement(announcement).unwrap();
+
+        let receipt = sign_receipt(sample_receipt_template());
+        assert_eq!(verify_pvgs_receipt(&receipt, &store), Ok(()));
+        assert_eq!(
+            store.get_pubkey(&key_id),
+            Some(sk.verifying_key().to_bytes())
+        );
     }
 }

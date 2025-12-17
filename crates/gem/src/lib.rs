@@ -16,6 +16,7 @@ use tam::ToolAdapter;
 use ucf_protocol::{canonical_bytes, digest32, ucf};
 
 const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
+const RECEIPT_UNKNOWN_KEY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
 
 pub struct Gate {
     pub policy: PolicyEngine,
@@ -239,7 +240,10 @@ impl Gate {
         let receipt = match ctx.pvgs_receipt.clone() {
             Some(r) => r,
             None => {
-                self.note_receipt_issue(ReceiptIssue::Missing);
+                self.note_receipt_issue(
+                    ReceiptIssue::Missing,
+                    &[RECEIPT_BLOCKED_REASON.to_string()],
+                );
                 return Err(GateResult::Denied {
                     decision: self
                         .receipt_blocked_decision(decision, &[RECEIPT_BLOCKED_REASON.to_string()]),
@@ -248,44 +252,51 @@ impl Gate {
         };
 
         if let Err(err) = verify_pvgs_receipt(&receipt, &self.receipt_store) {
-            self.note_receipt_issue(ReceiptIssue::Invalid);
-            return Err(self.receipt_gate_error(decision, err, action));
+            let reason_codes = match err {
+                VerifyError::UnknownKeyId(_) => vec![RECEIPT_UNKNOWN_KEY_REASON.to_string()],
+                _ => vec![RECEIPT_BLOCKED_REASON.to_string()],
+            };
+            self.note_receipt_issue(ReceiptIssue::Invalid, &reason_codes);
+            return Err(self.receipt_gate_error(decision, &reason_codes, action));
         }
 
         if ucf::v1::ReceiptStatus::try_from(receipt.status) != Ok(ucf::v1::ReceiptStatus::Accepted)
         {
-            self.note_receipt_issue(ReceiptIssue::Invalid);
+            self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
-                VerifyError::Schema("receipt must be accepted".to_string()),
+                &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
         }
 
         if !digest_matches(receipt.action_digest.as_ref(), &action_digest) {
-            self.note_receipt_issue(ReceiptIssue::Invalid);
+            self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
-                VerifyError::Schema("action digest mismatch".to_string()),
+                &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
         }
 
         if !digest_matches(receipt.decision_digest.as_ref(), &decision.decision_digest) {
-            self.note_receipt_issue(ReceiptIssue::Invalid);
+            self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
-                VerifyError::Schema("decision digest mismatch".to_string()),
+                &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
         }
 
         if let Some(expected_grant) = ctx.approval_grant_id.as_deref() {
             if receipt.grant_id != expected_grant {
-                self.note_receipt_issue(ReceiptIssue::Invalid);
+                self.note_receipt_issue(
+                    ReceiptIssue::Invalid,
+                    &[RECEIPT_BLOCKED_REASON.to_string()],
+                );
                 return Err(self.receipt_gate_error(
                     decision,
-                    VerifyError::Schema("grant binding mismatch".to_string()),
+                    &[RECEIPT_BLOCKED_REASON.to_string()],
                     action,
                 ));
             }
@@ -294,9 +305,9 @@ impl Gate {
         Ok(())
     }
 
-    fn note_receipt_issue(&self, issue: ReceiptIssue) {
+    fn note_receipt_issue(&self, issue: ReceiptIssue, reason_codes: &[String]) {
         if let Ok(mut agg) = self.aggregator.lock() {
-            agg.on_receipt_issue(issue, &[RECEIPT_BLOCKED_REASON.to_string()]);
+            agg.on_receipt_issue(issue, reason_codes);
         }
     }
 
@@ -325,11 +336,11 @@ impl Gate {
     fn receipt_gate_error(
         &self,
         prior: &PolicyDecisionRecord,
-        _error: VerifyError,
+        reason_codes: &[String],
         _action: &ucf::v1::ActionSpec,
     ) -> GateResult {
         GateResult::Denied {
-            decision: self.receipt_blocked_decision(prior, &[RECEIPT_BLOCKED_REASON.to_string()]),
+            decision: self.receipt_blocked_decision(prior, reason_codes),
         }
     }
 
@@ -938,6 +949,54 @@ mod tests {
             0,
             "adapter must not run when receipts invalid or missing"
         );
+    }
+
+    #[test]
+    fn denies_when_receipt_uses_unknown_key() {
+        let counting = CountingAdapter::default();
+        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+        );
+
+        let mut ctx = ok_ctx();
+        let action = base_action("mock.write");
+        let action_digest = compute_action_digest(&action);
+        let decision = policy_decision_for(&gate, &action, &ctx, "s", "step");
+        let (signer, key_id) = signing_material();
+        let receipt = signed_receipt_for(action_digest, decision.decision_digest, &signer, &key_id);
+        ctx.pvgs_receipt = Some(receipt);
+
+        let result = gate.handle_action_spec("s", "step", action, ctx);
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![RECEIPT_UNKNOWN_KEY_REASON.to_string()]
+                );
+            }
+            other => panic!("expected deny for unknown key, got {other:?}"),
+        }
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run when receipt key is unknown"
+        );
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let receipt_stats = frames
+            .first()
+            .and_then(|f| f.receipt_stats.as_ref())
+            .cloned()
+            .expect("receipt stats present");
+        assert_eq!(receipt_stats.receipt_invalid_count, 1);
+        assert!(receipt_stats
+            .top_reason_codes
+            .iter()
+            .any(|rc| rc.code == RECEIPT_UNKNOWN_KEY_REASON && rc.count >= 1));
     }
 
     #[test]
