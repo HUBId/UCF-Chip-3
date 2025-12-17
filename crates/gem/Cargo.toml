@@ -18,3 +18,4 @@ trm = { path = "../trm" }
 [dev-dependencies]
 ed25519-dalek = "2"
 rand = "0.8"
+ucf-test-utils = { path = "../test-utils" }

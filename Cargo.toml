@@ -13,6 +13,7 @@ members = [
     "crates/pvgs_verify",
     "crates/app",
     "crates/ucf-protocol",
+    "crates/test-utils",
 ]
 resolver = "2"
 
