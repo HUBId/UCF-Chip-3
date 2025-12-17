@@ -1,39 +1,45 @@
 #![forbid(unsafe_code)]
 
-use thiserror::Error;
-
-// TODO: Link adapter contracts to ucf-protocol tool APIs.
-
-#[derive(Debug, Error)]
-pub enum AdapterError {
-    #[error("adapter failed: {0}")]
-    Failure(String),
-}
-
-pub trait ToolAdapter: Send + Sync {
-    fn invoke(&self, command: &str) -> Result<AdapterResponse, AdapterError>;
-}
-
 #[derive(Debug, Clone)]
-pub struct AdapterResponse {
-    pub status: AdapterStatus,
-    pub detail: Option<String>,
+pub struct ExecutionRequestLike {
+    pub action_digest: [u8; 32],
+    pub tool_id: String,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AdapterStatus {
+pub enum OutcomeStatus {
     Success,
-    TemporaryFailure,
-    PermanentFailure,
+    Failure,
 }
 
-pub struct NoopAdapter;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeLike {
+    pub status: OutcomeStatus,
+    pub payload: Vec<u8>,
+}
 
-impl ToolAdapter for NoopAdapter {
-    fn invoke(&self, command: &str) -> Result<AdapterResponse, AdapterError> {
-        Ok(AdapterResponse {
-            status: AdapterStatus::Success,
-            detail: Some(format!("noop executed {command}")),
-        })
+pub trait ToolAdapter: Send + Sync {
+    fn execute(&self, req: &ExecutionRequestLike) -> OutcomeLike;
+}
+
+pub struct MockAdapter;
+
+impl ToolAdapter for MockAdapter {
+    fn execute(&self, req: &ExecutionRequestLike) -> OutcomeLike {
+        match req.tool_id.as_str() {
+            "mock.read" => OutcomeLike {
+                status: OutcomeStatus::Success,
+                payload: b"ok:read".to_vec(),
+            },
+            "mock.fail" => OutcomeLike {
+                status: OutcomeStatus::Failure,
+                payload: b"fail".to_vec(),
+            },
+            _ => OutcomeLike {
+                status: OutcomeStatus::Failure,
+                payload: b"unknown tool".to_vec(),
+            },
+        }
     }
 }

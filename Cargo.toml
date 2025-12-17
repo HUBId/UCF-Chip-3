@@ -10,6 +10,7 @@ members = [
     "crates/frames",
     "crates/pvgs_client",
     "crates/app",
+    "crates/ucf-protocol",
 ]
 resolver = "2"
 
@@ -20,6 +21,8 @@ rust-version = "1.76"
 
 [workspace.dependencies]
 thiserror = "1"
+blake3 = "1"
+ucf-protocol = { path = "crates/ucf-protocol" }
 
 [profile.release]
 opt-level = 3
