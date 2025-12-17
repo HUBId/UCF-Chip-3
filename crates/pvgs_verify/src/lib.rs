@@ -23,6 +23,7 @@ pub struct PvgsKeyEpochStore {
 struct EpochBinding {
     attestation_key_id: String,
     vrf_key_id: Option<String>,
+    digest: [u8; 32],
 }
 
 impl PvgsKeyEpochStore {
@@ -56,6 +57,17 @@ impl PvgsKeyEpochStore {
 
         verify_key_epoch_signature(&key_epoch, &pubkey)?;
 
+        if let Some(existing) = self.epoch_keys.get(&key_epoch.epoch_id) {
+            if existing.digest != digest {
+                return Err(IngestError::ConflictingEpoch);
+            }
+
+            self.keys
+                .entry(key_epoch.attestation_key_id.clone())
+                .or_insert(pubkey);
+            return Ok(());
+        }
+
         self.keys
             .insert(key_epoch.attestation_key_id.clone(), pubkey);
         self.epoch_keys.insert(
@@ -63,6 +75,7 @@ impl PvgsKeyEpochStore {
             EpochBinding {
                 attestation_key_id: key_epoch.attestation_key_id.clone(),
                 vrf_key_id: key_epoch.vrf_key_id.clone(),
+                digest,
             },
         );
 
@@ -96,6 +109,8 @@ pub enum IngestError {
     InvalidSignature,
     #[error("announcement digest mismatch")]
     DigestMismatch,
+    #[error("conflicting key epoch")]
+    ConflictingEpoch,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -116,6 +131,13 @@ pub enum VerifyError {
     InvalidSignature,
     #[error("schema invalid: {0}")]
     Schema(String),
+    #[error("latest epoch {latest:?} behind required {required}")]
+    LatestEpochTooLow { required: u64, latest: Option<u64> },
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct VerifyOptions {
+    pub require_latest_epoch_at_least: Option<u64>,
 }
 
 pub fn pvgs_receipt_signing_preimage(receipt: &ucf::v1::PvgsReceipt) -> Vec<u8> {
@@ -146,6 +168,14 @@ pub fn pvgs_receipt_signing_preimage(receipt: &ucf::v1::PvgsReceipt) -> Vec<u8> 
 pub fn verify_pvgs_receipt(
     receipt: &ucf::v1::PvgsReceipt,
     store: &PvgsKeyEpochStore,
+) -> Result<(), VerifyError> {
+    verify_pvgs_receipt_with_options(receipt, store, &VerifyOptions::default())
+}
+
+pub fn verify_pvgs_receipt_with_options(
+    receipt: &ucf::v1::PvgsReceipt,
+    store: &PvgsKeyEpochStore,
+    options: &VerifyOptions,
 ) -> Result<(), VerifyError> {
     let signer = receipt.signer.as_ref().ok_or(VerifyError::MissingSigner)?;
 
@@ -190,6 +220,16 @@ pub fn verify_pvgs_receipt(
             return Err(VerifyError::Schema(
                 "receipt must be accepted or rejected".to_string(),
             ))
+        }
+    }
+
+    if let Some(required_epoch) = options.require_latest_epoch_at_least {
+        let latest = store.latest_epoch();
+        if latest.is_none_or(|epoch| epoch < required_epoch) {
+            return Err(VerifyError::LatestEpochTooLow {
+                required: required_epoch,
+                latest,
+            });
         }
     }
 
@@ -468,5 +508,40 @@ mod tests {
         receipt.charter_version_digest = Some(sample_digest(9));
         let result = verify_pvgs_receipt(&receipt, &store);
         assert!(matches!(result, Err(VerifyError::InvalidSignature)));
+    }
+
+    #[test]
+    fn verify_checks_latest_epoch_when_required() {
+        let (sk, key_id) = signing_key();
+        let key_epoch = signed_key_epoch(&sk, 5);
+        let mut store = PvgsKeyEpochStore::new();
+        store.ingest_key_epoch(key_epoch).unwrap();
+
+        let receipt = sign_receipt(sample_receipt_template(), &sk, &key_id);
+        let opts = VerifyOptions {
+            require_latest_epoch_at_least: Some(5),
+        };
+
+        assert_eq!(
+            verify_pvgs_receipt_with_options(&receipt, &store, &opts),
+            Ok(())
+        );
+
+        let err = verify_pvgs_receipt_with_options(
+            &receipt,
+            &store,
+            &VerifyOptions {
+                require_latest_epoch_at_least: Some(6),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            VerifyError::LatestEpochTooLow {
+                required: 6,
+                latest: Some(5)
+            }
+        ));
     }
 }

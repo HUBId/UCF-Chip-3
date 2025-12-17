@@ -13,10 +13,12 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "control",
+ "ed25519-dalek",
  "frames",
  "gem",
  "hex",
  "pbm",
+ "pvgs_client",
  "pvgs_verify",
  "tam",
  "thiserror",
@@ -352,7 +354,11 @@ dependencies = [
 name = "pvgs_client"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "pvgs_verify",
+ "rand",
  "thiserror",
+ "ucf-protocol",
 ]
 
 [[package]]

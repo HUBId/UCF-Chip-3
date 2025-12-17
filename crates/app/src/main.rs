@@ -6,22 +6,28 @@ use std::{
 };
 
 use control::ControlFrameStore;
+use ed25519_dalek::{Signer, SigningKey};
 use frames::ShortWindowAggregator;
 use gem::{Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
-use pvgs_verify::PvgsKeyEpochStore;
+use pvgs_client::KeyEpochSync;
+use pvgs_verify::{
+    pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
+    verify_pvgs_receipt, PvgsKeyEpochStore,
+};
 use tam::MockAdapter;
 use ucf_protocol::ucf;
 
 fn main() {
     let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
     let control_store = Arc::new(Mutex::new(ControlFrameStore::new()));
+    let receipt_store = bootstrap_pvgs_store();
     let gate = Gate {
         policy: PolicyEngine::new(),
         adapter: Box::new(MockAdapter),
         aggregator: aggregator.clone(),
         control_store: control_store.clone(),
-        receipt_store: Arc::new(PvgsKeyEpochStore::new()),
+        receipt_store: receipt_store.clone(),
     };
 
     let control_frame_m0 = control_frame_m0();
@@ -78,6 +84,34 @@ fn main() {
     }
 }
 
+fn bootstrap_pvgs_store() -> Arc<PvgsKeyEpochStore> {
+    const EPOCH_ONE_SEED: [u8; 32] = [1; 32];
+    const EPOCH_TWO_SEED: [u8; 32] = [2; 32];
+
+    let epoch_one = key_epoch_fixture(
+        1,
+        "pvgs-bootstrap-1",
+        &SigningKey::from_bytes(&EPOCH_ONE_SEED),
+        1_700_000_000_000,
+    );
+    let epoch_two = key_epoch_fixture(
+        2,
+        "pvgs-bootstrap-2",
+        &SigningKey::from_bytes(&EPOCH_TWO_SEED),
+        1_700_000_500_000,
+    );
+
+    let mut sync = KeyEpochSync::new(PvgsKeyEpochStore::new());
+    sync.sync_from_list(vec![epoch_two, epoch_one])
+        .expect("deterministic key epoch sync");
+
+    let receipt = receipt_fixture(&SigningKey::from_bytes(&EPOCH_TWO_SEED), "pvgs-bootstrap-2");
+    verify_pvgs_receipt(&receipt, sync.store()).expect("receipt verification");
+    println!("sync ok, receipt verify ok");
+
+    Arc::new(sync.store().clone())
+}
+
 fn print_result(result: GateResult) {
     match result {
         GateResult::ValidationError { code, message } => {
@@ -123,6 +157,69 @@ fn print_result(result: GateResult) {
                 decision.decision.reason_codes.map(|r| r.codes)
             );
         }
+    }
+}
+
+fn key_epoch_fixture(
+    epoch_id: u64,
+    key_id: &str,
+    signing_key: &SigningKey,
+    timestamp_ms: u64,
+) -> ucf::v1::PvgsKeyEpoch {
+    let mut key_epoch = ucf::v1::PvgsKeyEpoch {
+        epoch_id,
+        attestation_key_id: key_id.to_string(),
+        attestation_public_key: signing_key.verifying_key().to_bytes().to_vec(),
+        announcement_digest: None,
+        signature: None,
+        timestamp_ms,
+        vrf_key_id: Some("pvgs-vrf-demo".to_string()),
+    };
+
+    let digest = pvgs_key_epoch_digest(&key_epoch);
+    key_epoch.announcement_digest = Some(ucf::v1::Digest32 {
+        value: digest.to_vec(),
+    });
+    let sig = signing_key.sign(&pvgs_key_epoch_signing_preimage(&key_epoch));
+    key_epoch.signature = Some(ucf::v1::Signature {
+        algorithm: "ed25519".to_string(),
+        signer: key_id.as_bytes().to_vec(),
+        signature: sig.to_bytes().to_vec(),
+    });
+
+    key_epoch
+}
+
+fn receipt_fixture(signing_key: &SigningKey, key_id: &str) -> ucf::v1::PvgsReceipt {
+    let mut receipt = ucf::v1::PvgsReceipt {
+        receipt_epoch: "pvgs-epoch-2".to_string(),
+        receipt_id: "demo-receipt".to_string(),
+        receipt_digest: Some(sample_digest(1)),
+        status: ucf::v1::ReceiptStatus::Accepted.into(),
+        action_digest: Some(sample_digest(2)),
+        decision_digest: Some(sample_digest(3)),
+        grant_id: "demo-grant".to_string(),
+        charter_version_digest: Some(sample_digest(4)),
+        policy_version_digest: Some(sample_digest(5)),
+        prev_record_digest: Some(sample_digest(6)),
+        profile_digest: Some(sample_digest(7)),
+        tool_profile_digest: Some(sample_digest(8)),
+        reject_reason_codes: Vec::new(),
+        signer: None,
+    };
+
+    let sig = signing_key.sign(&pvgs_receipt_signing_preimage(&receipt));
+    receipt.signer = Some(ucf::v1::Signature {
+        algorithm: "ed25519".to_string(),
+        signer: key_id.as_bytes().to_vec(),
+        signature: sig.to_bytes().to_vec(),
+    });
+    receipt
+}
+
+fn sample_digest(seed: u8) -> ucf::v1::Digest32 {
+    ucf::v1::Digest32 {
+        value: vec![seed; 32],
     }
 }
 

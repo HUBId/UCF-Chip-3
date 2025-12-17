@@ -6,3 +6,9 @@ license = "Apache-2.0"
 
 [dependencies]
 thiserror = { workspace = true }
+ucf-protocol = { workspace = true }
+pvgs_verify = { path = "../pvgs_verify" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+rand = "0.8"
