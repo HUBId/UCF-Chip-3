@@ -7,6 +7,7 @@ use ed25519_dalek::SigningKey;
 use frames::{FramesConfig, WindowEngine};
 use gem::{Gate, GateContext, GateResult};
 use pbm::{PolicyContext, PolicyDecisionRecord, PolicyEvaluationRequest};
+use pvgs_client::LocalPvgsClient;
 use pvgs_verify::PvgsKeyEpochStore;
 use tam::ToolAdapter;
 use trm::ToolRegistry;
@@ -101,6 +102,10 @@ impl Harness {
             control_store: control_store.clone(),
             receipt_store: Arc::new(receipt_store),
             registry: registry.clone(),
+            pvgs_client: Arc::new(Mutex::new(
+                Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClient>
+            )),
+            integrity_issues: Arc::new(Mutex::new(0)),
         };
 
         let action = ucf::v1::ActionSpec {

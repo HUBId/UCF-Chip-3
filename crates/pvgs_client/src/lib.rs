@@ -77,39 +77,133 @@ pub enum SyncError {
 }
 
 #[derive(Debug, Error)]
-pub enum ClientError {
-    #[error("receipt verification failed")]
-    VerificationFailed,
-    #[error("commit rejected: {0}")]
-    CommitRejected(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct CommitRequest {
-    pub payload_hint: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct Receipt {
-    pub receipt_id: String,
+pub enum PvgsClientError {
+    #[error("pvgs commit failed: {0}")]
+    CommitFailed(String),
 }
 
 pub trait PvgsClient: Send + Sync {
-    fn commit(&self, request: CommitRequest) -> Result<Receipt, ClientError>;
-    fn verify(&self, receipt: &Receipt) -> Result<(), ClientError>;
+    fn commit_experience_record(
+        &mut self,
+        record: ucf::v1::ExperienceRecord,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 }
 
-pub struct NoopPvgsClient;
+#[derive(Debug, Clone)]
+pub struct LocalPvgsClient {
+    receipt_epoch: String,
+    grant_id: String,
+    default_status: ucf::v1::ReceiptStatus,
+    reject_reason_codes: Vec<String>,
+    pub committed_records: Vec<ucf::v1::ExperienceRecord>,
+    pub committed_bytes: Vec<Vec<u8>>,
+}
 
-impl PvgsClient for NoopPvgsClient {
-    fn commit(&self, request: CommitRequest) -> Result<Receipt, ClientError> {
-        Ok(Receipt {
-            receipt_id: format!("noop-{}", request.payload_hint),
-        })
+impl Default for LocalPvgsClient {
+    fn default() -> Self {
+        Self {
+            receipt_epoch: "local-epoch".to_string(),
+            grant_id: "local-grant".to_string(),
+            default_status: ucf::v1::ReceiptStatus::Accepted,
+            reject_reason_codes: Vec::new(),
+            committed_records: Vec::new(),
+            committed_bytes: Vec::new(),
+        }
+    }
+}
+
+impl LocalPvgsClient {
+    pub fn rejecting(reason_codes: Vec<String>) -> Self {
+        Self {
+            default_status: ucf::v1::ReceiptStatus::Rejected,
+            reject_reason_codes: reason_codes,
+            ..Self::default()
+        }
     }
 
-    fn verify(&self, _receipt: &Receipt) -> Result<(), ClientError> {
-        Ok(())
+    pub fn with_status(status: ucf::v1::ReceiptStatus) -> Self {
+        Self {
+            default_status: status,
+            ..Self::default()
+        }
+    }
+}
+
+impl PvgsClient for LocalPvgsClient {
+    fn commit_experience_record(
+        &mut self,
+        record: ucf::v1::ExperienceRecord,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let bytes = ucf_protocol::canonical_bytes(&record);
+        let record_digest = ucf_protocol::digest_proto("UCF:HASH:EXPERIENCE_RECORD", &bytes);
+        let has_governance =
+            record.governance_frame.is_some() || record.governance_frame_ref.is_some();
+
+        let mut status = self.default_status;
+        let mut reject_reason_codes = self.reject_reason_codes.clone();
+        if !has_governance {
+            status = ucf::v1::ReceiptStatus::Rejected;
+            if reject_reason_codes.is_empty() {
+                reject_reason_codes.push("RC.GV.MISSING".to_string());
+            }
+        }
+
+        self.committed_records.push(record.clone());
+        self.committed_bytes.push(bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!("pvgs-local-{}", self.committed_records.len()),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: record_digest.to_vec(),
+            }),
+            status: status.into(),
+            action_digest: record
+                .core_frame
+                .as_ref()
+                .and_then(|cf| cf.candidate_refs.first())
+                .cloned(),
+            decision_digest: record.governance_frame_ref.clone(),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: record
+                .metabolic_frame
+                .as_ref()
+                .and_then(|mf| mf.control_frame_ref.clone()),
+            tool_profile_digest: None,
+            reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
+                reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MockPvgsClient {
+    pub local: LocalPvgsClient,
+}
+
+impl MockPvgsClient {
+    pub fn rejecting(reason_codes: Vec<String>) -> Self {
+        Self {
+            local: LocalPvgsClient::rejecting(reason_codes),
+        }
+    }
+}
+
+impl PvgsClient for MockPvgsClient {
+    fn commit_experience_record(
+        &mut self,
+        record: ucf::v1::ExperienceRecord,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.local.commit_experience_record(record)
     }
 }
 
@@ -220,6 +314,117 @@ mod tests {
             sync.store().pubkey_for_key_id(&key_id),
             Some(signing_key.verifying_key().to_bytes())
         );
+    }
+
+    fn experience_record(include_governance: bool) -> ucf::v1::ExperienceRecord {
+        let core_frame = ucf::v1::CoreFrame {
+            session_id: "s".to_string(),
+            step_id: "step".to_string(),
+            input_packet_refs: Vec::new(),
+            intent_refs: Vec::new(),
+            candidate_refs: vec![sample_digest(9)],
+            workspace_mode: ucf::v1::WorkspaceMode::ExecPlan.into(),
+        };
+        let metabolic_frame = ucf::v1::MetabolicFrame {
+            profile_state: ucf::v1::ControlFrameProfile::M0Baseline.into(),
+            control_frame_ref: Some(sample_digest(8)),
+            hormone_classes: vec![ucf::v1::HormoneClass::Low.into()],
+            noise_class: ucf::v1::NoiseClass::Medium.into(),
+            priority_class: ucf::v1::PriorityClass::Medium.into(),
+        };
+
+        let governance_frame = include_governance.then(|| ucf::v1::GovernanceFrame {
+            policy_decision_refs: vec![sample_digest(7)],
+            grant_refs: Vec::new(),
+            dlp_refs: Vec::new(),
+            budget_snapshot_ref: Some(sample_digest(6)),
+            pvgs_receipt_ref: None,
+            reason_codes: None,
+        });
+
+        let governance_frame_ref = governance_frame.as_ref().map(|gf| ucf::v1::Digest32 {
+            value: ucf_protocol::digest_proto(
+                "TEST:GOVERNANCE_FRAME",
+                &ucf_protocol::canonical_bytes(gf),
+            )
+            .to_vec(),
+        });
+
+        let core_frame_ref = ucf::v1::Digest32 {
+            value: ucf_protocol::digest_proto(
+                "TEST:CORE_FRAME",
+                &ucf_protocol::canonical_bytes(&core_frame),
+            )
+            .to_vec(),
+        };
+
+        let metabolic_frame_ref = ucf::v1::Digest32 {
+            value: ucf_protocol::digest_proto(
+                "TEST:METABOLIC_FRAME",
+                &ucf_protocol::canonical_bytes(&metabolic_frame),
+            )
+            .to_vec(),
+        };
+
+        ucf::v1::ExperienceRecord {
+            record_type: ucf::v1::RecordType::ActionExec.into(),
+            core_frame: Some(core_frame),
+            metabolic_frame: Some(metabolic_frame),
+            governance_frame,
+            core_frame_ref: Some(core_frame_ref),
+            metabolic_frame_ref: Some(metabolic_frame_ref),
+            governance_frame_ref,
+        }
+    }
+
+    #[test]
+    fn local_client_rejects_missing_governance() {
+        let mut client = LocalPvgsClient::default();
+        let receipt = client
+            .commit_experience_record(experience_record(false))
+            .expect("receipt returned");
+
+        assert_eq!(
+            ucf::v1::ReceiptStatus::try_from(receipt.status),
+            Ok(ucf::v1::ReceiptStatus::Rejected)
+        );
+        assert!(receipt
+            .reject_reason_codes
+            .iter()
+            .any(|rc| rc == "RC.GV.MISSING"));
+    }
+
+    #[test]
+    fn local_client_serializes_deterministically() {
+        let mut client = LocalPvgsClient::default();
+        let record = experience_record(true);
+
+        let _ = client
+            .commit_experience_record(record.clone())
+            .expect("first receipt");
+        let _ = client
+            .commit_experience_record(record)
+            .expect("second receipt");
+
+        assert_eq!(client.committed_bytes.len(), 2);
+        assert_eq!(client.committed_bytes[0], client.committed_bytes[1]);
+    }
+
+    #[test]
+    fn rejecting_client_flags_rejected_status() {
+        let mut client = LocalPvgsClient::rejecting(vec!["RC.RE.INTEGRITY.DEGRADED".to_string()]);
+        let receipt = client
+            .commit_experience_record(experience_record(true))
+            .expect("receipt returned");
+
+        assert_eq!(
+            ucf::v1::ReceiptStatus::try_from(receipt.status),
+            Ok(ucf::v1::ReceiptStatus::Rejected)
+        );
+        assert!(receipt
+            .reject_reason_codes
+            .iter()
+            .any(|rc| rc == "RC.RE.INTEGRITY.DEGRADED"));
     }
 
     #[test]

@@ -175,6 +175,8 @@ pub mod ucf {
             Policy = 1,
             Proof = 2,
             Audit = 3,
+            ActionExec = 10,
+            Output = 11,
         }
         impl RecordType {
             pub fn as_str_name(&self) -> &'static str {
@@ -183,6 +185,8 @@ pub mod ucf {
                     RecordType::Policy => "RECORD_TYPE_POLICY",
                     RecordType::Proof => "RECORD_TYPE_PROOF",
                     RecordType::Audit => "RECORD_TYPE_AUDIT",
+                    RecordType::ActionExec => "RECORD_TYPE_ACTION_EXEC",
+                    RecordType::Output => "RECORD_TYPE_OUTPUT",
                 }
             }
             pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
@@ -191,6 +195,8 @@ pub mod ucf {
                     "RECORD_TYPE_POLICY" => Some(Self::Policy),
                     "RECORD_TYPE_PROOF" => Some(Self::Proof),
                     "RECORD_TYPE_AUDIT" => Some(Self::Audit),
+                    "RECORD_TYPE_ACTION_EXEC" => Some(Self::ActionExec),
+                    "RECORD_TYPE_OUTPUT" => Some(Self::Output),
                     _ => None,
                 }
             }
@@ -653,6 +659,13 @@ pub mod ucf {
             pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct IntegrityStats {
+            #[prost(uint64, tag = "1")]
+            pub integrity_issue_count: u64,
+            #[prost(message, repeated, tag = "2")]
+            pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct HumanStats {
             #[prost(uint64, tag = "1")]
             pub approval_denied_count: u64,
@@ -683,6 +696,8 @@ pub mod ucf {
             pub signature: ::core::option::Option<Signature>,
             #[prost(message, optional, tag = "11")]
             pub receipt_stats: ::core::option::Option<ReceiptStats>,
+            #[prost(message, optional, tag = "12")]
+            pub integrity_stats: ::core::option::Option<IntegrityStats>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ControlFrame {
@@ -749,6 +764,176 @@ pub mod ucf {
                 }
             }
         }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum WorkspaceMode {
+            Unspecified = 0,
+            ExecPlan = 1,
+        }
+        impl WorkspaceMode {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    WorkspaceMode::Unspecified => "WORKSPACE_MODE_UNSPECIFIED",
+                    WorkspaceMode::ExecPlan => "WORKSPACE_MODE_EXEC_PLAN",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "WORKSPACE_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+                    "WORKSPACE_MODE_EXEC_PLAN" => Some(Self::ExecPlan),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum HormoneClass {
+            Unspecified = 0,
+            Low = 1,
+            Medium = 2,
+            High = 3,
+        }
+        impl HormoneClass {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    HormoneClass::Unspecified => "HORMONE_CLASS_UNSPECIFIED",
+                    HormoneClass::Low => "HORMONE_CLASS_LOW",
+                    HormoneClass::Medium => "HORMONE_CLASS_MEDIUM",
+                    HormoneClass::High => "HORMONE_CLASS_HIGH",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "HORMONE_CLASS_UNSPECIFIED" => Some(Self::Unspecified),
+                    "HORMONE_CLASS_LOW" => Some(Self::Low),
+                    "HORMONE_CLASS_MEDIUM" => Some(Self::Medium),
+                    "HORMONE_CLASS_HIGH" => Some(Self::High),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum NoiseClass {
+            Unspecified = 0,
+            Low = 1,
+            Medium = 2,
+            High = 3,
+        }
+        impl NoiseClass {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    NoiseClass::Unspecified => "NOISE_CLASS_UNSPECIFIED",
+                    NoiseClass::Low => "NOISE_CLASS_LOW",
+                    NoiseClass::Medium => "NOISE_CLASS_MEDIUM",
+                    NoiseClass::High => "NOISE_CLASS_HIGH",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "NOISE_CLASS_UNSPECIFIED" => Some(Self::Unspecified),
+                    "NOISE_CLASS_LOW" => Some(Self::Low),
+                    "NOISE_CLASS_MEDIUM" => Some(Self::Medium),
+                    "NOISE_CLASS_HIGH" => Some(Self::High),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum PriorityClass {
+            Unspecified = 0,
+            Low = 1,
+            Medium = 2,
+            High = 3,
+        }
+        impl PriorityClass {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    PriorityClass::Unspecified => "PRIORITY_CLASS_UNSPECIFIED",
+                    PriorityClass::Low => "PRIORITY_CLASS_LOW",
+                    PriorityClass::Medium => "PRIORITY_CLASS_MEDIUM",
+                    PriorityClass::High => "PRIORITY_CLASS_HIGH",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "PRIORITY_CLASS_UNSPECIFIED" => Some(Self::Unspecified),
+                    "PRIORITY_CLASS_LOW" => Some(Self::Low),
+                    "PRIORITY_CLASS_MEDIUM" => Some(Self::Medium),
+                    "PRIORITY_CLASS_HIGH" => Some(Self::High),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct CoreFrame {
+            #[prost(string, tag = "1")]
+            pub session_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub step_id: ::prost::alloc::string::String,
+            #[prost(message, repeated, tag = "3")]
+            pub input_packet_refs: ::prost::alloc::vec::Vec<Digest32>,
+            #[prost(message, repeated, tag = "4")]
+            pub intent_refs: ::prost::alloc::vec::Vec<Digest32>,
+            #[prost(message, repeated, tag = "5")]
+            pub candidate_refs: ::prost::alloc::vec::Vec<Digest32>,
+            #[prost(enumeration = "WorkspaceMode", tag = "6")]
+            pub workspace_mode: i32,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct MetabolicFrame {
+            #[prost(enumeration = "ControlFrameProfile", tag = "1")]
+            pub profile_state: i32,
+            #[prost(message, optional, tag = "2")]
+            pub control_frame_ref: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "HormoneClass", repeated, tag = "3")]
+            pub hormone_classes: ::prost::alloc::vec::Vec<i32>,
+            #[prost(enumeration = "NoiseClass", tag = "4")]
+            pub noise_class: i32,
+            #[prost(enumeration = "PriorityClass", tag = "5")]
+            pub priority_class: i32,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct GovernanceFrame {
+            #[prost(message, repeated, tag = "1")]
+            pub policy_decision_refs: ::prost::alloc::vec::Vec<Digest32>,
+            #[prost(message, repeated, tag = "2")]
+            pub grant_refs: ::prost::alloc::vec::Vec<Digest32>,
+            #[prost(message, repeated, tag = "3")]
+            pub dlp_refs: ::prost::alloc::vec::Vec<Digest32>,
+            #[prost(message, optional, tag = "4")]
+            pub budget_snapshot_ref: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "5")]
+            pub pvgs_receipt_ref: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "6")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ExperienceRecord {
+            #[prost(enumeration = "RecordType", tag = "1")]
+            pub record_type: i32,
+            #[prost(message, optional, tag = "2")]
+            pub core_frame: ::core::option::Option<CoreFrame>,
+            #[prost(message, optional, tag = "3")]
+            pub metabolic_frame: ::core::option::Option<MetabolicFrame>,
+            #[prost(message, optional, tag = "4")]
+            pub governance_frame: ::core::option::Option<GovernanceFrame>,
+            #[prost(message, optional, tag = "5")]
+            pub core_frame_ref: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "6")]
+            pub metabolic_frame_ref: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "7")]
+            pub governance_frame_ref: ::core::option::Option<Digest32>,
+        }
     }
 }
 
@@ -764,5 +949,13 @@ pub fn digest32(domain: &str, schema_id: &str, schema_version: &str, bytes: &[u8
     hasher.update(schema_id.as_bytes());
     hasher.update(schema_version.as_bytes());
     hasher.update(bytes);
+    *hasher.finalize().as_bytes()
+}
+
+/// Compute a 32-byte digest using BLAKE3 over DOMAIN || message bytes.
+pub fn digest_proto(domain: &str, message_bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(message_bytes);
     *hasher.finalize().as_bytes()
 }

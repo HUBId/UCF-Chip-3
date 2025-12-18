@@ -303,6 +303,11 @@ struct HumanCounts {
     stop: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct IntegrityCounts {
+    issues: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ReceiptIssue {
     Missing,
@@ -330,6 +335,8 @@ struct WindowState<C: Clock> {
     exec_reasons: ReasonCounter,
     dlp_reasons: ReasonCounter,
     receipt_reasons: ReasonCounter,
+    integrity_counts: IntegrityCounts,
+    integrity_reasons: ReasonCounter,
     integrity_state: ucf::v1::IntegrityState,
     opened_at: C::Instant,
 }
@@ -349,6 +356,8 @@ impl<C: Clock> WindowState<C> {
             exec_reasons: ReasonCounter::default(),
             dlp_reasons: ReasonCounter::default(),
             receipt_reasons: ReasonCounter::default(),
+            integrity_counts: IntegrityCounts::default(),
+            integrity_reasons: ReasonCounter::default(),
             integrity_state: ucf::v1::IntegrityState::Ok,
             opened_at: clock.now(),
         }
@@ -378,6 +387,8 @@ impl<C: Clock> WindowState<C> {
         self.exec_reasons = ReasonCounter::default();
         self.dlp_reasons = ReasonCounter::default();
         self.receipt_reasons = ReasonCounter::default();
+        self.integrity_counts = IntegrityCounts::default();
+        self.integrity_reasons = ReasonCounter::default();
         self.integrity_state = ucf::v1::IntegrityState::Ok;
         self.opened_at = clock.now();
     }
@@ -484,6 +495,14 @@ impl<C: Clock> WindowEngine<C> {
                 ReceiptIssue::Invalid => state.receipt_counts.invalid += 1,
             }
             state.receipt_reasons.record(reason_codes.iter().cloned());
+            state.record_event();
+        });
+    }
+
+    pub fn on_integrity_issue(&mut self, reason_codes: &[String]) {
+        self.apply_to_windows(|state| {
+            state.integrity_counts.issues += 1;
+            state.integrity_reasons.record(reason_codes.iter().cloned());
             state.record_event();
         });
     }
@@ -617,6 +636,11 @@ impl<C: Clock> WindowEngine<C> {
                 top_reason_codes: state.receipt_reasons.top(top_limit),
             };
 
+            let integrity_stats = ucf::v1::IntegrityStats {
+                integrity_issue_count: state.integrity_counts.issues,
+                top_reason_codes: state.integrity_reasons.top(top_limit),
+            };
+
             let human_stats = ucf::v1::HumanStats {
                 approval_denied_count: state.human_counts.approval_denied_count,
                 stop: state.human_counts.stop,
@@ -638,6 +662,7 @@ impl<C: Clock> WindowEngine<C> {
                     signal_frame_digest: None,
                     signature: None,
                     receipt_stats: Some(receipt_stats),
+                    integrity_stats: Some(integrity_stats),
                 },
                 state.window_index + 1,
             )
