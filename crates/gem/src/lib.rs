@@ -488,6 +488,7 @@ fn digest32_matches(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_action_exec_record(
     session_id: &str,
     step_id: &str,
@@ -653,6 +654,9 @@ mod tests {
     use rand::{RngCore, SeedableRng};
     use tam::MockAdapter;
 
+    type LocalClientHandle = Arc<Mutex<pvgs_client::LocalPvgsClient>>;
+    type PvgsClientHandle = Arc<Mutex<Box<dyn PvgsClient>>>;
+
     #[derive(Clone, Default)]
     struct CountingAdapter {
         calls: Arc<Mutex<usize>>,
@@ -693,7 +697,7 @@ mod tests {
         ))
     }
 
-    fn default_pvgs_client() -> Arc<Mutex<Box<dyn PvgsClient>>> {
+    fn default_pvgs_client() -> PvgsClientHandle {
         Arc::new(Mutex::new(
             Box::new(MockPvgsClient::default()) as Box<dyn PvgsClient>
         ))
@@ -703,15 +707,14 @@ mod tests {
         Arc::new(Mutex::new(0))
     }
 
-    fn boxed_client(client: impl PvgsClient + 'static) -> Arc<Mutex<Box<dyn PvgsClient>>> {
+    fn boxed_client(client: impl PvgsClient + 'static) -> PvgsClientHandle {
         Arc::new(Mutex::new(Box::new(client) as Box<dyn PvgsClient>))
     }
 
-    fn shared_local_client() -> (
-        Arc<Mutex<pvgs_client::LocalPvgsClient>>,
-        Arc<Mutex<Box<dyn PvgsClient>>>,
-    ) {
-        let inner = Arc::new(Mutex::new(pvgs_client::LocalPvgsClient::default()));
+    #[allow(clippy::type_complexity)]
+    fn shared_local_client() -> (LocalClientHandle, PvgsClientHandle) {
+        let inner: LocalClientHandle =
+            Arc::new(Mutex::new(pvgs_client::LocalPvgsClient::default()));
         let client = SharedLocalClient::new(inner.clone());
         (inner, boxed_client(client))
     }
@@ -758,7 +761,7 @@ mod tests {
         receipt_store: Arc<PvgsKeyEpochStore>,
         aggregator: Arc<Mutex<WindowEngine>>,
         registry: Arc<ToolRegistry>,
-        pvgs_client: Arc<Mutex<Box<dyn PvgsClient>>>,
+        pvgs_client: PvgsClientHandle,
         integrity_issues: Arc<Mutex<u64>>,
     ) -> Gate {
         Gate {
