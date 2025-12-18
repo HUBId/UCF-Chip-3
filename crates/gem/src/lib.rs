@@ -13,13 +13,20 @@ use pbm::{
     compute_decision_digest, DecisionForm, PolicyContext, PolicyDecisionRecord, PolicyEngine,
     PolicyEvaluationRequest,
 };
+use pvgs_client::PvgsClient;
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore, VerifyError};
 use tam::ToolAdapter;
 use trm::ToolRegistry;
-use ucf_protocol::{canonical_bytes, digest32, ucf};
+use ucf_protocol::{canonical_bytes, digest32, digest_proto, ucf};
 
 const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
 const RECEIPT_UNKNOWN_KEY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
+const PVGS_INTEGRITY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
+const CORE_FRAME_DOMAIN: &str = "UCF:HASH:CORE_FRAME";
+const METABOLIC_FRAME_DOMAIN: &str = "UCF:HASH:METABOLIC_FRAME";
+const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
+const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
+const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
 
 pub struct Gate {
     pub policy: PolicyEngine,
@@ -28,6 +35,8 @@ pub struct Gate {
     pub control_store: Arc<Mutex<ControlFrameStore>>,
     pub receipt_store: Arc<PvgsKeyEpochStore>,
     pub registry: Arc<ToolRegistry>,
+    pub pvgs_client: Arc<Mutex<Box<dyn PvgsClient>>>,
+    pub integrity_issues: Arc<Mutex<u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +170,17 @@ impl Gate {
                 let outcome = self.adapter.execute(execution_request.clone());
                 self.note_execution_outcome(&outcome);
 
+                self.commit_action_exec_record(
+                    session_id,
+                    step_id,
+                    &action,
+                    action_digest,
+                    &decision,
+                    &outcome,
+                    &control_frame,
+                    &ctx,
+                );
+
                 GateResult::Executed { decision, outcome }
             }
         }
@@ -223,6 +243,69 @@ impl Gate {
                     .unwrap_or(ucf::v1::OutcomeStatus::Unspecified),
                 &reason_codes,
             );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_action_exec_record(
+        &self,
+        session_id: &str,
+        step_id: &str,
+        action: &ucf::v1::ActionSpec,
+        action_digest: [u8; 32],
+        decision: &PolicyDecisionRecord,
+        outcome: &ucf::v1::OutcomePacket,
+        control_frame: &ucf::v1::ControlFrame,
+        ctx: &GateContext,
+    ) {
+        let record = build_action_exec_record(
+            session_id,
+            step_id,
+            action,
+            action_digest,
+            decision,
+            outcome,
+            control_frame,
+            ctx,
+        );
+
+        let receipt_result = self
+            .pvgs_client
+            .lock()
+            .map(|mut client| client.commit_experience_record(record));
+
+        match receipt_result {
+            Ok(Ok(receipt)) => {
+                if ucf::v1::ReceiptStatus::try_from(receipt.status)
+                    != Ok(ucf::v1::ReceiptStatus::Accepted)
+                {
+                    let reasons = if receipt.reject_reason_codes.is_empty() {
+                        vec![PVGS_INTEGRITY_REASON.to_string()]
+                    } else {
+                        receipt.reject_reason_codes.clone()
+                    };
+                    self.note_integrity_issue(&reasons);
+                }
+            }
+            _ => self.note_integrity_issue(&[PVGS_INTEGRITY_REASON.to_string()]),
+        }
+    }
+
+    fn note_integrity_issue(&self, reason_codes: &[String]) {
+        let mut codes = reason_codes.to_vec();
+        if codes.is_empty() {
+            codes.push(PVGS_INTEGRITY_REASON.to_string());
+        }
+        codes.sort();
+        codes.dedup();
+
+        if let Ok(mut guard) = self.integrity_issues.lock() {
+            *guard += 1;
+        }
+
+        if let Ok(mut agg) = self.aggregator.lock() {
+            agg.on_integrity_issue(&codes);
+            agg.on_integrity_state(ucf::v1::IntegrityState::Degraded);
         }
     }
 
@@ -405,6 +488,140 @@ fn digest32_matches(
     }
 }
 
+fn build_action_exec_record(
+    session_id: &str,
+    step_id: &str,
+    _action: &ucf::v1::ActionSpec,
+    action_digest: [u8; 32],
+    decision: &PolicyDecisionRecord,
+    outcome: &ucf::v1::OutcomePacket,
+    control_frame: &ucf::v1::ControlFrame,
+    ctx: &GateContext,
+) -> ucf::v1::ExperienceRecord {
+    let core_frame = build_core_frame(session_id, step_id, action_digest);
+    let metabolic_frame = build_metabolic_frame(control_frame);
+    let governance_frame = build_governance_frame(decision, outcome, ctx);
+
+    let core_frame_ref = digest_proto(CORE_FRAME_DOMAIN, &canonical_bytes(&core_frame));
+    let metabolic_frame_ref =
+        digest_proto(METABOLIC_FRAME_DOMAIN, &canonical_bytes(&metabolic_frame));
+    let governance_frame_ref =
+        digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
+
+    ucf::v1::ExperienceRecord {
+        record_type: ucf::v1::RecordType::ActionExec.into(),
+        core_frame: Some(core_frame),
+        metabolic_frame: Some(metabolic_frame),
+        governance_frame: Some(governance_frame),
+        core_frame_ref: Some(ucf::v1::Digest32 {
+            value: core_frame_ref.to_vec(),
+        }),
+        metabolic_frame_ref: Some(ucf::v1::Digest32 {
+            value: metabolic_frame_ref.to_vec(),
+        }),
+        governance_frame_ref: Some(ucf::v1::Digest32 {
+            value: governance_frame_ref.to_vec(),
+        }),
+    }
+}
+
+fn build_core_frame(
+    session_id: &str,
+    step_id: &str,
+    action_digest: [u8; 32],
+) -> ucf::v1::CoreFrame {
+    ucf::v1::CoreFrame {
+        session_id: session_id.to_string(),
+        step_id: step_id.to_string(),
+        input_packet_refs: Vec::new(),
+        intent_refs: Vec::new(),
+        candidate_refs: vec![ucf::v1::Digest32 {
+            value: action_digest.to_vec(),
+        }],
+        workspace_mode: ucf::v1::WorkspaceMode::ExecPlan.into(),
+    }
+}
+
+fn build_metabolic_frame(control_frame: &ucf::v1::ControlFrame) -> ucf::v1::MetabolicFrame {
+    let control_frame_digest = control::control_frame_digest(control_frame);
+
+    ucf::v1::MetabolicFrame {
+        profile_state: control_frame.active_profile,
+        control_frame_ref: Some(ucf::v1::Digest32 {
+            value: control_frame_digest.to_vec(),
+        }),
+        hormone_classes: vec![ucf::v1::HormoneClass::Low.into()],
+        noise_class: ucf::v1::NoiseClass::Medium.into(),
+        priority_class: ucf::v1::PriorityClass::Medium.into(),
+    }
+}
+
+fn build_governance_frame(
+    decision: &PolicyDecisionRecord,
+    outcome: &ucf::v1::OutcomePacket,
+    ctx: &GateContext,
+) -> ucf::v1::GovernanceFrame {
+    let mut grant_refs = Vec::new();
+    if let Some(grant_id) = ctx.approval_grant_id.as_ref() {
+        grant_refs.push(ucf::v1::Digest32 {
+            value: digest_proto(GRANT_REF_DOMAIN, grant_id.as_bytes()).to_vec(),
+        });
+    }
+
+    let pvgs_receipt_ref = ctx
+        .pvgs_receipt
+        .as_ref()
+        .and_then(|r| r.receipt_digest.clone());
+
+    let mut reason_codes = aggregate_reason_codes(decision, outcome);
+    if let Some(rc) = ctx.pvgs_receipt.as_ref() {
+        reason_codes.extend(rc.reject_reason_codes.clone());
+    }
+    reason_codes.sort();
+    reason_codes.dedup();
+
+    ucf::v1::GovernanceFrame {
+        policy_decision_refs: vec![ucf::v1::Digest32 {
+            value: decision.decision_digest.to_vec(),
+        }],
+        grant_refs,
+        dlp_refs: Vec::new(),
+        budget_snapshot_ref: Some(ucf::v1::Digest32 {
+            value: digest_proto(BUDGET_SNAPSHOT_DOMAIN, b"budget").to_vec(),
+        }),
+        pvgs_receipt_ref,
+        reason_codes: if reason_codes.is_empty() {
+            None
+        } else {
+            Some(ucf::v1::ReasonCodes {
+                codes: reason_codes,
+            })
+        },
+    }
+}
+
+fn aggregate_reason_codes(
+    decision: &PolicyDecisionRecord,
+    outcome: &ucf::v1::OutcomePacket,
+) -> Vec<String> {
+    let mut reason_codes = decision
+        .decision
+        .reason_codes
+        .as_ref()
+        .map(|rc| rc.codes.clone())
+        .unwrap_or_default();
+
+    reason_codes.extend(
+        outcome
+            .reason_codes
+            .as_ref()
+            .map(|rc| rc.codes.clone())
+            .unwrap_or_default(),
+    );
+
+    reason_codes
+}
+
 fn parse_tool_and_action(action: &ucf::v1::ActionSpec) -> (String, String) {
     action
         .verb
@@ -428,6 +645,7 @@ mod tests {
 
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    use pvgs_client::MockPvgsClient;
     use pvgs_verify::{
         pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
     };
@@ -446,10 +664,56 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct SharedLocalClient {
+        inner: Arc<Mutex<pvgs_client::LocalPvgsClient>>,
+    }
+
+    impl SharedLocalClient {
+        fn new(inner: Arc<Mutex<pvgs_client::LocalPvgsClient>>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl PvgsClient for SharedLocalClient {
+        fn commit_experience_record(
+            &mut self,
+            record: ucf::v1::ExperienceRecord,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_experience_record(record)
+        }
+    }
+
     fn default_aggregator() -> Arc<Mutex<WindowEngine>> {
         Arc::new(Mutex::new(
             WindowEngine::new(FramesConfig::fallback()).expect("window engine"),
         ))
+    }
+
+    fn default_pvgs_client() -> Arc<Mutex<Box<dyn PvgsClient>>> {
+        Arc::new(Mutex::new(
+            Box::new(MockPvgsClient::default()) as Box<dyn PvgsClient>
+        ))
+    }
+
+    fn integrity_counter() -> Arc<Mutex<u64>> {
+        Arc::new(Mutex::new(0))
+    }
+
+    fn boxed_client(client: impl PvgsClient + 'static) -> Arc<Mutex<Box<dyn PvgsClient>>> {
+        Arc::new(Mutex::new(Box::new(client) as Box<dyn PvgsClient>))
+    }
+
+    fn shared_local_client() -> (
+        Arc<Mutex<pvgs_client::LocalPvgsClient>>,
+        Arc<Mutex<Box<dyn PvgsClient>>>,
+    ) {
+        let inner = Arc::new(Mutex::new(pvgs_client::LocalPvgsClient::default()));
+        let client = SharedLocalClient::new(inner.clone());
+        (inner, boxed_client(client))
     }
 
     impl ToolAdapter for CountingAdapter {
@@ -483,6 +747,8 @@ mod tests {
             Arc::new(PvgsKeyEpochStore::new()),
             default_aggregator(),
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         )
     }
 
@@ -492,6 +758,8 @@ mod tests {
         receipt_store: Arc<PvgsKeyEpochStore>,
         aggregator: Arc<Mutex<WindowEngine>>,
         registry: Arc<ToolRegistry>,
+        pvgs_client: Arc<Mutex<Box<dyn PvgsClient>>>,
+        integrity_issues: Arc<Mutex<u64>>,
     ) -> Gate {
         Gate {
             policy: PolicyEngine::new(),
@@ -500,6 +768,8 @@ mod tests {
             control_store: store,
             receipt_store,
             registry,
+            pvgs_client,
+            integrity_issues,
         }
     }
 
@@ -850,6 +1120,58 @@ mod tests {
     }
 
     #[test]
+    fn commits_experience_record_for_action_exec() {
+        let counting = CountingAdapter::default();
+        let (inner_client, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+        assert!(matches!(result, GateResult::Executed { .. }));
+
+        let guard = inner_client.lock().expect("pvgs client lock");
+        assert_eq!(guard.committed_records.len(), 1);
+        let record = guard.committed_records.first().expect("record committed");
+        assert_eq!(
+            ucf::v1::RecordType::try_from(record.record_type),
+            Ok(ucf::v1::RecordType::ActionExec)
+        );
+        assert!(record.governance_frame_ref.is_some());
+    }
+
+    #[test]
+    fn experience_record_bytes_are_deterministic() {
+        let counting = CountingAdapter::default();
+        let (inner_client, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+        );
+
+        let ctx = ok_ctx();
+        let action = base_action("mock.read", "get");
+        let _ = gate.handle_action_spec("s", "step", action.clone(), ctx.clone());
+        let _ = gate.handle_action_spec("s", "step", action, ctx);
+
+        let guard = inner_client.lock().expect("pvgs client lock");
+        assert_eq!(guard.committed_bytes.len(), 2);
+        assert_eq!(guard.committed_bytes[0], guard.committed_bytes[1]);
+    }
+
+    #[test]
     fn blocks_side_effect_without_receipt() {
         let counting = CountingAdapter::default();
         let (receipt_store, _, _) = receipt_store_with_key();
@@ -860,6 +1182,8 @@ mod tests {
             receipt_store,
             aggregator,
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let ctx = ok_ctx();
@@ -889,6 +1213,8 @@ mod tests {
             receipt_store,
             aggregator,
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let ctx = ok_ctx();
@@ -922,6 +1248,8 @@ mod tests {
             receipt_store,
             aggregator,
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let mut ctx = ok_ctx();
@@ -967,6 +1295,8 @@ mod tests {
             receipt_store,
             aggregator,
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let mut ctx = ok_ctx();
@@ -1013,6 +1343,8 @@ mod tests {
             Arc::new(PvgsKeyEpochStore::new()),
             default_aggregator(),
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let ctx = ok_ctx();
@@ -1057,6 +1389,8 @@ mod tests {
             Arc::new(PvgsKeyEpochStore::new()),
             aggregator.clone(),
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let mut ctx = ok_ctx();
@@ -1162,6 +1496,8 @@ mod tests {
             receipt_store.clone(),
             aggregator.clone(),
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let ctx = ok_ctx();
@@ -1212,6 +1548,42 @@ mod tests {
     }
 
     #[test]
+    fn pvgs_rejection_triggers_integrity_signal() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let integrity = integrity_counter();
+        let rejecting_client = boxed_client(SharedLocalClient::new(Arc::new(Mutex::new(
+            pvgs_client::LocalPvgsClient::rejecting(vec![PVGS_INTEGRITY_REASON.to_string()]),
+        ))));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
+            rejecting_client,
+            integrity.clone(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+        assert!(matches!(result, GateResult::Executed { .. }));
+        assert_eq!(*integrity.lock().expect("integrity counter lock"), 1);
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let integrity_stats = frames
+            .first()
+            .and_then(|f| f.integrity_stats.as_ref())
+            .cloned()
+            .expect("integrity stats present");
+        assert_eq!(integrity_stats.integrity_issue_count, 1);
+        assert!(integrity_stats
+            .top_reason_codes
+            .iter()
+            .any(|rc| rc.code == PVGS_INTEGRITY_REASON));
+    }
+
+    #[test]
     fn denies_when_receipt_uses_unknown_key() {
         let counting = CountingAdapter::default();
         let aggregator = default_aggregator();
@@ -1221,6 +1593,8 @@ mod tests {
             Arc::new(PvgsKeyEpochStore::new()),
             aggregator.clone(),
             Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
         );
 
         let mut ctx = ok_ctx();
@@ -1288,6 +1662,8 @@ mod tests {
             control_store: store,
             receipt_store: Arc::new(PvgsKeyEpochStore::new()),
             registry: Arc::new(trm::registry_fixture()),
+            pvgs_client: default_pvgs_client(),
+            integrity_issues: integrity_counter(),
         };
 
         let mut ctx = ok_ctx();

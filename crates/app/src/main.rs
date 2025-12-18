@@ -10,7 +10,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use frames::{FramesConfig, WindowEngine};
 use gem::{Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
-use pvgs_client::KeyEpochSync;
+use pvgs_client::{KeyEpochSync, LocalPvgsClient};
 use pvgs_verify::{
     pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
     verify_pvgs_receipt, PvgsKeyEpochStore,
@@ -36,6 +36,10 @@ fn main() {
         control_store: control_store.clone(),
         receipt_store: receipt_store.clone(),
         registry: Arc::new(registry_fixture()),
+        pvgs_client: Arc::new(Mutex::new(
+            Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClient>
+        )),
+        integrity_issues: Arc::new(Mutex::new(0)),
     };
 
     let control_frame_m0 = control_frame_m0();

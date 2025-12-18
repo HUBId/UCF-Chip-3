@@ -273,6 +273,7 @@ dependencies = [
  "ed25519-dalek",
  "frames",
  "pbm",
+ "pvgs_client",
  "pvgs_verify",
  "rand",
  "tam",
