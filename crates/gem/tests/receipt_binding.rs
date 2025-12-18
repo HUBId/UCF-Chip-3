@@ -149,6 +149,8 @@ impl Harness {
             control_frame: None,
             pvgs_receipt: None,
             approval_grant_id: None,
+            pev: None,
+            pev_digest: None,
         }
     }
 
@@ -169,6 +171,8 @@ impl Harness {
             control_frame,
             allowed_tools: base_ctx.allowed_tools,
             tool_action_type: ucf::v1::ToolActionType::Export,
+            pev: base_ctx.pev,
+            pev_digest: base_ctx.pev_digest,
         };
 
         let query = ucf::v1::PolicyQuery {

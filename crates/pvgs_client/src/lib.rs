@@ -89,6 +89,11 @@ pub trait PvgsClient: Send + Sync {
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 }
 
+pub trait PvgsReader: Send + Sync {
+    fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector>;
+    fn get_latest_pev_digest(&self) -> Option<[u8; 32]>;
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalPvgsClient {
     receipt_epoch: String,
@@ -198,6 +203,81 @@ impl MockPvgsClient {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MockPvgsReader {
+    pev: Option<ucf::v1::PolicyEcologyVector>,
+    pev_digest: Option<[u8; 32]>,
+}
+
+impl Default for MockPvgsReader {
+    fn default() -> Self {
+        let mut pev = ucf::v1::PolicyEcologyVector {
+            conservatism_bias: ucf::v1::PolicyEcologyBias::Medium.into(),
+            novelty_penalty_bias: ucf::v1::PolicyEcologyBias::Medium.into(),
+            reversibility_bias: ucf::v1::PolicyEcologyBias::Medium.into(),
+            pev_digest: None,
+        };
+        let digest = digest_pev(&pev);
+        pev.pev_digest = Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        });
+
+        Self {
+            pev: Some(pev),
+            pev_digest: Some(digest),
+        }
+    }
+}
+
+impl MockPvgsReader {
+    pub fn new(pev: Option<ucf::v1::PolicyEcologyVector>) -> Self {
+        let pev_digest = pev
+            .as_ref()
+            .and_then(|vector| vector.pev_digest.as_ref())
+            .and_then(digest32_to_array)
+            .or_else(|| pev.as_ref().map(digest_pev));
+
+        let mut pev_with_digest = pev;
+        if let (Some(digest), Some(ref mut vector)) = (pev_digest, pev_with_digest.as_mut()) {
+            if vector.pev_digest.is_none() {
+                vector.pev_digest = Some(ucf::v1::Digest32 {
+                    value: digest.to_vec(),
+                });
+            }
+        }
+
+        Self {
+            pev: pev_with_digest,
+            pev_digest,
+        }
+    }
+
+    pub fn with_pev_digest(mut self, pev_digest: [u8; 32]) -> Self {
+        self.pev_digest = Some(pev_digest);
+        if let Some(ref mut vector) = self.pev {
+            vector.pev_digest = Some(ucf::v1::Digest32 {
+                value: pev_digest.to_vec(),
+            });
+        }
+        self
+    }
+}
+
+impl PvgsReader for MockPvgsReader {
+    fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+        self.pev.clone()
+    }
+
+    fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+        self.pev_digest.or_else(|| {
+            self.pev
+                .as_ref()
+                .and_then(|pev| pev.pev_digest.as_ref())
+                .and_then(digest32_to_array)
+        })
+    }
+}
+
 impl PvgsClient for MockPvgsClient {
     fn commit_experience_record(
         &mut self,
@@ -205,6 +285,17 @@ impl PvgsClient for MockPvgsClient {
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         self.local.commit_experience_record(record)
     }
+}
+
+fn digest_pev(pev: &ucf::v1::PolicyEcologyVector) -> [u8; 32] {
+    ucf_protocol::digest_proto(
+        "UCF:HASH:POLICY_ECOLOGY_VECTOR",
+        &ucf_protocol::canonical_bytes(pev),
+    )
+}
+
+fn digest32_to_array(digest: &ucf::v1::Digest32) -> Option<[u8; 32]> {
+    digest.value.clone().try_into().ok()
 }
 
 #[cfg(test)]
@@ -216,6 +307,7 @@ mod tests {
         verify_pvgs_receipt, VerifyError,
     };
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use std::convert::TryFrom;
 
     fn sample_digest(seed: u8) -> ucf::v1::Digest32 {
         ucf::v1::Digest32 {
@@ -313,6 +405,24 @@ mod tests {
         assert_eq!(
             sync.store().pubkey_for_key_id(&key_id),
             Some(signing_key.verifying_key().to_bytes())
+        );
+    }
+
+    #[test]
+    fn mock_reader_exposes_pev_and_digest() {
+        let reader = MockPvgsReader::default();
+        let pev = reader.get_latest_pev().expect("pev available");
+        assert_eq!(
+            ucf::v1::PolicyEcologyBias::try_from(pev.conservatism_bias),
+            Ok(ucf::v1::PolicyEcologyBias::Medium)
+        );
+
+        let digest = reader
+            .get_latest_pev_digest()
+            .expect("pev digest available");
+        assert_eq!(
+            pev.pev_digest.as_ref().and_then(digest32_to_array),
+            Some(digest)
         );
     }
 
