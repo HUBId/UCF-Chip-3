@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use control::ControlFrameStore;
 use ed25519_dalek::SigningKey;
-use frames::ShortWindowAggregator;
+use frames::{FramesConfig, WindowEngine};
 use gem::{Gate, GateContext, GateResult};
 use pbm::{PolicyContext, PolicyDecisionRecord, PolicyEvaluationRequest};
 use pvgs_verify::PvgsKeyEpochStore;
@@ -45,7 +45,7 @@ impl ToolAdapter for CountingAdapter {
 struct Harness {
     gate: Gate,
     adapter: CountingAdapter,
-    aggregator: Arc<Mutex<ShortWindowAggregator>>,
+    aggregator: Arc<Mutex<WindowEngine>>,
     control_store: Arc<Mutex<ControlFrameStore>>,
     registry: Arc<ToolRegistry>,
     control_digest: ucf::v1::Digest32,
@@ -91,7 +91,9 @@ impl Harness {
         let registry = Arc::new(registry);
 
         let adapter = CountingAdapter::default();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = Arc::new(Mutex::new(
+            WindowEngine::new(FramesConfig::fallback()).expect("window engine"),
+        ));
         let gate = Gate {
             policy: pbm::PolicyEngine::new(),
             adapter: Box::new(adapter.clone()),

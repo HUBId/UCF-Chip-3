@@ -7,7 +7,7 @@ use std::{
 
 use control::ControlFrameStore;
 use ed25519_dalek::{Signer, SigningKey};
-use frames::ShortWindowAggregator;
+use frames::{FramesConfig, WindowEngine};
 use gem::{Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
 use pvgs_client::KeyEpochSync;
@@ -20,7 +20,13 @@ use trm::registry_fixture;
 use ucf_protocol::ucf;
 
 fn main() {
-    let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+    let frames_config = FramesConfig::load_from_dir(".").unwrap_or_else(|err| {
+        eprintln!("using fallback frames config: {err}");
+        FramesConfig::fallback()
+    });
+    let aggregator = Arc::new(Mutex::new(
+        WindowEngine::new(frames_config).expect("window engine from config"),
+    ));
     let control_store = Arc::new(Mutex::new(ControlFrameStore::new()));
     let receipt_store = bootstrap_pvgs_store();
     let gate = Gate {

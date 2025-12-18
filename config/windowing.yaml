@@ -1,0 +1,15 @@
+epoch_id: "epoch-0"
+top_reason_limit: 10
+windows:
+  short:
+    max_events: 32
+    max_records: 32
+    max_age_ms: 0
+  medium:
+    max_events: 128
+    max_records: 128
+    max_age_ms: 0
+  long:
+    max_events: 512
+    max_records: 512
+    max_age_ms: 0
