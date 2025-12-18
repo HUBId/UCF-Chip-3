@@ -1,0 +1,14 @@
+profile_switch:
+  - when:
+      receipt_failures: HIGH
+    profile: M1
+  - when:
+      integrity_state: FAIL
+    profile: M1
+overlay_enable:
+  - when:
+      receipt_failures: HIGH
+    overlays: [simulate_first, export_lock, novelty_lock]
+  - when:
+      integrity_state: FAIL
+    overlays: [simulate_first, export_lock, novelty_lock]

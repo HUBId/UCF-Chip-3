@@ -1,0 +1,12 @@
+short:
+  min_records: 1
+  max_records: 32
+  max_age_ms: 1000
+medium:
+  min_records: 16
+  max_records: 64
+  max_age_ms: 5000
+long:
+  min_records: 32
+  max_records: 128
+  max_age_ms: 30000

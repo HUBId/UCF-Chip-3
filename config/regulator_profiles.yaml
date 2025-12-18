@@ -1,0 +1,55 @@
+profiles:
+  M0:
+    control_profile: m0
+    note: "baseline open"
+    toolclass_mask:
+      enable_read: true
+      enable_transform: true
+      enable_export: true
+      enable_write: true
+      enable_execute: true
+    approval_mode: "open"
+    gain_profile:
+      novelty: "low"
+      abstraction: "high"
+    budgets:
+      k1: "low"
+      k2: "low"
+      k3: "med"
+      k4: "med"
+    chain_policy:
+      max_chain: 8
+      max_concurrency: 2
+    export_policy:
+      export_lock_default: false
+      allowed_output_types: ["text", "image"]
+    deescalation:
+      lock: false
+      cooldown_class: "fast"
+  M1:
+    control_profile: m1
+    note: "restricted fallback"
+    toolclass_mask:
+      enable_read: true
+      enable_transform: true
+      enable_export: false
+      enable_write: false
+      enable_execute: false
+    approval_mode: "strict"
+    gain_profile:
+      novelty: "low"
+      abstraction: "low"
+    budgets:
+      k1: "low"
+      k2: "low"
+      k3: "low"
+      k4: "low"
+    chain_policy:
+      max_chain: 1
+      max_concurrency: 1
+    export_policy:
+      export_lock_default: true
+      allowed_output_types: []
+    deescalation:
+      lock: true
+      cooldown_class: "slow"

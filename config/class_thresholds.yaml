@@ -1,0 +1,40 @@
+policy_pressure:
+  short:
+    medium: 2
+    high: 5
+  medium:
+    medium: 4
+    high: 8
+  long:
+    medium: 8
+    high: 12
+receipt_failures:
+  short:
+    medium: 1
+    high: 3
+  medium:
+    medium: 2
+    high: 4
+  long:
+    medium: 3
+    high: 5
+exec_reliability:
+  short:
+    medium: 1
+    high: 3
+  medium:
+    medium: 2
+    high: 4
+  long:
+    medium: 3
+    high: 5
+dlp_severity:
+  short:
+    medium: 1
+    high: 2
+  medium:
+    medium: 2
+    high: 3
+  long:
+    medium: 3
+    high: 4
