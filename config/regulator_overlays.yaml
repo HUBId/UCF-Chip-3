@@ -1,0 +1,25 @@
+overlays:
+  simulate_first:
+    note: "require simulate before exec"
+    effects:
+      ovl_simulate_first: true
+      ovl_export_lock: false
+      ovl_novelty_lock: false
+    reason_codes:
+      - "RC.RE.OVL.SIM"
+  export_lock:
+    note: "lock exports"
+    effects:
+      ovl_simulate_first: false
+      ovl_export_lock: true
+      ovl_novelty_lock: false
+    reason_codes:
+      - "RC.RE.OVL.EXPORT"
+  novelty_lock:
+    note: "lock novel tools"
+    effects:
+      ovl_simulate_first: false
+      ovl_export_lock: false
+      ovl_novelty_lock: true
+    reason_codes:
+      - "RC.RE.OVL.NOVELTY"
