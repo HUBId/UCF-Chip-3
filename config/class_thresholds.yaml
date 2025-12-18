@@ -1,0 +1,6 @@
+short:
+  thresholds: [1, 4]
+medium:
+  thresholds: [1, 4]
+long:
+  thresholds: [1, 4]

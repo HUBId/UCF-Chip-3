@@ -6,7 +6,9 @@ use std::{
 };
 
 use control::ControlFrameStore;
-use frames::{ReceiptIssue, ShortWindowAggregator};
+#[cfg(test)]
+use frames::FramesConfig;
+use frames::{ReceiptIssue, WindowEngine};
 use pbm::{
     compute_decision_digest, DecisionForm, PolicyContext, PolicyDecisionRecord, PolicyEngine,
     PolicyEvaluationRequest,
@@ -22,7 +24,7 @@ const RECEIPT_UNKNOWN_KEY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
 pub struct Gate {
     pub policy: PolicyEngine,
     pub adapter: Box<dyn ToolAdapter>,
-    pub aggregator: Arc<Mutex<ShortWindowAggregator>>,
+    pub aggregator: Arc<Mutex<WindowEngine>>,
     pub control_store: Arc<Mutex<ControlFrameStore>>,
     pub receipt_store: Arc<PvgsKeyEpochStore>,
     pub registry: Arc<ToolRegistry>,
@@ -444,6 +446,12 @@ mod tests {
         }
     }
 
+    fn default_aggregator() -> Arc<Mutex<WindowEngine>> {
+        Arc::new(Mutex::new(
+            WindowEngine::new(FramesConfig::fallback()).expect("window engine"),
+        ))
+    }
+
     impl ToolAdapter for CountingAdapter {
         fn execute(&self, req: ucf::v1::ExecutionRequest) -> ucf::v1::OutcomePacket {
             let mut guard = self.calls.lock().expect("count lock");
@@ -473,7 +481,7 @@ mod tests {
             adapter,
             store,
             Arc::new(PvgsKeyEpochStore::new()),
-            Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+            default_aggregator(),
             Arc::new(trm::registry_fixture()),
         )
     }
@@ -482,7 +490,7 @@ mod tests {
         adapter: Box<dyn ToolAdapter>,
         store: Arc<Mutex<ControlFrameStore>>,
         receipt_store: Arc<PvgsKeyEpochStore>,
-        aggregator: Arc<Mutex<ShortWindowAggregator>>,
+        aggregator: Arc<Mutex<WindowEngine>>,
         registry: Arc<ToolRegistry>,
     ) -> Gate {
         Gate {
@@ -845,7 +853,7 @@ mod tests {
     fn blocks_side_effect_without_receipt() {
         let counting = CountingAdapter::default();
         let (receipt_store, _, _) = receipt_store_with_key();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -874,7 +882,7 @@ mod tests {
     fn export_requires_receipt() {
         let counting = CountingAdapter::default();
         let (receipt_store, _, _) = receipt_store_with_key();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -907,7 +915,7 @@ mod tests {
     fn blocks_side_effect_with_invalid_receipt() {
         let counting = CountingAdapter::default();
         let (receipt_store, signer, key_id) = receipt_store_with_key();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -952,7 +960,7 @@ mod tests {
     fn allows_side_effect_with_valid_receipt() {
         let counting = CountingAdapter::default();
         let (receipt_store, signer, key_id) = receipt_store_with_key();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -1003,7 +1011,7 @@ mod tests {
             Box::new(counting.clone()),
             store,
             Arc::new(PvgsKeyEpochStore::new()),
-            Arc::new(Mutex::new(ShortWindowAggregator::new(32))),
+            default_aggregator(),
             Arc::new(trm::registry_fixture()),
         );
 
@@ -1042,7 +1050,7 @@ mod tests {
     #[test]
     fn unknown_tool_fails_closed_and_counts_policy_deny() {
         let counting = CountingAdapter::default();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -1147,7 +1155,7 @@ mod tests {
     fn receipt_stats_recorded_in_signal_frame() {
         let counting = CountingAdapter::default();
         let (receipt_store, signer, key_id) = receipt_store_with_key();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -1206,7 +1214,7 @@ mod tests {
     #[test]
     fn denies_when_receipt_uses_unknown_key() {
         let counting = CountingAdapter::default();
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -1272,7 +1280,7 @@ mod tests {
                 .update(control_frame_locked_sim())
                 .expect("valid control frame");
         }
-        let aggregator = Arc::new(Mutex::new(ShortWindowAggregator::new(32)));
+        let aggregator = default_aggregator();
         let gate = Gate {
             policy: PolicyEngine::new(),
             adapter: Box::new(counting.clone()),

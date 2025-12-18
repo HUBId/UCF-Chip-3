@@ -629,6 +629,12 @@ pub mod ucf {
         pub struct DlpStats {
             #[prost(message, repeated, tag = "1")]
             pub top_reason_codes: ::prost::alloc::vec::Vec<ReasonCodeCount>,
+            #[prost(uint64, tag = "2")]
+            pub block_count: u64,
+            #[prost(uint64, tag = "3")]
+            pub redact_count: u64,
+            #[prost(uint64, tag = "4")]
+            pub classify_upgrade_count: u64,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct BudgetStats {
