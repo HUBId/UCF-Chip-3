@@ -47,6 +47,8 @@ pub struct GateContext {
     pub control_frame: Option<ucf::v1::ControlFrame>,
     pub pvgs_receipt: Option<ucf::v1::PvgsReceipt>,
     pub approval_grant_id: Option<String>,
+    pub pev: Option<ucf::v1::PolicyEcologyVector>,
+    pub pev_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +120,8 @@ impl Gate {
             allowed_tools: ctx.allowed_tools.clone(),
             control_frame: control_frame.clone(),
             tool_action_type: action_type,
+            pev: ctx.pev.clone(),
+            pev_digest: ctx.pev_digest,
         };
 
         let mut decision = self.policy.decide_with_context(PolicyEvaluationRequest {
@@ -426,7 +430,12 @@ impl Gate {
     ) -> PolicyDecisionRecord {
         let mut rc = reason_codes.to_vec();
         rc.sort();
-        let digest = compute_decision_digest(&prior.decision_id, &DecisionForm::Deny, &rc);
+        let digest = compute_decision_digest(
+            &prior.decision_id,
+            &DecisionForm::Deny,
+            &rc,
+            prior.pev_digest,
+        );
 
         PolicyDecisionRecord {
             form: DecisionForm::Deny,
@@ -438,6 +447,7 @@ impl Gate {
             policy_version_digest: prior.policy_version_digest.clone(),
             decision_id: prior.decision_id.clone(),
             decision_digest: digest,
+            pev_digest: prior.pev_digest,
         }
     }
 
@@ -869,6 +879,8 @@ mod tests {
             control_frame: None,
             pvgs_receipt: None,
             approval_grant_id: None,
+            pev: None,
+            pev_digest: None,
         }
     }
 
@@ -954,6 +966,8 @@ mod tests {
             allowed_tools: ctx.allowed_tools.clone(),
             control_frame,
             tool_action_type: action_type,
+            pev: ctx.pev.clone(),
+            pev_digest: ctx.pev_digest,
         };
 
         gate.policy.decide_with_context(PolicyEvaluationRequest {
@@ -1080,6 +1094,8 @@ mod tests {
             allowed_tools: ctx.allowed_tools.clone(),
             control_frame: control_frame.clone(),
             tool_action_type: action_type,
+            pev: ctx.pev.clone(),
+            pev_digest: ctx.pev_digest,
         };
 
         let canonical_action = canonical_bytes(&action);

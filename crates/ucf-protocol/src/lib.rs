@@ -438,12 +438,54 @@ pub mod ucf {
             #[prost(message, optional, tag = "6")]
             pub reason_codes: ::core::option::Option<ReasonCodes>,
         }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum PolicyEcologyBias {
+            Unspecified = 0,
+            Low = 1,
+            Medium = 2,
+            High = 3,
+        }
+        impl PolicyEcologyBias {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    PolicyEcologyBias::Unspecified => "POLICY_ECOLOGY_BIAS_UNSPECIFIED",
+                    PolicyEcologyBias::Low => "POLICY_ECOLOGY_BIAS_LOW",
+                    PolicyEcologyBias::Medium => "POLICY_ECOLOGY_BIAS_MEDIUM",
+                    PolicyEcologyBias::High => "POLICY_ECOLOGY_BIAS_HIGH",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "POLICY_ECOLOGY_BIAS_UNSPECIFIED" => Some(Self::Unspecified),
+                    "POLICY_ECOLOGY_BIAS_LOW" => Some(Self::Low),
+                    "POLICY_ECOLOGY_BIAS_MEDIUM" => Some(Self::Medium),
+                    "POLICY_ECOLOGY_BIAS_HIGH" => Some(Self::High),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct PolicyEcologyVector {
+            #[prost(enumeration = "PolicyEcologyBias", tag = "1")]
+            pub conservatism_bias: i32,
+            #[prost(enumeration = "PolicyEcologyBias", tag = "2")]
+            pub novelty_penalty_bias: i32,
+            #[prost(enumeration = "PolicyEcologyBias", tag = "3")]
+            pub reversibility_bias: i32,
+            #[prost(message, optional, tag = "4")]
+            pub pev_digest: ::core::option::Option<Digest32>,
+        }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ConstraintsDelta {
             #[prost(string, repeated, tag = "1")]
             pub constraints_added: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
             #[prost(string, repeated, tag = "2")]
             pub constraints_removed: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            #[prost(bool, tag = "3")]
+            pub novelty_lock: bool,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct PolicyDecision {
