@@ -29,6 +29,96 @@ const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
 const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
 const POLICY_DECISION_REF: &str = "policy_decision";
 
+/// Tracks PVGS commit attempts for decisions to enable idempotent retry on restarts.
+///
+/// The store records the commit lifecycle for each decision digest so that callers can safely
+/// retry pending or failed commits without re-issuing successful ones. This strategy preserves
+/// integrity on restart: a decision observed as `Committed` is skipped, while `Pending` or
+/// `Failed` entries are retried and updated based on the latest commit outcome.
+#[derive(Debug, Default, Clone)]
+pub struct DecisionLogStore {
+    entries: std::collections::HashMap<[u8; 32], DecisionLogEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionCommitState {
+    Pending,
+    Committed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionCommitDisposition {
+    CommitRequired,
+    AlreadyCommitted,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DecisionLogEntry {
+    pub state: DecisionCommitState,
+    pub receipt_digest: Option<[u8; 32]>,
+}
+
+impl Default for DecisionLogEntry {
+    fn default() -> Self {
+        Self {
+            state: DecisionCommitState::Pending,
+            receipt_digest: None,
+        }
+    }
+}
+
+impl DecisionLogStore {
+    pub fn observe_or_register(
+        &mut self,
+        decision_digest: [u8; 32],
+    ) -> (DecisionCommitDisposition, Option<[u8; 32]>) {
+        let (disposition, receipt_digest) = match self.entries.get(&decision_digest) {
+            Some(entry) if entry.state == DecisionCommitState::Committed => (
+                DecisionCommitDisposition::AlreadyCommitted,
+                entry.receipt_digest,
+            ),
+            Some(entry) => (
+                DecisionCommitDisposition::CommitRequired,
+                entry.receipt_digest,
+            ),
+            None => (DecisionCommitDisposition::CommitRequired, None),
+        };
+
+        let entry = self.entries.entry(decision_digest).or_default();
+
+        if entry.state != DecisionCommitState::Committed {
+            entry.state = DecisionCommitState::Pending;
+        }
+
+        (disposition, receipt_digest)
+    }
+
+    pub fn mark_committed(&mut self, decision_digest: [u8; 32], receipt_digest: Option<[u8; 32]>) {
+        self.entries.insert(
+            decision_digest,
+            DecisionLogEntry {
+                state: DecisionCommitState::Committed,
+                receipt_digest,
+            },
+        );
+    }
+
+    pub fn mark_failed(&mut self, decision_digest: [u8; 32], receipt_digest: Option<[u8; 32]>) {
+        self.entries.insert(
+            decision_digest,
+            DecisionLogEntry {
+                state: DecisionCommitState::Failed,
+                receipt_digest,
+            },
+        );
+    }
+
+    pub fn status(&self, decision_digest: [u8; 32]) -> Option<DecisionCommitState> {
+        self.entries.get(&decision_digest).map(|entry| entry.state)
+    }
+}
+
 pub struct Gate {
     pub policy: PolicyEngine,
     pub adapter: Box<dyn ToolAdapter>,
@@ -38,6 +128,7 @@ pub struct Gate {
     pub registry: Arc<ToolRegistry>,
     pub pvgs_client: Arc<Mutex<Box<dyn PvgsClient>>>,
     pub integrity_issues: Arc<Mutex<u64>>,
+    pub decision_log: Arc<Mutex<DecisionLogStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +155,8 @@ pub struct DecisionContext {
     pub ruleset_digest: Option<[u8; 32]>,
     pub control_frame_digest: [u8; 32],
     pub tool_profile_digest: Option<[u8; 32]>,
+    pub commit_disposition: DecisionCommitDisposition,
+    pub receipt_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,6 +256,8 @@ impl Gate {
                 .as_ref()
                 .and_then(|tap| tap.profile_digest.as_ref())
                 .and_then(digest32_to_array),
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: None,
         };
 
         if tool_profile.is_none() {
@@ -178,6 +273,7 @@ impl Gate {
         // TODO: DLP enforcement hook.
 
         self.note_policy_decision(&decision);
+        self.refresh_commit_disposition(&mut decision_context);
         self.commit_policy_decision_record(&decision, &decision_context);
 
         match decision.form {
@@ -275,7 +371,7 @@ impl Gate {
         decision_ctx: &DecisionContext,
     ) {
         let record = build_decision_record(decision, decision_ctx);
-        self.commit_record(record);
+        self.commit_record(record, decision_ctx);
     }
 
     fn note_execution_outcome(&self, outcome: &ucf::v1::OutcomePacket) {
@@ -315,10 +411,26 @@ impl Gate {
             decision_ctx,
         );
 
-        self.commit_record(record);
+        self.commit_record(record, decision_ctx);
     }
 
-    fn commit_record(&self, record: ucf::v1::ExperienceRecord) {
+    fn refresh_commit_disposition(&self, decision_ctx: &mut DecisionContext) {
+        if let Ok(mut log) = self.decision_log.lock() {
+            let (disposition, receipt_digest) =
+                log.observe_or_register(decision_ctx.decision_digest);
+            decision_ctx.commit_disposition = disposition;
+            decision_ctx.receipt_digest = receipt_digest;
+        } else {
+            decision_ctx.commit_disposition = DecisionCommitDisposition::CommitRequired;
+            decision_ctx.receipt_digest = None;
+        }
+    }
+
+    fn commit_record(&self, record: ucf::v1::ExperienceRecord, decision_ctx: &DecisionContext) {
+        if decision_ctx.commit_disposition == DecisionCommitDisposition::AlreadyCommitted {
+            return;
+        }
+
         let receipt_result = self
             .pvgs_client
             .lock()
@@ -326,6 +438,17 @@ impl Gate {
 
         match receipt_result {
             Ok(Ok(receipt)) => {
+                let receipt_digest = receipt.receipt_digest.as_ref().and_then(digest32_to_array);
+                if let Ok(mut log) = self.decision_log.lock() {
+                    if ucf::v1::ReceiptStatus::try_from(receipt.status)
+                        == Ok(ucf::v1::ReceiptStatus::Accepted)
+                    {
+                        log.mark_committed(decision_ctx.decision_digest, receipt_digest);
+                    } else {
+                        log.mark_failed(decision_ctx.decision_digest, receipt_digest);
+                    }
+                }
+
                 if ucf::v1::ReceiptStatus::try_from(receipt.status)
                     != Ok(ucf::v1::ReceiptStatus::Accepted)
                 {
@@ -337,7 +460,12 @@ impl Gate {
                     self.note_integrity_issue(&reasons);
                 }
             }
-            _ => self.note_integrity_issue(&[PVGS_INTEGRITY_REASON.to_string()]),
+            _ => {
+                if let Ok(mut log) = self.decision_log.lock() {
+                    log.mark_failed(decision_ctx.decision_digest, None);
+                }
+                self.note_integrity_issue(&[PVGS_INTEGRITY_REASON.to_string()]);
+            }
         }
     }
 
@@ -571,6 +699,8 @@ fn update_decision_context(decision: &PolicyDecisionRecord, decision_ctx: &mut D
     decision_ctx.policy_decision = decision.decision.clone();
     decision_ctx.decision_digest = decision.decision_digest;
     decision_ctx.ruleset_digest = decision.ruleset_digest;
+    decision_ctx.commit_disposition = DecisionCommitDisposition::CommitRequired;
+    decision_ctx.receipt_digest = None;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -874,6 +1004,10 @@ mod tests {
         ))
     }
 
+    fn default_decision_log() -> Arc<Mutex<DecisionLogStore>> {
+        Arc::new(Mutex::new(DecisionLogStore::default()))
+    }
+
     fn default_pvgs_client() -> PvgsClientHandle {
         Arc::new(Mutex::new(
             Box::new(MockPvgsClient::default()) as Box<dyn PvgsClient>
@@ -929,9 +1063,11 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn gate_with_components(
         adapter: Box<dyn ToolAdapter>,
         store: Arc<Mutex<ControlFrameStore>>,
@@ -940,6 +1076,7 @@ mod tests {
         registry: Arc<ToolRegistry>,
         pvgs_client: PvgsClientHandle,
         integrity_issues: Arc<Mutex<u64>>,
+        decision_log: Arc<Mutex<DecisionLogStore>>,
     ) -> Gate {
         Gate {
             policy: PolicyEngine::new(),
@@ -950,6 +1087,7 @@ mod tests {
             registry,
             pvgs_client,
             integrity_issues,
+            decision_log,
         }
     }
 
@@ -1233,6 +1371,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             pvgs_client,
             integrity_counter(),
+            default_decision_log(),
         );
 
         let mut ctx = ok_ctx();
@@ -1364,6 +1503,8 @@ mod tests {
             ruleset_digest: decision.ruleset_digest,
             control_frame_digest,
             tool_profile_digest,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: None,
         };
 
         let req_a = gate.build_execution_request(
@@ -1396,6 +1537,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             pvgs_client,
             integrity_counter(),
+            default_decision_log(),
         );
 
         let result =
@@ -1464,17 +1606,24 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             pvgs_client,
             integrity_counter(),
+            default_decision_log(),
         );
 
         let ctx = ok_ctx();
         let action = base_action("mock.read", "get");
         let _ = gate.handle_action_spec("s", "step", action.clone(), ctx.clone());
+
+        let first_bytes = {
+            let guard = inner_client.lock().expect("pvgs client lock");
+            assert_eq!(guard.committed_bytes.len(), 2);
+            guard.committed_bytes.clone()
+        };
+
         let _ = gate.handle_action_spec("s", "step", action, ctx);
 
         let guard = inner_client.lock().expect("pvgs client lock");
-        assert_eq!(guard.committed_bytes.len(), 4);
-        assert_eq!(guard.committed_bytes[0], guard.committed_bytes[2]);
-        assert_eq!(guard.committed_bytes[1], guard.committed_bytes[3]);
+        assert_eq!(guard.committed_bytes.len(), 2);
+        assert_eq!(guard.committed_bytes, first_bytes);
     }
 
     #[test]
@@ -1488,6 +1637,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             pvgs_client,
             integrity_counter(),
+            default_decision_log(),
         );
 
         let mut ctx = ok_ctx();
@@ -1526,6 +1676,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             pvgs_client,
             integrity_counter(),
+            default_decision_log(),
         );
 
         let ctx = ok_ctx();
@@ -1562,6 +1713,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let ctx = ok_ctx();
@@ -1593,6 +1745,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let ctx = ok_ctx();
@@ -1628,6 +1781,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let mut ctx = ok_ctx();
@@ -1675,6 +1829,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let mut ctx = ok_ctx();
@@ -1723,6 +1878,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let ctx = ok_ctx();
@@ -1769,6 +1925,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let mut ctx = ok_ctx();
@@ -1795,6 +1952,59 @@ mod tests {
         assert!(top_policy_codes
             .iter()
             .any(|rc| rc.code == "RC.PB.DENY.TOOL_NOT_ALLOWED"));
+    }
+
+    #[test]
+    fn decision_log_prevents_duplicate_commits_after_success() {
+        let counting = CountingAdapter::default();
+        let (local, pvgs_client) = shared_local_client();
+        let decision_log = default_decision_log();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+            decision_log.clone(),
+        );
+
+        let action = base_action("unknown.tool", "do");
+        let ctx = ok_ctx();
+        let first = gate.handle_action_spec("s", "step", action.clone(), ctx.clone());
+        let first_digest = match first {
+            GateResult::Denied { decision } => decision.decision_digest,
+            other => panic!("expected deny for unknown tool, got {other:?}"),
+        };
+
+        assert_eq!(
+            local
+                .lock()
+                .expect("pvgs client lock")
+                .committed_records
+                .len(),
+            1
+        );
+        assert_eq!(
+            decision_log
+                .lock()
+                .expect("decision log lock")
+                .status(first_digest),
+            Some(DecisionCommitState::Committed)
+        );
+
+        let second = gate.handle_action_spec("s", "step", action, ctx);
+        assert!(matches!(second, GateResult::Denied { .. }));
+        assert_eq!(
+            local
+                .lock()
+                .expect("pvgs client lock")
+                .committed_records
+                .len(),
+            1,
+            "duplicate commits should be skipped",
+        );
     }
 
     #[test]
@@ -1876,6 +2086,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let ctx = ok_ctx();
@@ -1930,6 +2141,7 @@ mod tests {
         let counting = CountingAdapter::default();
         let aggregator = default_aggregator();
         let integrity = integrity_counter();
+        let decision_log = default_decision_log();
         let rejecting_client = boxed_client(SharedLocalClient::new(Arc::new(Mutex::new(
             pvgs_client::LocalPvgsClient::rejecting(vec![PVGS_INTEGRITY_REASON.to_string()]),
         ))));
@@ -1941,12 +2153,23 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             rejecting_client,
             integrity.clone(),
+            decision_log.clone(),
         );
 
         let result =
             gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
         assert!(matches!(result, GateResult::Executed { .. }));
         assert_eq!(*integrity.lock().expect("integrity counter lock"), 2);
+
+        if let GateResult::Executed { decision, .. } = result {
+            assert_eq!(
+                decision_log
+                    .lock()
+                    .expect("decision log lock")
+                    .status(decision.decision_digest),
+                Some(DecisionCommitState::Failed)
+            );
+        }
 
         let frames = aggregator.lock().expect("agg lock").force_flush();
         let integrity_stats = frames
@@ -1966,6 +2189,7 @@ mod tests {
         let counting = CountingAdapter::default();
         let aggregator = default_aggregator();
         let integrity = integrity_counter();
+        let decision_log = default_decision_log();
         let rejecting_client = boxed_client(MockPvgsClient::rejecting(vec![
             PVGS_INTEGRITY_REASON.to_string()
         ]));
@@ -1977,6 +2201,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             rejecting_client,
             integrity.clone(),
+            decision_log.clone(),
         );
 
         let mut ctx = ok_ctx();
@@ -1986,6 +2211,16 @@ mod tests {
         assert!(matches!(result, GateResult::Denied { .. }));
         assert_eq!(counting.count(), 0);
         assert_eq!(*integrity.lock().expect("integrity counter lock"), 1);
+
+        if let GateResult::Denied { decision } = result {
+            assert_eq!(
+                decision_log
+                    .lock()
+                    .expect("decision log lock")
+                    .status(decision.decision_digest),
+                Some(DecisionCommitState::Failed)
+            );
+        }
 
         let frames = aggregator.lock().expect("agg lock").force_flush();
         let integrity_stats = frames
@@ -2012,6 +2247,7 @@ mod tests {
             Arc::new(trm::registry_fixture()),
             default_pvgs_client(),
             integrity_counter(),
+            default_decision_log(),
         );
 
         let mut ctx = ok_ctx();
@@ -2081,6 +2317,7 @@ mod tests {
             registry: Arc::new(trm::registry_fixture()),
             pvgs_client: default_pvgs_client(),
             integrity_issues: integrity_counter(),
+            decision_log: default_decision_log(),
         };
 
         let mut ctx = ok_ctx();

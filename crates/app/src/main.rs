@@ -8,7 +8,7 @@ use std::{
 use control::ControlFrameStore;
 use ed25519_dalek::{Signer, SigningKey};
 use frames::{FramesConfig, WindowEngine};
-use gem::{Gate, GateContext, GateResult};
+use gem::{DecisionLogStore, Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
 use pvgs_client::{KeyEpochSync, LocalPvgsClient};
 use pvgs_verify::{
@@ -40,6 +40,7 @@ fn main() {
             Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClient>
         )),
         integrity_issues: Arc::new(Mutex::new(0)),
+        decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
     };
 
     let control_frame_m0 = control_frame_m0();
