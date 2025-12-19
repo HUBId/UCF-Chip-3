@@ -3,7 +3,7 @@
 use std::convert::TryFrom;
 
 use blake3::Hasher;
-use ucf_protocol::{canonical_bytes, ucf};
+use ucf_protocol::{canonical_bytes, digest32, ucf};
 
 const POLICY_VERSION_DIGEST: &str = "policy-v1-mvp";
 const POLICY_QUERY_HASH_DOMAIN: &str = "UCF:HASH:POLICY_QUERY";
@@ -188,14 +188,12 @@ pub fn policy_query_digest(query: &ucf::v1::PolicyQuery) -> [u8; 32] {
     if let Some(reason_codes) = canonical_query.reason_codes.as_mut() {
         reason_codes.codes.sort();
     }
+    if let Some(action) = canonical_query.action.as_mut() {
+        action.resources.sort();
+    }
     let canonical = canonical_bytes(&canonical_query);
 
-    let mut hasher = Hasher::new();
-    hasher.update(POLICY_QUERY_HASH_DOMAIN.as_bytes());
-    hasher.update("PolicyQuery".as_bytes());
-    hasher.update("v1".as_bytes());
-    hasher.update(&canonical);
-    *hasher.finalize().as_bytes()
+    digest32(POLICY_QUERY_HASH_DOMAIN, "PolicyQuery", "v1", &canonical)
 }
 
 #[derive(Clone)]
@@ -538,6 +536,29 @@ mod tests {
 
         let digest_a = policy_query_digest(&with_reason_codes);
         let digest_b = policy_query_digest(&shuffled);
+
+        assert_eq!(digest_a, digest_b);
+    }
+
+    #[test]
+    fn policy_query_digest_normalizes_resource_order() {
+        let mut with_resources = base_query("mock.read");
+        with_resources
+            .action
+            .as_mut()
+            .expect("action present")
+            .resources = vec!["b".to_string(), "a".to_string()];
+
+        let mut reversed = with_resources.clone();
+        reversed
+            .action
+            .as_mut()
+            .expect("action present")
+            .resources
+            .reverse();
+
+        let digest_a = policy_query_digest(&with_resources);
+        let digest_b = policy_query_digest(&reversed);
 
         assert_eq!(digest_a, digest_b);
     }
