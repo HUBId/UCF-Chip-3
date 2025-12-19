@@ -1682,8 +1682,11 @@ mod tests {
             })
             .expect("action record present");
 
-        let related_ids: Vec<_> =
-            action_record.related_refs.iter().map(|r| r.id.as_str()).collect();
+        let related_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
         assert_eq!(related_ids, vec!["policy_query", "decision", "ruleset"]);
 
         let decision_digest = action_record
