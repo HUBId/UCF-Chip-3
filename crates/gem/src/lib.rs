@@ -10,8 +10,8 @@ use control::ControlFrameStore;
 use frames::FramesConfig;
 use frames::{ReceiptIssue, WindowEngine};
 use pbm::{
-    compute_decision_digest, DecisionForm, PolicyContext, PolicyDecisionRecord, PolicyEngine,
-    PolicyEvaluationRequest,
+    compute_decision_digest, policy_query_digest, DecisionForm, PolicyContext,
+    PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest,
 };
 use pvgs_client::PvgsClient;
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore, VerifyError};
@@ -117,7 +117,7 @@ impl Gate {
         let canonical = canonical_bytes(&action);
         let action_digest = digest32("UCF:HASH:ACTION_SPEC", "ActionSpec", "v1", &canonical);
 
-        let query = ucf::v1::PolicyQuery {
+        let policy_query = ucf::v1::PolicyQuery {
             principal: "chip3".to_string(),
             action: Some(action.clone()),
             channel: ucf::v1::Channel::Unspecified.into(),
@@ -125,6 +125,8 @@ impl Gate {
             data_class: ucf::v1::DataClass::Unspecified.into(),
             reason_codes: None,
         };
+
+        let policy_query_digest = policy_query_digest(&policy_query);
 
         let control_frame = self.resolve_control_frame(&ctx);
         let control_frame_digest = control::control_frame_digest(&control_frame);
@@ -142,15 +144,17 @@ impl Gate {
 
         let mut decision = self.policy.decide_with_context(PolicyEvaluationRequest {
             decision_id: format!("{session_id}:{step_id}"),
-            query: query.clone(),
+            query: policy_query.clone(),
             context: policy_ctx,
         });
 
-        let decision_context = DecisionContext {
+        decision.policy_query_digest = policy_query_digest;
+
+        let mut decision_context = DecisionContext {
             session_id: session_id.to_string(),
             step_id: step_id.to_string(),
-            policy_query: query,
-            policy_query_digest: decision.policy_query_digest,
+            policy_query,
+            policy_query_digest,
             policy_decision: decision.decision.clone(),
             decision_digest: decision.decision_digest,
             ruleset_digest: decision.ruleset_digest,
@@ -162,8 +166,11 @@ impl Gate {
         };
 
         if tool_profile.is_none() {
-            decision =
-                self.deny_with_reasons(&decision, &["RC.PB.DENY.TOOL_NOT_ALLOWED".to_string()]);
+            self.deny_with_reasons(
+                &mut decision,
+                &mut decision_context,
+                &["RC.PB.DENY.TOOL_NOT_ALLOWED".to_string()],
+            );
         }
 
         // TODO: budget accounting hook.
@@ -171,7 +178,7 @@ impl Gate {
         // TODO: DLP enforcement hook.
 
         self.note_policy_decision(&decision);
-        self.commit_policy_decision_record(&decision);
+        self.commit_policy_decision_record(&decision, &decision_context);
 
         match decision.form {
             DecisionForm::Deny => GateResult::Denied { decision },
@@ -183,9 +190,9 @@ impl Gate {
                         action_type,
                         action_digest,
                         &action,
-                        &decision,
+                        &mut decision,
                         &ctx,
-                        &decision_context,
+                        &mut decision_context,
                     ) {
                         return result;
                     }
@@ -262,8 +269,12 @@ impl Gate {
         }
     }
 
-    fn commit_policy_decision_record(&self, decision: &PolicyDecisionRecord) {
-        let record = build_decision_record(decision);
+    fn commit_policy_decision_record(
+        &self,
+        decision: &PolicyDecisionRecord,
+        decision_ctx: &DecisionContext,
+    ) {
+        let record = build_decision_record(decision, decision_ctx);
         self.commit_record(record);
     }
 
@@ -354,9 +365,9 @@ impl Gate {
         action_type: ucf::v1::ToolActionType,
         action_digest: [u8; 32],
         action: &ucf::v1::ActionSpec,
-        decision: &PolicyDecisionRecord,
+        decision: &mut PolicyDecisionRecord,
         ctx: &GateContext,
-        decision_ctx: &DecisionContext,
+        decision_ctx: &mut DecisionContext,
     ) -> Result<(), GateResult> {
         if !requires_receipt(action_type) {
             return Ok(());
@@ -369,9 +380,13 @@ impl Gate {
                     ReceiptIssue::Missing,
                     &[RECEIPT_BLOCKED_REASON.to_string()],
                 );
+                self.receipt_blocked_decision(
+                    decision,
+                    decision_ctx,
+                    &[RECEIPT_BLOCKED_REASON.to_string()],
+                );
                 return Err(GateResult::Denied {
-                    decision: self
-                        .receipt_blocked_decision(decision, &[RECEIPT_BLOCKED_REASON.to_string()]),
+                    decision: decision.clone(),
                 });
             }
         };
@@ -382,7 +397,7 @@ impl Gate {
                 _ => vec![RECEIPT_BLOCKED_REASON.to_string()],
             };
             self.note_receipt_issue(ReceiptIssue::Invalid, &reason_codes);
-            return Err(self.receipt_gate_error(decision, &reason_codes, action));
+            return Err(self.receipt_gate_error(decision, decision_ctx, &reason_codes, action));
         }
 
         if ucf::v1::ReceiptStatus::try_from(receipt.status) != Ok(ucf::v1::ReceiptStatus::Accepted)
@@ -390,6 +405,7 @@ impl Gate {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
+                decision_ctx,
                 &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
@@ -399,6 +415,7 @@ impl Gate {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
+                decision_ctx,
                 &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
@@ -408,6 +425,7 @@ impl Gate {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
+                decision_ctx,
                 &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
@@ -420,6 +438,7 @@ impl Gate {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
+                decision_ctx,
                 &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
@@ -432,6 +451,7 @@ impl Gate {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
+                decision_ctx,
                 &[RECEIPT_BLOCKED_REASON.to_string()],
                 action,
             ));
@@ -445,6 +465,7 @@ impl Gate {
                 );
                 return Err(self.receipt_gate_error(
                     decision,
+                    decision_ctx,
                     &[RECEIPT_BLOCKED_REASON.to_string()],
                     action,
                 ));
@@ -462,9 +483,10 @@ impl Gate {
 
     fn deny_with_reasons(
         &self,
-        prior: &PolicyDecisionRecord,
+        prior: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
         reason_codes: &[String],
-    ) -> PolicyDecisionRecord {
+    ) {
         let mut rc = reason_codes.to_vec();
         rc.sort();
         let digest = compute_decision_digest(
@@ -473,41 +495,40 @@ impl Gate {
             &rc,
             prior.pev_digest,
             prior.ruleset_digest,
-            &prior.policy_query_digest,
+            &decision_ctx.policy_query_digest,
         );
 
-        PolicyDecisionRecord {
-            form: DecisionForm::Deny,
-            decision: ucf::v1::PolicyDecision {
-                decision: ucf::v1::DecisionForm::Deny.into(),
-                reason_codes: Some(ucf::v1::ReasonCodes { codes: rc.clone() }),
-                constraints: None,
-            },
-            policy_version_digest: prior.policy_version_digest.clone(),
-            policy_query_digest: prior.policy_query_digest,
-            decision_id: prior.decision_id.clone(),
-            decision_digest: digest,
-            pev_digest: prior.pev_digest,
-            ruleset_digest: prior.ruleset_digest,
-        }
+        prior.form = DecisionForm::Deny;
+        prior.decision = ucf::v1::PolicyDecision {
+            decision: ucf::v1::DecisionForm::Deny.into(),
+            reason_codes: Some(ucf::v1::ReasonCodes { codes: rc.clone() }),
+            constraints: None,
+        };
+        prior.policy_query_digest = decision_ctx.policy_query_digest;
+        prior.decision_digest = digest;
+
+        update_decision_context(prior, decision_ctx);
     }
 
     fn receipt_blocked_decision(
         &self,
-        prior: &PolicyDecisionRecord,
+        prior: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
         reason_codes: &[String],
-    ) -> PolicyDecisionRecord {
-        self.deny_with_reasons(prior, reason_codes)
+    ) {
+        self.deny_with_reasons(prior, decision_ctx, reason_codes)
     }
 
     fn receipt_gate_error(
         &self,
-        prior: &PolicyDecisionRecord,
+        prior: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
         reason_codes: &[String],
         _action: &ucf::v1::ActionSpec,
     ) -> GateResult {
+        self.receipt_blocked_decision(prior, decision_ctx, reason_codes);
         GateResult::Denied {
-            decision: self.receipt_blocked_decision(prior, reason_codes),
+            decision: prior.clone(),
         }
     }
 
@@ -546,8 +567,17 @@ fn digest_array_matches(actual: Option<&ucf::v1::Digest32>, expected: Option<[u8
     }
 }
 
+fn update_decision_context(decision: &PolicyDecisionRecord, decision_ctx: &mut DecisionContext) {
+    decision_ctx.policy_decision = decision.decision.clone();
+    decision_ctx.decision_digest = decision.decision_digest;
+    decision_ctx.ruleset_digest = decision.ruleset_digest;
+}
+
 #[allow(clippy::too_many_arguments)]
-fn build_decision_record(decision: &PolicyDecisionRecord) -> ucf::v1::ExperienceRecord {
+fn build_decision_record(
+    decision: &PolicyDecisionRecord,
+    decision_ctx: &DecisionContext,
+) -> ucf::v1::ExperienceRecord {
     let mut reason_codes = decision
         .decision
         .reason_codes
@@ -559,7 +589,7 @@ fn build_decision_record(decision: &PolicyDecisionRecord) -> ucf::v1::Experience
 
     let governance_frame = ucf::v1::GovernanceFrame {
         policy_decision_refs: vec![ucf::v1::Digest32 {
-            value: decision.decision_digest.to_vec(),
+            value: decision_ctx.decision_digest.to_vec(),
         }],
         grant_refs: Vec::new(),
         dlp_refs: Vec::new(),
@@ -573,11 +603,11 @@ fn build_decision_record(decision: &PolicyDecisionRecord) -> ucf::v1::Experience
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
 
-    let mut related_refs = vec![policy_query_related_ref(decision.policy_query_digest)];
+    let mut related_refs = vec![policy_query_related_ref(decision_ctx.policy_query_digest)];
     related_refs.push(ucf::v1::RelatedRef {
         id: POLICY_DECISION_REF.to_string(),
         digest: Some(ucf::v1::Digest32 {
-            value: decision.decision_digest.to_vec(),
+            value: decision_ctx.decision_digest.to_vec(),
         }),
     });
     if let Some(ruleset_digest) = decision.ruleset_digest {
@@ -615,14 +645,14 @@ fn build_action_exec_record(
 ) -> ucf::v1::ExperienceRecord {
     let core_frame = build_core_frame(decision_ctx, action_digest);
     let metabolic_frame = build_metabolic_frame(control_frame, &decision_ctx.control_frame_digest);
-    let governance_frame = build_governance_frame(decision, outcome, ctx);
+    let governance_frame = build_governance_frame(decision, decision_ctx, outcome, ctx);
 
     let core_frame_ref = digest_proto(CORE_FRAME_DOMAIN, &canonical_bytes(&core_frame));
     let metabolic_frame_ref =
         digest_proto(METABOLIC_FRAME_DOMAIN, &canonical_bytes(&metabolic_frame));
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
-    let mut related_refs = vec![policy_query_related_ref(decision.policy_query_digest)];
+    let mut related_refs = vec![policy_query_related_ref(decision_ctx.policy_query_digest)];
     related_refs.extend(ruleset_related_refs(decision_ctx.ruleset_digest));
 
     ucf::v1::ExperienceRecord {
@@ -673,6 +703,7 @@ fn build_metabolic_frame(
 
 fn build_governance_frame(
     decision: &PolicyDecisionRecord,
+    decision_ctx: &DecisionContext,
     outcome: &ucf::v1::OutcomePacket,
     ctx: &GateContext,
 ) -> ucf::v1::GovernanceFrame {
@@ -697,7 +728,7 @@ fn build_governance_frame(
 
     ucf::v1::GovernanceFrame {
         policy_decision_refs: vec![ucf::v1::Digest32 {
-            value: decision.decision_digest.to_vec(),
+            value: decision_ctx.decision_digest.to_vec(),
         }],
         grant_refs,
         dlp_refs: Vec::new(),
