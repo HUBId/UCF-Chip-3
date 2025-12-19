@@ -28,6 +28,13 @@ pub mod ucf {
             pub label: ::prost::alloc::string::String,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct RelatedRef {
+            #[prost(string, tag = "1")]
+            pub id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ReasonCodes {
             #[prost(string, repeated, tag = "1")]
             pub codes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -992,6 +999,8 @@ pub mod ucf {
             pub metabolic_frame_ref: ::core::option::Option<Digest32>,
             #[prost(message, optional, tag = "7")]
             pub governance_frame_ref: ::core::option::Option<Digest32>,
+            #[prost(message, repeated, tag = "8")]
+            pub related_refs: ::prost::alloc::vec::Vec<RelatedRef>,
         }
     }
 }
