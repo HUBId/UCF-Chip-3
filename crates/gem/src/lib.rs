@@ -53,6 +53,19 @@ pub struct GateContext {
     pub ruleset_digest: Option<[u8; 32]>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DecisionContext {
+    pub session_id: String,
+    pub step_id: String,
+    pub policy_query: ucf::v1::PolicyQuery,
+    pub policy_query_digest: [u8; 32],
+    pub policy_decision: ucf::v1::PolicyDecision,
+    pub decision_digest: [u8; 32],
+    pub ruleset_digest: Option<[u8; 32]>,
+    pub control_frame_digest: [u8; 32],
+    pub tool_profile_digest: Option<[u8; 32]>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GateResult {
     ValidationError {
@@ -129,9 +142,24 @@ impl Gate {
 
         let mut decision = self.policy.decide_with_context(PolicyEvaluationRequest {
             decision_id: format!("{session_id}:{step_id}"),
-            query,
+            query: query.clone(),
             context: policy_ctx,
         });
+
+        let decision_context = DecisionContext {
+            session_id: session_id.to_string(),
+            step_id: step_id.to_string(),
+            policy_query: query,
+            policy_query_digest: decision.policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest: decision.decision_digest,
+            ruleset_digest: decision.ruleset_digest,
+            control_frame_digest,
+            tool_profile_digest: tool_profile
+                .as_ref()
+                .and_then(|tap| tap.profile_digest.as_ref())
+                .and_then(digest32_to_array),
+        };
 
         if tool_profile.is_none() {
             decision =
@@ -150,15 +178,14 @@ impl Gate {
             DecisionForm::RequireApproval => GateResult::ApprovalRequired { decision },
             DecisionForm::RequireSimulationFirst => GateResult::SimulationRequired { decision },
             DecisionForm::Allow | DecisionForm::AllowWithConstraints => {
-                if let Some(tap) = tool_profile {
+                if tool_profile.is_some() {
                     if let Err(result) = self.enforce_receipt_gate(
-                        tap,
                         action_type,
                         action_digest,
                         &action,
                         &decision,
                         &ctx,
-                        &control_frame_digest,
+                        &decision_context,
                     ) {
                         return result;
                     }
@@ -171,22 +198,20 @@ impl Gate {
                     &tool_id,
                     &action_id,
                     &decision,
-                    session_id,
-                    step_id,
+                    &decision_context,
                 );
 
                 let outcome = self.adapter.execute(execution_request.clone());
                 self.note_execution_outcome(&outcome);
 
                 self.commit_action_exec_record(
-                    session_id,
-                    step_id,
                     &action,
                     action_digest,
                     &decision,
                     &outcome,
                     &control_frame,
                     &ctx,
+                    &decision_context,
                 );
 
                 GateResult::Executed { decision, outcome }
@@ -200,10 +225,9 @@ impl Gate {
         tool_id: &str,
         action_name: &str,
         decision: &PolicyDecisionRecord,
-        session_id: &str,
-        step_id: &str,
+        decision_ctx: &DecisionContext,
     ) -> ucf::v1::ExecutionRequest {
-        let request_id = format!("{session_id}:{step_id}");
+        let request_id = format!("{}:{}", decision_ctx.session_id, decision_ctx.step_id);
         let constraints = decision
             .decision
             .constraints
@@ -262,24 +286,22 @@ impl Gate {
     #[allow(clippy::too_many_arguments)]
     fn commit_action_exec_record(
         &self,
-        session_id: &str,
-        step_id: &str,
         action: &ucf::v1::ActionSpec,
         action_digest: [u8; 32],
         decision: &PolicyDecisionRecord,
         outcome: &ucf::v1::OutcomePacket,
         control_frame: &ucf::v1::ControlFrame,
         ctx: &GateContext,
+        decision_ctx: &DecisionContext,
     ) {
         let record = build_action_exec_record(
-            session_id,
-            step_id,
             action,
             action_digest,
             decision,
             outcome,
             control_frame,
             ctx,
+            decision_ctx,
         );
 
         self.commit_record(record);
@@ -329,13 +351,12 @@ impl Gate {
     #[allow(clippy::result_large_err, clippy::too_many_arguments)]
     fn enforce_receipt_gate(
         &self,
-        tap: &ucf::v1::ToolActionProfile,
         action_type: ucf::v1::ToolActionType,
         action_digest: [u8; 32],
         action: &ucf::v1::ActionSpec,
         decision: &PolicyDecisionRecord,
         ctx: &GateContext,
-        control_frame_digest: &[u8; 32],
+        decision_ctx: &DecisionContext,
     ) -> Result<(), GateResult> {
         if !requires_receipt(action_type) {
             return Ok(());
@@ -392,7 +413,10 @@ impl Gate {
             ));
         }
 
-        if !digest_matches(receipt.profile_digest.as_ref(), control_frame_digest) {
+        if !digest_matches(
+            receipt.profile_digest.as_ref(),
+            &decision_ctx.control_frame_digest,
+        ) {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
                 decision,
@@ -401,9 +425,9 @@ impl Gate {
             ));
         }
 
-        if !digest32_matches(
-            tap.profile_digest.as_ref(),
+        if !digest_array_matches(
             receipt.tool_profile_digest.as_ref(),
+            decision_ctx.tool_profile_digest,
         ) {
             self.note_receipt_issue(ReceiptIssue::Invalid, &[RECEIPT_BLOCKED_REASON.to_string()]);
             return Err(self.receipt_gate_error(
@@ -505,12 +529,19 @@ fn digest_matches(opt: Option<&ucf::v1::Digest32>, expected: &[u8; 32]) -> bool 
     opt.map(|d| d.value.as_slice() == expected).unwrap_or(false)
 }
 
-fn digest32_matches(
-    expected: Option<&ucf::v1::Digest32>,
-    actual: Option<&ucf::v1::Digest32>,
-) -> bool {
-    match (expected, actual) {
-        (Some(exp), Some(act)) => exp.value == act.value,
+fn digest32_to_array(d: &ucf::v1::Digest32) -> Option<[u8; 32]> {
+    if d.value.len() == 32 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&d.value);
+        Some(arr)
+    } else {
+        None
+    }
+}
+
+fn digest_array_matches(actual: Option<&ucf::v1::Digest32>, expected: Option<[u8; 32]>) -> bool {
+    match (actual, expected) {
+        (Some(act), Some(exp)) => act.value.as_slice() == exp,
         _ => false,
     }
 }
@@ -574,17 +605,16 @@ fn build_decision_record(decision: &PolicyDecisionRecord) -> ucf::v1::Experience
 
 #[allow(clippy::too_many_arguments)]
 fn build_action_exec_record(
-    session_id: &str,
-    step_id: &str,
     _action: &ucf::v1::ActionSpec,
     action_digest: [u8; 32],
     decision: &PolicyDecisionRecord,
     outcome: &ucf::v1::OutcomePacket,
     control_frame: &ucf::v1::ControlFrame,
     ctx: &GateContext,
+    decision_ctx: &DecisionContext,
 ) -> ucf::v1::ExperienceRecord {
-    let core_frame = build_core_frame(session_id, step_id, action_digest);
-    let metabolic_frame = build_metabolic_frame(control_frame);
+    let core_frame = build_core_frame(decision_ctx, action_digest);
+    let metabolic_frame = build_metabolic_frame(control_frame, &decision_ctx.control_frame_digest);
     let governance_frame = build_governance_frame(decision, outcome, ctx);
 
     let core_frame_ref = digest_proto(CORE_FRAME_DOMAIN, &canonical_bytes(&core_frame));
@@ -593,7 +623,7 @@ fn build_action_exec_record(
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
     let mut related_refs = vec![policy_query_related_ref(decision.policy_query_digest)];
-    related_refs.extend(ruleset_related_refs(ctx.ruleset_digest));
+    related_refs.extend(ruleset_related_refs(decision_ctx.ruleset_digest));
 
     ucf::v1::ExperienceRecord {
         record_type: ucf::v1::RecordType::ActionExec.into(),
@@ -613,14 +643,10 @@ fn build_action_exec_record(
     }
 }
 
-fn build_core_frame(
-    session_id: &str,
-    step_id: &str,
-    action_digest: [u8; 32],
-) -> ucf::v1::CoreFrame {
+fn build_core_frame(decision_ctx: &DecisionContext, action_digest: [u8; 32]) -> ucf::v1::CoreFrame {
     ucf::v1::CoreFrame {
-        session_id: session_id.to_string(),
-        step_id: step_id.to_string(),
+        session_id: decision_ctx.session_id.to_string(),
+        step_id: decision_ctx.step_id.to_string(),
         input_packet_refs: Vec::new(),
         intent_refs: Vec::new(),
         candidate_refs: vec![ucf::v1::Digest32 {
@@ -630,9 +656,10 @@ fn build_core_frame(
     }
 }
 
-fn build_metabolic_frame(control_frame: &ucf::v1::ControlFrame) -> ucf::v1::MetabolicFrame {
-    let control_frame_digest = control::control_frame_digest(control_frame);
-
+fn build_metabolic_frame(
+    control_frame: &ucf::v1::ControlFrame,
+    control_frame_digest: &[u8; 32],
+) -> ucf::v1::MetabolicFrame {
     ucf::v1::MetabolicFrame {
         profile_state: control_frame.active_profile,
         control_frame_ref: Some(ucf::v1::Digest32 {
@@ -1275,34 +1302,52 @@ mod tests {
             "v1",
             &canonical_action,
         );
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(action.clone()),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+
         let decision = gate.policy.decide_with_context(PolicyEvaluationRequest {
             decision_id: "sid:step".to_string(),
-            query: ucf::v1::PolicyQuery {
-                principal: "chip3".to_string(),
-                action: Some(action.clone()),
-                channel: ucf::v1::Channel::Unspecified.into(),
-                risk_level: ucf::v1::RiskLevel::Unspecified.into(),
-                data_class: ucf::v1::DataClass::Unspecified.into(),
-                reason_codes: None,
-            },
+            query: policy_query.clone(),
             context: policy_ctx,
         });
+
+        let control_frame_digest = control::control_frame_digest(&control_frame);
+        let tool_profile_digest = gate
+            .registry
+            .get(&tool_id, &action_id)
+            .and_then(|tap| tap.profile_digest.as_ref())
+            .and_then(digest32_to_array);
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest: decision.policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest: decision.decision_digest,
+            ruleset_digest: decision.ruleset_digest,
+            control_frame_digest,
+            tool_profile_digest,
+        };
 
         let req_a = gate.build_execution_request(
             action_digest,
             &tool_id,
             &action_id,
             &decision,
-            "sid",
-            "step",
+            &decision_ctx,
         );
         let req_b = gate.build_execution_request(
             action_digest,
             &tool_id,
             &action_id,
             &decision,
-            "sid",
-            "step",
+            &decision_ctx,
         );
 
         assert_eq!(canonical_bytes(&req_a), canonical_bytes(&req_b));
