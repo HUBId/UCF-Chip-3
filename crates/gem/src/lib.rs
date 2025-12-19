@@ -88,7 +88,7 @@ impl DecisionLogStore {
         let entry = self
             .entries
             .entry(decision_digest)
-            .or_insert_with(DecisionLogEntry::default);
+            .or_default();
 
         if entry.state != DecisionCommitState::Committed {
             entry.state = DecisionCommitState::Pending;
@@ -1070,6 +1070,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn gate_with_components(
         adapter: Box<dyn ToolAdapter>,
         store: Arc<Mutex<ControlFrameStore>>,
