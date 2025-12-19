@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use chip4_pvgs::receipt_digest;
 use common::spawn_local_pvgs;
 use frames::{FramesConfig, WindowEngine};
-use gem::{Gate, GateContext, GateResult};
+use gem::{DecisionLogStore, Gate, GateContext, GateResult};
 use pbm::{PolicyContext, PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest};
 use pvgs_client::{MockPvgsClient, PvgsClient};
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore};
@@ -316,6 +316,7 @@ fn gate_with_components(
             Box::new(MockPvgsClient::default()) as Box<dyn PvgsClient>
         )),
         integrity_issues: Arc::new(Mutex::new(0)),
+        decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
     }
 }
 

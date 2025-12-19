@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use control::ControlFrameStore;
 use ed25519_dalek::SigningKey;
 use frames::{FramesConfig, WindowEngine};
-use gem::{Gate, GateContext, GateResult};
+use gem::{DecisionLogStore, Gate, GateContext, GateResult};
 use pbm::{PolicyContext, PolicyDecisionRecord, PolicyEvaluationRequest};
 use pvgs_client::LocalPvgsClient;
 use pvgs_verify::PvgsKeyEpochStore;
@@ -106,6 +106,7 @@ impl Harness {
                 Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClient>
             )),
             integrity_issues: Arc::new(Mutex::new(0)),
+            decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
         };
 
         let action = ucf::v1::ActionSpec {
