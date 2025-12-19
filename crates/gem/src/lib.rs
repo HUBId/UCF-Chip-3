@@ -699,6 +699,16 @@ mod tests {
                 .expect("pvgs client lock")
                 .commit_experience_record(record)
         }
+
+        fn commit_tool_registry(
+            &mut self,
+            trc: ucf::v1::ToolRegistryContainer,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_tool_registry(trc)
+        }
     }
 
     fn default_aggregator() -> Arc<Mutex<WindowEngine>> {

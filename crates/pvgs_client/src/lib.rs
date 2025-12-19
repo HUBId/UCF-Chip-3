@@ -87,6 +87,11 @@ pub trait PvgsClient: Send + Sync {
         &mut self,
         record: ucf::v1::ExperienceRecord,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
+
+    fn commit_tool_registry(
+        &mut self,
+        trc: ucf::v1::ToolRegistryContainer,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 }
 
 pub trait PvgsReader: Send + Sync {
@@ -102,6 +107,8 @@ pub struct LocalPvgsClient {
     reject_reason_codes: Vec<String>,
     pub committed_records: Vec<ucf::v1::ExperienceRecord>,
     pub committed_bytes: Vec<Vec<u8>>,
+    pub committed_tool_registries: Vec<ucf::v1::ToolRegistryContainer>,
+    pub committed_registry_bytes: Vec<Vec<u8>>,
 }
 
 impl Default for LocalPvgsClient {
@@ -113,6 +120,8 @@ impl Default for LocalPvgsClient {
             reject_reason_codes: Vec::new(),
             committed_records: Vec::new(),
             committed_bytes: Vec::new(),
+            committed_tool_registries: Vec::new(),
+            committed_registry_bytes: Vec::new(),
         }
     }
 }
@@ -131,6 +140,10 @@ impl LocalPvgsClient {
             default_status: status,
             ..Self::default()
         }
+    }
+
+    pub fn committed_tool_registries(&self) -> &[ucf::v1::ToolRegistryContainer] {
+        &self.committed_tool_registries
     }
 }
 
@@ -179,6 +192,51 @@ impl PvgsClient for LocalPvgsClient {
                 .and_then(|mf| mf.control_frame_ref.clone()),
             tool_profile_digest: None,
             reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
+                reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
+    fn commit_tool_registry(
+        &mut self,
+        trc: ucf::v1::ToolRegistryContainer,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let bytes = ucf_protocol::canonical_bytes(&trc);
+        let registry_digest = ucf_protocol::digest_proto("UCF:HASH:TOOL_REGISTRY", &bytes);
+
+        let status = self.default_status;
+        let mut reject_reason_codes = self.reject_reason_codes.clone();
+
+        self.committed_tool_registries.push(trc.clone());
+        self.committed_registry_bytes.push(bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!(
+                "pvgs-local-tool-registry-{}",
+                self.committed_tool_registries.len()
+            ),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: registry_digest.to_vec(),
+            }),
+            status: status.into(),
+            action_digest: trc.registry_digest.clone(),
+            decision_digest: None,
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
+                if reject_reason_codes.is_empty() {
+                    reject_reason_codes.push("RC.GV.TOOL_REGISTRY.REJECTED".to_string());
+                }
                 reject_reason_codes
             } else {
                 Vec::new()
@@ -284,6 +342,13 @@ impl PvgsClient for MockPvgsClient {
         record: ucf::v1::ExperienceRecord,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         self.local.commit_experience_record(record)
+    }
+
+    fn commit_tool_registry(
+        &mut self,
+        trc: ucf::v1::ToolRegistryContainer,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.local.commit_tool_registry(trc)
     }
 }
 
@@ -518,6 +583,24 @@ mod tests {
 
         assert_eq!(client.committed_bytes.len(), 2);
         assert_eq!(client.committed_bytes[0], client.committed_bytes[1]);
+    }
+
+    #[test]
+    fn local_client_serializes_tool_registry_deterministically() {
+        let mut client = LocalPvgsClient::default();
+        let registry = trm::registry_fixture();
+        let trc = registry.build_registry_container("registry", "v1", 123);
+
+        let _ = client
+            .commit_tool_registry(trc.clone())
+            .expect("first receipt");
+        let _ = client.commit_tool_registry(trc).expect("second receipt");
+
+        assert_eq!(client.committed_registry_bytes.len(), 2);
+        assert_eq!(
+            client.committed_registry_bytes[0],
+            client.committed_registry_bytes[1]
+        );
     }
 
     #[test]

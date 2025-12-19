@@ -439,6 +439,7 @@ dependencies = [
  "pvgs_verify",
  "rand",
  "thiserror",
+ "trm",
  "ucf-protocol",
 ]
 
@@ -674,7 +675,10 @@ dependencies = [
 name = "tom"
 version = "0.1.0"
 dependencies = [
+ "pvgs_client",
  "thiserror",
+ "trm",
+ "ucf-protocol",
 ]
 
 [[package]]
