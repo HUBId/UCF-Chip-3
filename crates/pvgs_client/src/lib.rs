@@ -97,6 +97,7 @@ pub trait PvgsClient: Send + Sync {
 pub trait PvgsReader: Send + Sync {
     fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector>;
     fn get_latest_pev_digest(&self) -> Option<[u8; 32]>;
+    fn get_current_ruleset_digest(&self) -> Option<[u8; 32]>;
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +266,7 @@ impl MockPvgsClient {
 pub struct MockPvgsReader {
     pev: Option<ucf::v1::PolicyEcologyVector>,
     pev_digest: Option<[u8; 32]>,
+    ruleset_digest: Option<[u8; 32]>,
 }
 
 impl Default for MockPvgsReader {
@@ -283,6 +285,7 @@ impl Default for MockPvgsReader {
         Self {
             pev: Some(pev),
             pev_digest: Some(digest),
+            ruleset_digest: None,
         }
     }
 }
@@ -307,6 +310,7 @@ impl MockPvgsReader {
         Self {
             pev: pev_with_digest,
             pev_digest,
+            ruleset_digest: None,
         }
     }
 
@@ -317,6 +321,11 @@ impl MockPvgsReader {
                 value: pev_digest.to_vec(),
             });
         }
+        self
+    }
+
+    pub fn with_ruleset_digest(mut self, ruleset_digest: [u8; 32]) -> Self {
+        self.ruleset_digest = Some(ruleset_digest);
         self
     }
 }
@@ -333,6 +342,10 @@ impl PvgsReader for MockPvgsReader {
                 .and_then(|pev| pev.pev_digest.as_ref())
                 .and_then(digest32_to_array)
         })
+    }
+
+    fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+        self.ruleset_digest
     }
 }
 
@@ -491,6 +504,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mock_reader_exposes_ruleset_digest() {
+        let ruleset_digest = [7u8; 32];
+        let reader = MockPvgsReader::default().with_ruleset_digest(ruleset_digest);
+
+        assert_eq!(reader.get_current_ruleset_digest(), Some(ruleset_digest));
+    }
+
     fn experience_record(include_governance: bool) -> ucf::v1::ExperienceRecord {
         let core_frame = ucf::v1::CoreFrame {
             session_id: "s".to_string(),
@@ -549,6 +570,7 @@ mod tests {
             core_frame_ref: Some(core_frame_ref),
             metabolic_frame_ref: Some(metabolic_frame_ref),
             governance_frame_ref,
+            related_refs: Vec::new(),
         }
     }
 

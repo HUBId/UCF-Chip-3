@@ -49,6 +49,7 @@ pub struct GateContext {
     pub approval_grant_id: Option<String>,
     pub pev: Option<ucf::v1::PolicyEcologyVector>,
     pub pev_digest: Option<[u8; 32]>,
+    pub ruleset_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +123,7 @@ impl Gate {
             tool_action_type: action_type,
             pev: ctx.pev.clone(),
             pev_digest: ctx.pev_digest,
+            ruleset_digest: ctx.ruleset_digest,
         };
 
         let mut decision = self.policy.decide_with_context(PolicyEvaluationRequest {
@@ -435,6 +437,7 @@ impl Gate {
             &DecisionForm::Deny,
             &rc,
             prior.pev_digest,
+            prior.ruleset_digest,
         );
 
         PolicyDecisionRecord {
@@ -448,6 +451,7 @@ impl Gate {
             decision_id: prior.decision_id.clone(),
             decision_digest: digest,
             pev_digest: prior.pev_digest,
+            ruleset_digest: prior.ruleset_digest,
         }
     }
 
@@ -518,6 +522,7 @@ fn build_action_exec_record(
         digest_proto(METABOLIC_FRAME_DOMAIN, &canonical_bytes(&metabolic_frame));
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
+    let related_refs = ruleset_related_refs(ctx.ruleset_digest);
 
     ucf::v1::ExperienceRecord {
         record_type: ucf::v1::RecordType::ActionExec.into(),
@@ -533,6 +538,7 @@ fn build_action_exec_record(
         governance_frame_ref: Some(ucf::v1::Digest32 {
             value: governance_frame_ref.to_vec(),
         }),
+        related_refs,
     }
 }
 
@@ -639,6 +645,18 @@ fn parse_tool_and_action(action: &ucf::v1::ActionSpec) -> (String, String) {
         .split_once('/')
         .map(|(tool, action_name)| (tool.to_string(), action_name.to_string()))
         .unwrap_or_else(|| (action.verb.clone(), action.verb.clone()))
+}
+
+fn ruleset_related_refs(ruleset_digest: Option<[u8; 32]>) -> Vec<ucf::v1::RelatedRef> {
+    ruleset_digest
+        .map(|digest| ucf::v1::RelatedRef {
+            id: "ruleset".to_string(),
+            digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+        })
+        .into_iter()
+        .collect()
 }
 
 fn requires_receipt(action_type: ucf::v1::ToolActionType) -> bool {
@@ -891,6 +909,7 @@ mod tests {
             approval_grant_id: None,
             pev: None,
             pev_digest: None,
+            ruleset_digest: None,
         }
     }
 
@@ -978,6 +997,7 @@ mod tests {
             tool_action_type: action_type,
             pev: ctx.pev.clone(),
             pev_digest: ctx.pev_digest,
+            ruleset_digest: ctx.ruleset_digest,
         };
 
         gate.policy.decide_with_context(PolicyEvaluationRequest {
@@ -1106,6 +1126,7 @@ mod tests {
             tool_action_type: action_type,
             pev: ctx.pev.clone(),
             pev_digest: ctx.pev_digest,
+            ruleset_digest: ctx.ruleset_digest,
         };
 
         let canonical_action = canonical_bytes(&action);
@@ -1198,6 +1219,69 @@ mod tests {
         let guard = inner_client.lock().expect("pvgs client lock");
         assert_eq!(guard.committed_bytes.len(), 2);
         assert_eq!(guard.committed_bytes[0], guard.committed_bytes[1]);
+    }
+
+    #[test]
+    fn experience_record_carries_ruleset_ref() {
+        let (local, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(MockAdapter),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+        );
+
+        let mut ctx = ok_ctx();
+        ctx.ruleset_digest = Some([9u8; 32]);
+        let action = base_action("mock.read", "get");
+
+        let result = gate.handle_action_spec("s", "step", action, ctx);
+        assert!(matches!(result, GateResult::Executed { .. }));
+
+        let records = local
+            .lock()
+            .expect("pvgs local client")
+            .committed_records
+            .clone();
+        assert_eq!(records.len(), 1);
+
+        let related_refs = &records[0].related_refs;
+        assert_eq!(related_refs.len(), 1);
+        assert_eq!(related_refs[0].id, "ruleset");
+        assert_eq!(
+            related_refs[0].digest.as_ref().unwrap().value,
+            vec![9u8; 32]
+        );
+    }
+
+    #[test]
+    fn experience_record_unmodified_without_ruleset() {
+        let (local, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(MockAdapter),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+        );
+
+        let ctx = ok_ctx();
+        let action = base_action("mock.read", "get");
+        let result = gate.handle_action_spec("s", "step", action, ctx);
+        assert!(matches!(result, GateResult::Executed { .. }));
+
+        let records = local
+            .lock()
+            .expect("pvgs local client")
+            .committed_records
+            .clone();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].related_refs.is_empty());
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub struct PolicyContext {
     pub tool_action_type: ucf::v1::ToolActionType,
     pub pev: Option<ucf::v1::PolicyEcologyVector>,
     pub pev_digest: Option<[u8; 32]>,
+    pub ruleset_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +53,7 @@ pub struct PolicyDecisionRecord {
     pub decision_id: String,
     pub decision_digest: [u8; 32],
     pub pev_digest: Option<[u8; 32]>,
+    pub ruleset_digest: Option<[u8; 32]>,
 }
 
 impl PolicyEngine {
@@ -85,6 +87,7 @@ impl PolicyEngine {
             tool_action_type,
             pev,
             pev_digest,
+            ruleset_digest,
         } = context;
 
         allowed_tools.sort();
@@ -111,6 +114,12 @@ impl PolicyEngine {
             apply_pev_biases(&mut decision_state, pev_ref, tool_action_type);
         }
 
+        if ruleset_digest.is_some() {
+            decision_state
+                .reason_codes
+                .push("RC.GV.RULESET.BOUND".to_string());
+        }
+
         decision_state.reason_codes.sort();
         decision_state.reason_codes.dedup();
         let decision = ucf::v1::PolicyDecision {
@@ -127,6 +136,7 @@ impl PolicyEngine {
             &decision_state.form,
             &decision_state.reason_codes,
             pev_digest,
+            ruleset_digest,
         );
 
         PolicyDecisionRecord {
@@ -136,6 +146,7 @@ impl PolicyEngine {
             decision_id,
             decision_digest,
             pev_digest,
+            ruleset_digest,
         }
     }
 }
@@ -145,6 +156,7 @@ pub fn compute_decision_digest(
     form: &DecisionForm,
     reason_codes: &[String],
     pev_digest: Option<[u8; 32]>,
+    ruleset_digest: Option<[u8; 32]>,
 ) -> [u8; 32] {
     let mut hasher = Hasher::new();
     hasher.update(DECISION_HASH_DOMAIN.as_bytes());
@@ -156,6 +168,9 @@ pub fn compute_decision_digest(
     }
     if let Some(pev_digest) = pev_digest {
         hasher.update(pev_digest.as_slice());
+    }
+    if let Some(ruleset_digest) = ruleset_digest {
+        hasher.update(ruleset_digest.as_slice());
     }
     *hasher.finalize().as_bytes()
 }
@@ -426,6 +441,7 @@ mod tests {
                 tool_action_type,
                 pev: None,
                 pev_digest: None,
+                ruleset_digest: None,
             },
         }
     }
@@ -479,6 +495,39 @@ mod tests {
         let record_a = engine.decide_with_context(req.clone());
         let record_b = engine.decide_with_context(req);
         assert_eq!(record_a.decision_digest, record_b.decision_digest);
+    }
+
+    #[test]
+    fn decision_digest_changes_with_ruleset_digest() {
+        let engine = PolicyEngine::new();
+        let mut req_one = request("mock.read");
+        req_one.context.ruleset_digest = Some([1u8; 32]);
+        let mut req_two = req_one.clone();
+        req_two.context.ruleset_digest = Some([2u8; 32]);
+
+        let record_one = engine.decide_with_context(req_one);
+        let record_two = engine.decide_with_context(req_two);
+
+        assert_ne!(record_one.decision_digest, record_two.decision_digest);
+        assert_eq!(
+            record_one.decision.reason_codes.unwrap().codes,
+            vec![
+                "RC.GV.RULESET.BOUND".to_string(),
+                "RC.PB.CONSTRAINT.SCOPE_SHRINK".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn decision_digest_unaffected_when_ruleset_missing() {
+        let engine = PolicyEngine::new();
+        let req = request("mock.read");
+        let record = engine.decide_with_context(req);
+
+        assert_eq!(
+            record.decision.reason_codes.unwrap().codes,
+            vec!["RC.PB.CONSTRAINT.SCOPE_SHRINK".to_string()]
+        );
     }
 
     #[test]

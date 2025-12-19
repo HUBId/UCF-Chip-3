@@ -62,6 +62,7 @@ fn main() {
         approval_grant_id: None,
         pev: None,
         pev_digest: None,
+        ruleset_digest: None,
     };
 
     let read_action = ucf::v1::ActionSpec {
