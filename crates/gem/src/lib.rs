@@ -85,10 +85,7 @@ impl DecisionLogStore {
             None => (DecisionCommitDisposition::CommitRequired, None),
         };
 
-        let entry = self
-            .entries
-            .entry(decision_digest)
-            .or_default();
+        let entry = self.entries.entry(decision_digest).or_default();
 
         if entry.state != DecisionCommitState::Committed {
             entry.state = DecisionCommitState::Pending;
