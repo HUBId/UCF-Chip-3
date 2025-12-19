@@ -100,6 +100,42 @@ pub trait PvgsReader: Send + Sync {
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]>;
 }
 
+#[cfg(any(test, feature = "local-e2e"))]
+#[derive(Clone)]
+pub struct Chip4LocalPvgsClient {
+    pub pvgs: chip4_pvgs::LocalPvgs,
+    pub last_proof_receipt: Option<ucf::v1::ProofReceipt>,
+}
+
+#[cfg(any(test, feature = "local-e2e"))]
+impl Chip4LocalPvgsClient {
+    pub fn new(pvgs: chip4_pvgs::LocalPvgs) -> Self {
+        Self {
+            pvgs,
+            last_proof_receipt: None,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "local-e2e"))]
+impl PvgsClient for Chip4LocalPvgsClient {
+    fn commit_experience_record(
+        &mut self,
+        record: ucf::v1::ExperienceRecord,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let (receipt, proof_receipt) = self.pvgs.append_experience_record(record);
+        self.last_proof_receipt = Some(proof_receipt);
+        Ok(receipt)
+    }
+
+    fn commit_tool_registry(
+        &mut self,
+        trc: ucf::v1::ToolRegistryContainer,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        Ok(self.pvgs.commit_tool_registry(trc))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalPvgsClient {
     receipt_epoch: String,
@@ -386,6 +422,8 @@ mod tests {
     };
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::convert::TryFrom;
+
+    use crate::Chip4LocalPvgsClient;
 
     fn sample_digest(seed: u8) -> ucf::v1::Digest32 {
         ucf::v1::Digest32 {
@@ -728,5 +766,66 @@ mod tests {
             sync.store().pubkey_for_key_id(&key_id),
             Some(signing_key.verifying_key().to_bytes())
         );
+    }
+
+    #[test]
+    fn chip4_client_appends_and_advances_head() {
+        let pvgs = chip4_pvgs::LocalPvgs::new();
+        pvgs.publish_key_epoch(1);
+        let before_head = pvgs.head_record_digest();
+        let mut client = Chip4LocalPvgsClient::new(pvgs.clone());
+
+        let record = experience_record(true);
+        let receipt = client
+            .commit_experience_record(record)
+            .expect("receipt returned");
+
+        assert_ne!(pvgs.head_record_digest(), before_head);
+        assert_eq!(pvgs.head_id(), 1);
+        assert!(matches!(
+            ucf::v1::ReceiptStatus::try_from(receipt.status),
+            Ok(ucf::v1::ReceiptStatus::Accepted)
+        ));
+        assert!(pvgs.validate_chain());
+        assert!(pvgs
+            .sep_events()
+            .last()
+            .is_some_and(|ev| ev.status == ucf::v1::ReceiptStatus::Accepted));
+
+        let proof = client
+            .last_proof_receipt
+            .as_ref()
+            .expect("proof receipt present");
+        assert!(proof
+            .receipt_digest
+            .as_ref()
+            .is_some_and(|d| !d.value.iter().all(|b| *b == 0)));
+    }
+
+    #[test]
+    fn chip4_client_rejects_missing_governance() {
+        let pvgs = chip4_pvgs::LocalPvgs::new();
+        pvgs.publish_key_epoch(1);
+        let before_head = pvgs.head_record_digest();
+        let mut client = Chip4LocalPvgsClient::new(pvgs.clone());
+
+        let mut record = experience_record(false);
+        record.governance_frame_ref = None;
+        record.governance_frame = None;
+
+        let receipt = client
+            .commit_experience_record(record)
+            .expect("receipt returned");
+
+        assert_eq!(pvgs.head_record_digest(), before_head);
+        assert_eq!(pvgs.head_id(), 0);
+        assert!(matches!(
+            ucf::v1::ReceiptStatus::try_from(receipt.status),
+            Ok(ucf::v1::ReceiptStatus::Rejected)
+        ));
+        assert!(pvgs
+            .sep_events()
+            .last()
+            .is_some_and(|ev| ev.status == ucf::v1::ReceiptStatus::Rejected));
     }
 }

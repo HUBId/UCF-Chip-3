@@ -448,6 +448,7 @@ dependencies = [
 name = "pvgs_client"
 version = "0.1.0"
 dependencies = [
+ "chip4-pvgs",
  "ed25519-dalek",
  "pvgs_verify",
  "rand",

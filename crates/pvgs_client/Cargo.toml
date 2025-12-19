@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+local-e2e = ["chip4-pvgs"]
+
 [dependencies]
 thiserror = { workspace = true }
 ucf-protocol = { workspace = true }
 pvgs_verify = { path = "../pvgs_verify" }
+chip4-pvgs = { path = "../../tests/chip4-pvgs", optional = true }
 
 [dev-dependencies]
 ed25519-dalek = "2"
 rand = "0.8"
 trm = { path = "../trm" }
+chip4-pvgs = { path = "../../tests/chip4-pvgs" }
