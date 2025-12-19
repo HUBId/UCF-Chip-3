@@ -182,6 +182,7 @@ pub mod ucf {
             Policy = 1,
             Proof = 2,
             Audit = 3,
+            Decision = 4,
             ActionExec = 10,
             Output = 11,
         }
@@ -192,6 +193,7 @@ pub mod ucf {
                     RecordType::Policy => "RECORD_TYPE_POLICY",
                     RecordType::Proof => "RECORD_TYPE_PROOF",
                     RecordType::Audit => "RECORD_TYPE_AUDIT",
+                    RecordType::Decision => "RECORD_TYPE_DECISION",
                     RecordType::ActionExec => "RECORD_TYPE_ACTION_EXEC",
                     RecordType::Output => "RECORD_TYPE_OUTPUT",
                 }
@@ -202,6 +204,7 @@ pub mod ucf {
                     "RECORD_TYPE_POLICY" => Some(Self::Policy),
                     "RECORD_TYPE_PROOF" => Some(Self::Proof),
                     "RECORD_TYPE_AUDIT" => Some(Self::Audit),
+                    "RECORD_TYPE_DECISION" => Some(Self::Decision),
                     "RECORD_TYPE_ACTION_EXEC" => Some(Self::ActionExec),
                     "RECORD_TYPE_OUTPUT" => Some(Self::Output),
                     _ => None,

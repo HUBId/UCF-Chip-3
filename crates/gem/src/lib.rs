@@ -27,6 +27,7 @@ const METABOLIC_FRAME_DOMAIN: &str = "UCF:HASH:METABOLIC_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
 const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
 const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
+const POLICY_DECISION_REF: &str = "policy_decision";
 
 pub struct Gate {
     pub policy: PolicyEngine,
@@ -142,6 +143,7 @@ impl Gate {
         // TODO: DLP enforcement hook.
 
         self.note_policy_decision(&decision);
+        self.commit_policy_decision_record(&decision);
 
         match decision.form {
             DecisionForm::Deny => GateResult::Denied { decision },
@@ -236,6 +238,11 @@ impl Gate {
         }
     }
 
+    fn commit_policy_decision_record(&self, decision: &PolicyDecisionRecord) {
+        let record = build_decision_record(decision);
+        self.commit_record(record);
+    }
+
     fn note_execution_outcome(&self, outcome: &ucf::v1::OutcomePacket) {
         let reason_codes = outcome
             .reason_codes
@@ -275,6 +282,10 @@ impl Gate {
             ctx,
         );
 
+        self.commit_record(record);
+    }
+
+    fn commit_record(&self, record: ucf::v1::ExperienceRecord) {
         let receipt_result = self
             .pvgs_client
             .lock()
@@ -501,6 +512,63 @@ fn digest32_matches(
     match (expected, actual) {
         (Some(exp), Some(act)) => exp.value == act.value,
         _ => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_decision_record(decision: &PolicyDecisionRecord) -> ucf::v1::ExperienceRecord {
+    let mut reason_codes = decision
+        .decision
+        .reason_codes
+        .as_ref()
+        .map(|rc| rc.codes.clone())
+        .unwrap_or_default();
+    reason_codes.sort();
+    reason_codes.dedup();
+
+    let governance_frame = ucf::v1::GovernanceFrame {
+        policy_decision_refs: vec![ucf::v1::Digest32 {
+            value: decision.decision_digest.to_vec(),
+        }],
+        grant_refs: Vec::new(),
+        dlp_refs: Vec::new(),
+        budget_snapshot_ref: None,
+        pvgs_receipt_ref: None,
+        reason_codes: Some(ucf::v1::ReasonCodes {
+            codes: reason_codes,
+        }),
+    };
+
+    let governance_frame_ref =
+        digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
+
+    let mut related_refs = vec![policy_query_related_ref(decision.policy_query_digest)];
+    related_refs.push(ucf::v1::RelatedRef {
+        id: POLICY_DECISION_REF.to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: decision.decision_digest.to_vec(),
+        }),
+    });
+    if let Some(ruleset_digest) = decision.ruleset_digest {
+        related_refs.push(ucf::v1::RelatedRef {
+            id: "ruleset".to_string(),
+            digest: Some(ucf::v1::Digest32 {
+                value: ruleset_digest.to_vec(),
+            }),
+        });
+    }
+
+    ucf::v1::ExperienceRecord {
+        record_type: ucf::v1::RecordType::Decision.into(),
+        core_frame: None,
+        metabolic_frame: None,
+        governance_frame: Some(governance_frame),
+        core_frame_ref: None,
+        metabolic_frame_ref: None,
+        governance_frame_ref: Some(ucf::v1::Digest32 {
+            value: governance_frame_ref.to_vec(),
+        }),
+        related_refs,
     }
 }
 
@@ -1096,6 +1164,64 @@ mod tests {
     }
 
     #[test]
+    fn decision_record_committed_on_deny() {
+        let counting = CountingAdapter::default();
+        let (local, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+        );
+
+        let mut ctx = ok_ctx();
+        ctx.integrity_state = "FAIL".to_string();
+        let result = gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ctx);
+
+        assert!(matches!(result, GateResult::Denied { .. }));
+        assert_eq!(counting.count(), 0);
+
+        let records = local
+            .lock()
+            .expect("pvgs local client")
+            .committed_records
+            .clone();
+        assert_eq!(records.len(), 1);
+
+        let record = &records[0];
+        assert_eq!(
+            ucf::v1::RecordType::try_from(record.record_type),
+            Ok(ucf::v1::RecordType::Decision)
+        );
+        let related_ids: Vec<_> = record.related_refs.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(
+            related_ids,
+            vec!["policy_query".to_string(), POLICY_DECISION_REF.to_string()]
+        );
+
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+        let expected_digest = policy_query_digest(&policy_query);
+        let policy_query_ref = record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "policy_query")
+            .and_then(|r| r.digest.as_ref())
+            .expect("policy query ref present");
+
+        assert_eq!(policy_query_ref.value, expected_digest.to_vec());
+    }
+
+    #[test]
     fn executes_mock_read() {
         let gate = gate_with_adapter(Box::new(MockAdapter));
         let result =
@@ -1201,13 +1327,24 @@ mod tests {
         assert!(matches!(result, GateResult::Executed { .. }));
 
         let guard = inner_client.lock().expect("pvgs client lock");
-        assert_eq!(guard.committed_records.len(), 1);
-        let record = guard.committed_records.first().expect("record committed");
-        assert_eq!(
-            ucf::v1::RecordType::try_from(record.record_type),
-            Ok(ucf::v1::RecordType::ActionExec)
-        );
-        assert!(record.governance_frame_ref.is_some());
+        assert_eq!(guard.committed_records.len(), 2);
+        let decision_record = guard
+            .committed_records
+            .iter()
+            .find(|r| {
+                ucf::v1::RecordType::try_from(r.record_type) == Ok(ucf::v1::RecordType::Decision)
+            })
+            .expect("decision record committed");
+        let action_record = guard
+            .committed_records
+            .iter()
+            .find(|r| {
+                ucf::v1::RecordType::try_from(r.record_type) == Ok(ucf::v1::RecordType::ActionExec)
+            })
+            .expect("action record committed");
+
+        assert!(decision_record.governance_frame_ref.is_some());
+        assert!(action_record.governance_frame_ref.is_some());
 
         let policy_query = ucf::v1::PolicyQuery {
             principal: "chip3".to_string(),
@@ -1218,7 +1355,7 @@ mod tests {
             reason_codes: None,
         };
         let expected_digest = policy_query_digest(&policy_query);
-        let policy_query_ref = record
+        let policy_query_ref = decision_record
             .related_refs
             .iter()
             .find(|r| r.id == "policy_query")
@@ -1227,6 +1364,15 @@ mod tests {
         assert_eq!(
             policy_query_ref.map(|d| d.value.clone()),
             Some(expected_digest.to_vec())
+        );
+
+        assert_eq!(
+            decision_record
+                .related_refs
+                .iter()
+                .map(|r| r.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["policy_query".to_string(), POLICY_DECISION_REF.to_string(),]
         );
     }
 
@@ -1250,8 +1396,9 @@ mod tests {
         let _ = gate.handle_action_spec("s", "step", action, ctx);
 
         let guard = inner_client.lock().expect("pvgs client lock");
-        assert_eq!(guard.committed_bytes.len(), 2);
-        assert_eq!(guard.committed_bytes[0], guard.committed_bytes[1]);
+        assert_eq!(guard.committed_bytes.len(), 4);
+        assert_eq!(guard.committed_bytes[0], guard.committed_bytes[2]);
+        assert_eq!(guard.committed_bytes[1], guard.committed_bytes[3]);
     }
 
     #[test]
@@ -1279,16 +1426,17 @@ mod tests {
             .expect("pvgs local client")
             .committed_records
             .clone();
-        assert_eq!(records.len(), 1);
+        assert_eq!(records.len(), 2);
 
-        let related_refs = &records[0].related_refs;
-        assert_eq!(related_refs.len(), 2);
-        assert!(related_refs.iter().any(|r| r.id == "policy_query"));
-        let ruleset_ref = related_refs
-            .iter()
-            .find(|r| r.id == "ruleset")
-            .expect("ruleset ref present");
-        assert_eq!(ruleset_ref.digest.as_ref().unwrap().value, vec![9u8; 32]);
+        for record in records {
+            let related_refs = &record.related_refs;
+            assert!(related_refs.iter().any(|r| r.id == "policy_query"));
+            let ruleset_ref = related_refs
+                .iter()
+                .find(|r| r.id == "ruleset")
+                .expect("ruleset ref present");
+            assert_eq!(ruleset_ref.digest.as_ref().unwrap().value, vec![9u8; 32]);
+        }
     }
 
     #[test]
@@ -1314,9 +1462,15 @@ mod tests {
             .expect("pvgs local client")
             .committed_records
             .clone();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].related_refs.len(), 1);
-        assert_eq!(records[0].related_refs[0].id, "policy_query");
+        assert_eq!(records.len(), 2);
+        let action_record = records
+            .iter()
+            .find(|r| {
+                ucf::v1::RecordType::try_from(r.record_type) == Ok(ucf::v1::RecordType::ActionExec)
+            })
+            .expect("action record present");
+        assert_eq!(action_record.related_refs.len(), 1);
+        assert_eq!(action_record.related_refs[0].id, "policy_query");
     }
 
     #[test]
@@ -1716,6 +1870,45 @@ mod tests {
         let result =
             gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
         assert!(matches!(result, GateResult::Executed { .. }));
+        assert_eq!(*integrity.lock().expect("integrity counter lock"), 2);
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let integrity_stats = frames
+            .first()
+            .and_then(|f| f.integrity_stats.as_ref())
+            .cloned()
+            .expect("integrity stats present");
+        assert_eq!(integrity_stats.integrity_issue_count, 2);
+        assert!(integrity_stats
+            .top_reason_codes
+            .iter()
+            .any(|rc| rc.code == PVGS_INTEGRITY_REASON));
+    }
+
+    #[test]
+    fn pvgs_rejection_on_decision_only_records_integrity_issue() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let integrity = integrity_counter();
+        let rejecting_client = boxed_client(MockPvgsClient::rejecting(vec![
+            PVGS_INTEGRITY_REASON.to_string()
+        ]));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
+            rejecting_client,
+            integrity.clone(),
+        );
+
+        let mut ctx = ok_ctx();
+        ctx.integrity_state = "FAIL".to_string();
+        let result = gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ctx);
+
+        assert!(matches!(result, GateResult::Denied { .. }));
+        assert_eq!(counting.count(), 0);
         assert_eq!(*integrity.lock().expect("integrity counter lock"), 1);
 
         let frames = aggregator.lock().expect("agg lock").force_flush();
