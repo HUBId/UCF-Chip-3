@@ -285,6 +285,7 @@ dependencies = [
  "control",
  "ed25519-dalek",
  "frames",
+ "hex",
  "pbm",
  "pvgs_client",
  "pvgs_verify",

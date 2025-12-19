@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::HashMap,
     convert::TryFrom,
     sync::{Arc, Mutex},
 };
@@ -22,12 +23,48 @@ use ucf_protocol::{canonical_bytes, digest32, digest_proto, ucf};
 const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
 const RECEIPT_UNKNOWN_KEY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
 const PVGS_INTEGRITY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
+const REPLAY_MISMATCH_REASON: &str = "RC.RE.REPLAY.MISMATCH";
 const CORE_FRAME_DOMAIN: &str = "UCF:HASH:CORE_FRAME";
 const METABOLIC_FRAME_DOMAIN: &str = "UCF:HASH:METABOLIC_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
 const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
 const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
 const POLICY_DECISION_REF: &str = "policy_decision";
+
+/// Maps policy query digests to their corresponding decision digests to detect replay mismatches.
+#[derive(Debug, Default, Clone)]
+pub struct QueryDecisionMap {
+    entries: HashMap<[u8; 32], [u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayMismatch {
+    pub existing: [u8; 32],
+    pub attempted: [u8; 32],
+}
+
+impl QueryDecisionMap {
+    pub fn insert(
+        &mut self,
+        policy_query_digest: [u8; 32],
+        decision_digest: [u8; 32],
+    ) -> Result<(), ReplayMismatch> {
+        match self.entries.get(&policy_query_digest) {
+            Some(existing) if existing != &decision_digest => Err(ReplayMismatch {
+                existing: *existing,
+                attempted: decision_digest,
+            }),
+            _ => {
+                self.entries.insert(policy_query_digest, decision_digest);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn lookup(&self, policy_query_digest: [u8; 32]) -> Option<[u8; 32]> {
+        self.entries.get(&policy_query_digest).copied()
+    }
+}
 
 /// Tracks PVGS commit attempts for decisions to enable idempotent retry on restarts.
 ///
@@ -129,6 +166,7 @@ pub struct Gate {
     pub pvgs_client: Arc<Mutex<Box<dyn PvgsClient>>>,
     pub integrity_issues: Arc<Mutex<u64>>,
     pub decision_log: Arc<Mutex<DecisionLogStore>>,
+    pub query_decisions: Arc<Mutex<QueryDecisionMap>>,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +297,12 @@ impl Gate {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
         };
+
+        if let Err(result) =
+            self.enforce_query_decision_consistency(&mut decision, &mut decision_context)
+        {
+            return result;
+        }
 
         if tool_profile.is_none() {
             self.deny_with_reasons(
@@ -424,6 +468,40 @@ impl Gate {
             decision_ctx.commit_disposition = DecisionCommitDisposition::CommitRequired;
             decision_ctx.receipt_digest = None;
         }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn enforce_query_decision_consistency(
+        &self,
+        decision: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
+    ) -> Result<(), GateResult> {
+        let reason_codes = [REPLAY_MISMATCH_REASON.to_string()];
+        let map_digest = map_decision_digest(decision, decision_ctx);
+
+        let mut map = match self.query_decisions.lock() {
+            Ok(map) => map,
+            Err(_) => {
+                self.note_integrity_issue(&reason_codes);
+                self.deny_with_reasons(decision, decision_ctx, &reason_codes);
+                return Err(GateResult::Denied {
+                    decision: decision.clone(),
+                });
+            }
+        };
+
+        if map
+            .insert(decision_ctx.policy_query_digest, map_digest)
+            .is_err()
+        {
+            self.note_integrity_issue(&reason_codes);
+            self.deny_with_reasons(decision, decision_ctx, &reason_codes);
+            return Err(GateResult::Denied {
+                decision: decision.clone(),
+            });
+        }
+
+        Ok(())
     }
 
     fn commit_record(&self, record: ucf::v1::ExperienceRecord, decision_ctx: &DecisionContext) {
@@ -948,6 +1026,28 @@ fn decision_receipt_related_ref(receipt_digest: [u8; 32]) -> ucf::v1::RelatedRef
     }
 }
 
+fn map_decision_digest(
+    decision: &PolicyDecisionRecord,
+    decision_ctx: &DecisionContext,
+) -> [u8; 32] {
+    let mut reason_codes = decision
+        .decision
+        .reason_codes
+        .as_ref()
+        .map(|rc| rc.codes.clone())
+        .unwrap_or_default();
+    reason_codes.sort();
+
+    compute_decision_digest(
+        &hex::encode(decision_ctx.policy_query_digest),
+        &decision.form,
+        &reason_codes,
+        decision.pev_digest,
+        decision.ruleset_digest,
+        &decision_ctx.policy_query_digest,
+    )
+}
+
 fn requires_receipt(action_type: ucf::v1::ToolActionType) -> bool {
     matches!(
         action_type,
@@ -1029,6 +1129,21 @@ mod tests {
         Arc::new(Mutex::new(DecisionLogStore::default()))
     }
 
+    fn default_query_map() -> Arc<Mutex<QueryDecisionMap>> {
+        Arc::new(Mutex::new(QueryDecisionMap::default()))
+    }
+
+    #[test]
+    fn query_decision_map_allows_matching_inserts() {
+        let mut map = QueryDecisionMap::default();
+        let policy_query_digest = [1u8; 32];
+        let decision_digest = [2u8; 32];
+
+        assert!(map.insert(policy_query_digest, decision_digest).is_ok());
+        assert!(map.insert(policy_query_digest, decision_digest).is_ok());
+        assert_eq!(map.lookup(policy_query_digest), Some(decision_digest));
+    }
+
     fn default_pvgs_client() -> PvgsClientHandle {
         Arc::new(Mutex::new(
             Box::new(MockPvgsClient::default()) as Box<dyn PvgsClient>
@@ -1085,6 +1200,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         )
     }
 
@@ -1098,6 +1214,7 @@ mod tests {
         pvgs_client: PvgsClientHandle,
         integrity_issues: Arc<Mutex<u64>>,
         decision_log: Arc<Mutex<DecisionLogStore>>,
+        query_decisions: Arc<Mutex<QueryDecisionMap>>,
     ) -> Gate {
         Gate {
             policy: PolicyEngine::new(),
@@ -1109,6 +1226,7 @@ mod tests {
             pvgs_client,
             integrity_issues,
             decision_log,
+            query_decisions,
         }
     }
 
@@ -1381,6 +1499,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_mismatch_blocks_execution_and_degrades_integrity() {
+        let counting = CountingAdapter::default();
+        let gate = gate_with_adapter(Box::new(counting.clone()));
+        let ctx = ok_ctx();
+        let action = base_action("mock.read", "get");
+
+        let decision = policy_decision_for(&gate, &action, &ctx, "s", "step");
+        {
+            let mut map = gate.query_decisions.lock().expect("query map lock");
+            map.insert(decision.policy_query_digest, [99u8; 32])
+                .expect("initial insert");
+        }
+
+        let result = gate.handle_action_spec("s", "step", action, ctx);
+
+        match result {
+            GateResult::Denied { decision } => {
+                let reason_codes = decision.decision.reason_codes.expect("reason codes").codes;
+                assert_eq!(reason_codes, vec![REPLAY_MISMATCH_REASON.to_string()]);
+            }
+            other => panic!("unexpected gate result: {other:?}"),
+        }
+
+        assert_eq!(counting.count(), 0, "adapter must not run on mismatch");
+        assert_eq!(*gate.integrity_issues.lock().expect("integrity counter"), 1);
+    }
+
+    #[test]
     fn decision_record_committed_on_deny() {
         let counting = CountingAdapter::default();
         let (local, pvgs_client) = shared_local_client();
@@ -1393,6 +1539,7 @@ mod tests {
             pvgs_client,
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let mut ctx = ok_ctx();
@@ -1559,6 +1706,7 @@ mod tests {
             pvgs_client,
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let result =
@@ -1628,6 +1776,7 @@ mod tests {
             pvgs_client,
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let ctx = ok_ctx();
@@ -1659,6 +1808,7 @@ mod tests {
             pvgs_client,
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let mut ctx = ok_ctx();
@@ -1724,6 +1874,7 @@ mod tests {
             pvgs_client,
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let ctx = ok_ctx();
@@ -1778,6 +1929,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let ctx = ok_ctx();
@@ -1810,6 +1962,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let ctx = ok_ctx();
@@ -1846,6 +1999,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let mut ctx = ok_ctx();
@@ -1894,6 +2048,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let mut ctx = ok_ctx();
@@ -1943,6 +2098,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let ctx = ok_ctx();
@@ -1990,6 +2146,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let mut ctx = ok_ctx();
@@ -2032,6 +2189,7 @@ mod tests {
             pvgs_client,
             integrity_counter(),
             decision_log.clone(),
+            default_query_map(),
         );
 
         let action = base_action("unknown.tool", "do");
@@ -2151,6 +2309,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let ctx = ok_ctx();
@@ -2218,6 +2377,7 @@ mod tests {
             rejecting_client,
             integrity.clone(),
             decision_log.clone(),
+            default_query_map(),
         );
 
         let result =
@@ -2266,6 +2426,7 @@ mod tests {
             rejecting_client,
             integrity.clone(),
             decision_log.clone(),
+            default_query_map(),
         );
 
         let mut ctx = ok_ctx();
@@ -2312,6 +2473,7 @@ mod tests {
             default_pvgs_client(),
             integrity_counter(),
             default_decision_log(),
+            default_query_map(),
         );
 
         let mut ctx = ok_ctx();
@@ -2382,6 +2544,7 @@ mod tests {
             pvgs_client: default_pvgs_client(),
             integrity_issues: integrity_counter(),
             decision_log: default_decision_log(),
+            query_decisions: Arc::new(Mutex::new(QueryDecisionMap::default())),
         };
 
         let mut ctx = ok_ctx();
