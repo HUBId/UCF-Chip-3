@@ -539,10 +539,7 @@ fn digest32_to_array(d: &ucf::v1::Digest32) -> Option<[u8; 32]> {
     }
 }
 
-fn digest_array_matches(
-    actual: Option<&ucf::v1::Digest32>,
-    expected: Option<[u8; 32]>,
-) -> bool {
+fn digest_array_matches(actual: Option<&ucf::v1::Digest32>, expected: Option<[u8; 32]>) -> bool {
     match (actual, expected) {
         (Some(act), Some(exp)) => act.value.as_slice() == exp,
         _ => false,
