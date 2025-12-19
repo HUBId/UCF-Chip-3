@@ -12,6 +12,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "chip4-pvgs",
  "control",
  "ed25519-dalek",
  "frames",
@@ -24,6 +25,7 @@ dependencies = [
  "thiserror",
  "trm",
  "ucf-protocol",
+ "ucf-test-utils",
 ]
 
 [[package]]
@@ -100,6 +102,17 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "chip4-pvgs"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "pvgs_verify",
+ "rand",
+ "ucf-protocol",
+ "ucf-test-utils",
+]
 
 [[package]]
 name = "const-oid"
