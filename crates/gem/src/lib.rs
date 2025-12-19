@@ -438,6 +438,7 @@ impl Gate {
             &rc,
             prior.pev_digest,
             prior.ruleset_digest,
+            &prior.policy_query_digest,
         );
 
         PolicyDecisionRecord {
@@ -448,6 +449,7 @@ impl Gate {
                 constraints: None,
             },
             policy_version_digest: prior.policy_version_digest.clone(),
+            policy_query_digest: prior.policy_query_digest,
             decision_id: prior.decision_id.clone(),
             decision_digest: digest,
             pev_digest: prior.pev_digest,
@@ -522,7 +524,8 @@ fn build_action_exec_record(
         digest_proto(METABOLIC_FRAME_DOMAIN, &canonical_bytes(&metabolic_frame));
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
-    let related_refs = ruleset_related_refs(ctx.ruleset_digest);
+    let mut related_refs = vec![policy_query_related_ref(decision.policy_query_digest)];
+    related_refs.extend(ruleset_related_refs(ctx.ruleset_digest));
 
     ucf::v1::ExperienceRecord {
         record_type: ucf::v1::RecordType::ActionExec.into(),
@@ -659,6 +662,15 @@ fn ruleset_related_refs(ruleset_digest: Option<[u8; 32]>) -> Vec<ucf::v1::Relate
         .collect()
 }
 
+fn policy_query_related_ref(policy_query_digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: "policy_query".to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: policy_query_digest.to_vec(),
+        }),
+    }
+}
+
 fn requires_receipt(action_type: ucf::v1::ToolActionType) -> bool {
     matches!(
         action_type,
@@ -674,6 +686,7 @@ mod tests {
 
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    use pbm::policy_query_digest;
     use pvgs_client::MockPvgsClient;
     use pvgs_verify::{
         pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
@@ -1195,6 +1208,26 @@ mod tests {
             Ok(ucf::v1::RecordType::ActionExec)
         );
         assert!(record.governance_frame_ref.is_some());
+
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+        let expected_digest = policy_query_digest(&policy_query);
+        let policy_query_ref = record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "policy_query")
+            .and_then(|r| r.digest.as_ref());
+
+        assert_eq!(
+            policy_query_ref.map(|d| d.value.clone()),
+            Some(expected_digest.to_vec())
+        );
     }
 
     #[test]
@@ -1249,12 +1282,13 @@ mod tests {
         assert_eq!(records.len(), 1);
 
         let related_refs = &records[0].related_refs;
-        assert_eq!(related_refs.len(), 1);
-        assert_eq!(related_refs[0].id, "ruleset");
-        assert_eq!(
-            related_refs[0].digest.as_ref().unwrap().value,
-            vec![9u8; 32]
-        );
+        assert_eq!(related_refs.len(), 2);
+        assert!(related_refs.iter().any(|r| r.id == "policy_query"));
+        let ruleset_ref = related_refs
+            .iter()
+            .find(|r| r.id == "ruleset")
+            .expect("ruleset ref present");
+        assert_eq!(ruleset_ref.digest.as_ref().unwrap().value, vec![9u8; 32]);
     }
 
     #[test]
@@ -1281,7 +1315,8 @@ mod tests {
             .committed_records
             .clone();
         assert_eq!(records.len(), 1);
-        assert!(records[0].related_refs.is_empty());
+        assert_eq!(records[0].related_refs.len(), 1);
+        assert_eq!(records[0].related_refs[0].id, "policy_query");
     }
 
     #[test]
