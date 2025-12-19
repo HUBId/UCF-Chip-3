@@ -6,8 +6,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use hex;
-
 use control::ControlFrameStore;
 #[cfg(test)]
 use frames::FramesConfig;
@@ -472,6 +470,7 @@ impl Gate {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn enforce_query_decision_consistency(
         &self,
         decision: &mut PolicyDecisionRecord,
