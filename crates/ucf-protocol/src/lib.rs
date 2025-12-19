@@ -306,6 +306,23 @@ pub mod ucf {
             pub output_schema: ::core::option::Option<Ref>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ToolRegistryContainer {
+            #[prost(string, tag = "1")]
+            pub registry_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub registry_version: ::prost::alloc::string::String,
+            #[prost(uint64, tag = "3")]
+            pub created_at_ms: u64,
+            #[prost(message, repeated, tag = "4")]
+            pub tool_actions: ::prost::alloc::vec::Vec<ToolActionProfile>,
+            #[prost(message, optional, tag = "5")]
+            pub registry_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "6")]
+            pub proof_receipt_ref: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "7")]
+            pub attestation_sig: ::core::option::Option<Signature>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ActionProgram {
             #[prost(message, repeated, tag = "1")]
             pub steps: ::prost::alloc::vec::Vec<ActionSpec>,

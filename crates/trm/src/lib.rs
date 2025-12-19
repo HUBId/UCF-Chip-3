@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 use ucf_protocol::ucf;
+use ucf_protocol::{canonical_bytes, digest_proto};
 
 #[derive(Debug, Error)]
 pub enum TrmError {
@@ -51,6 +52,40 @@ impl ToolRegistry {
     pub fn tool_profile_digest(&self, tool_id: &str, action_id: &str) -> Option<ucf::v1::Digest32> {
         self.get(tool_id, action_id)
             .and_then(|tap| tap.profile_digest.clone())
+    }
+
+    pub fn build_registry_container(
+        &self,
+        registry_id: &str,
+        registry_version: &str,
+        created_at_ms: u64,
+    ) -> ucf::v1::ToolRegistryContainer {
+        let mut tool_actions: Vec<_> = self.entries.values().cloned().collect();
+        tool_actions.sort_by(|a, b| {
+            let tool_cmp = a.tool_id.cmp(&b.tool_id);
+            if tool_cmp == std::cmp::Ordering::Equal {
+                a.action_id.cmp(&b.action_id)
+            } else {
+                tool_cmp
+            }
+        });
+
+        let mut container = ucf::v1::ToolRegistryContainer {
+            registry_id: registry_id.to_string(),
+            registry_version: registry_version.to_string(),
+            created_at_ms,
+            tool_actions,
+            registry_digest: None,
+            proof_receipt_ref: None,
+            attestation_sig: None,
+        };
+
+        let digest = digest_proto("UCF:HASH:TOOL_REGISTRY", &canonical_bytes(&container));
+        container.registry_digest = Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        });
+
+        container
     }
 }
 
@@ -182,5 +217,77 @@ mod tests {
         let tap = registry.get("mock.read", "get").expect("fixture available");
         assert_eq!(tap.action_id, "get");
         assert_eq!(tap.tool_id, "mock.read");
+    }
+
+    #[test]
+    fn deterministic_registry_digest() {
+        let registry_one = registry_fixture();
+        let registry_two = {
+            let mut registry = ToolRegistry::new();
+            registry
+                .insert(ucf::v1::ToolActionProfile {
+                    tool_id: "mock.export".to_string(),
+                    action_id: "render".to_string(),
+                    action_type: ucf::v1::ToolActionType::Export.into(),
+                    profile_digest: Some(ucf::v1::Digest32 {
+                        value: vec![2u8; 32],
+                    }),
+                    input_schema: Some(ucf::v1::Ref {
+                        uri: "schema://mock.export/input".to_string(),
+                        label: "MockExportInput".to_string(),
+                    }),
+                    output_schema: Some(ucf::v1::Ref {
+                        uri: "schema://mock.export/output".to_string(),
+                        label: "MockExportOutput".to_string(),
+                    }),
+                })
+                .expect("valid export profile");
+            registry
+                .insert(ucf::v1::ToolActionProfile {
+                    tool_id: "mock.read".to_string(),
+                    action_id: "get".to_string(),
+                    action_type: ucf::v1::ToolActionType::Read.into(),
+                    profile_digest: Some(ucf::v1::Digest32 {
+                        value: vec![1u8; 32],
+                    }),
+                    input_schema: Some(ucf::v1::Ref {
+                        uri: "schema://mock.read/input".to_string(),
+                        label: "MockReadInput".to_string(),
+                    }),
+                    output_schema: Some(ucf::v1::Ref {
+                        uri: "schema://mock.read/output".to_string(),
+                        label: "MockReadOutput".to_string(),
+                    }),
+                })
+                .expect("valid read profile");
+            registry
+                .insert(ucf::v1::ToolActionProfile {
+                    tool_id: "mock.write".to_string(),
+                    action_id: "apply".to_string(),
+                    action_type: ucf::v1::ToolActionType::Write.into(),
+                    profile_digest: Some(ucf::v1::Digest32 {
+                        value: vec![3u8; 32],
+                    }),
+                    input_schema: Some(ucf::v1::Ref {
+                        uri: "schema://mock.write/input".to_string(),
+                        label: "MockWriteInput".to_string(),
+                    }),
+                    output_schema: Some(ucf::v1::Ref {
+                        uri: "schema://mock.write/output".to_string(),
+                        label: "MockWriteOutput".to_string(),
+                    }),
+                })
+                .expect("valid write profile");
+            registry
+        };
+
+        let container_one = registry_one.build_registry_container("registry", "v1", 123);
+        let container_two = registry_two.build_registry_container("registry", "v1", 123);
+
+        assert_eq!(container_one.registry_digest, container_two.registry_digest);
+        assert_eq!(
+            canonical_bytes(&container_one),
+            canonical_bytes(&container_two)
+        );
     }
 }
