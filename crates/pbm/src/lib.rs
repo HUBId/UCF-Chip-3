@@ -3,9 +3,10 @@
 use std::convert::TryFrom;
 
 use blake3::Hasher;
-use ucf_protocol::ucf;
+use ucf_protocol::{canonical_bytes, ucf};
 
 const POLICY_VERSION_DIGEST: &str = "policy-v1-mvp";
+const POLICY_QUERY_HASH_DOMAIN: &str = "UCF:HASH:POLICY_QUERY";
 const DECISION_HASH_DOMAIN: &str = "UCF:HASH:POLICY_DECISION";
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,7 @@ pub struct PolicyDecisionRecord {
     pub form: DecisionForm,
     pub decision: ucf::v1::PolicyDecision,
     pub policy_version_digest: String,
+    pub policy_query_digest: [u8; 32],
     pub decision_id: String,
     pub decision_digest: [u8; 32],
     pub pev_digest: Option<[u8; 32]>,
@@ -91,6 +93,8 @@ impl PolicyEngine {
         } = context;
 
         allowed_tools.sort();
+
+        let policy_query_digest = policy_query_digest(&query);
 
         let action = query.action.unwrap_or(ucf::v1::ActionSpec {
             verb: String::new(),
@@ -137,12 +141,14 @@ impl PolicyEngine {
             &decision_state.reason_codes,
             pev_digest,
             ruleset_digest,
+            &policy_query_digest,
         );
 
         PolicyDecisionRecord {
             form: decision_state.form,
             decision,
             policy_version_digest: POLICY_VERSION_DIGEST.to_string(),
+            policy_query_digest,
             decision_id,
             decision_digest,
             pev_digest,
@@ -157,12 +163,14 @@ pub fn compute_decision_digest(
     reason_codes: &[String],
     pev_digest: Option<[u8; 32]>,
     ruleset_digest: Option<[u8; 32]>,
+    policy_query_digest: &[u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Hasher::new();
     hasher.update(DECISION_HASH_DOMAIN.as_bytes());
     hasher.update(decision_id.as_bytes());
     hasher.update(form_label(form).as_bytes());
     hasher.update(POLICY_VERSION_DIGEST.as_bytes());
+    hasher.update(policy_query_digest);
     for code in reason_codes {
         hasher.update(code.as_bytes());
     }
@@ -172,6 +180,21 @@ pub fn compute_decision_digest(
     if let Some(ruleset_digest) = ruleset_digest {
         hasher.update(ruleset_digest.as_slice());
     }
+    *hasher.finalize().as_bytes()
+}
+
+pub fn policy_query_digest(query: &ucf::v1::PolicyQuery) -> [u8; 32] {
+    let mut canonical_query = query.clone();
+    if let Some(reason_codes) = canonical_query.reason_codes.as_mut() {
+        reason_codes.codes.sort();
+    }
+    let canonical = canonical_bytes(&canonical_query);
+
+    let mut hasher = Hasher::new();
+    hasher.update(POLICY_QUERY_HASH_DOMAIN.as_bytes());
+    hasher.update("PolicyQuery".as_bytes());
+    hasher.update("v1".as_bytes());
+    hasher.update(&canonical);
     *hasher.finalize().as_bytes()
 }
 
@@ -495,6 +518,48 @@ mod tests {
         let record_a = engine.decide_with_context(req.clone());
         let record_b = engine.decide_with_context(req);
         assert_eq!(record_a.decision_digest, record_b.decision_digest);
+    }
+
+    #[test]
+    fn policy_query_digest_is_deterministic() {
+        let base = base_query("mock.read");
+        let mut with_reason_codes = base.clone();
+        with_reason_codes.reason_codes = Some(ucf::v1::ReasonCodes {
+            codes: vec!["b".to_string(), "a".to_string()],
+        });
+
+        let mut shuffled = with_reason_codes.clone();
+        shuffled
+            .reason_codes
+            .as_mut()
+            .expect("reason codes")
+            .codes
+            .reverse();
+
+        let digest_a = policy_query_digest(&with_reason_codes);
+        let digest_b = policy_query_digest(&shuffled);
+
+        assert_eq!(digest_a, digest_b);
+    }
+
+    #[test]
+    fn decision_digest_binds_policy_query() {
+        let engine = PolicyEngine::new();
+        let req_a = request("mock.read");
+        let mut req_b = req_a.clone();
+
+        req_b.query.principal = "chip3b".to_string();
+
+        let record_a = engine.decide_with_context(req_a);
+        let record_b = engine.decide_with_context(req_b);
+
+        assert_eq!(record_a.form, record_b.form);
+        assert_eq!(
+            record_a.policy_query_digest,
+            policy_query_digest(&base_query("mock.read"))
+        );
+        assert_ne!(record_a.policy_query_digest, record_b.policy_query_digest);
+        assert_ne!(record_a.decision_digest, record_b.decision_digest);
     }
 
     #[test]
