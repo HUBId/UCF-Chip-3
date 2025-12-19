@@ -783,7 +783,13 @@ fn build_action_exec_record(
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
     let mut related_refs = vec![policy_query_related_ref(decision_ctx.policy_query_digest)];
-    related_refs.extend(ruleset_related_refs(decision_ctx.ruleset_digest));
+    related_refs.push(decision_related_ref(decision_ctx.decision_digest));
+    if let Some(ruleset_digest) = decision_ctx.ruleset_digest {
+        related_refs.push(ruleset_related_ref(ruleset_digest));
+    }
+    if let Some(receipt_digest) = decision_ctx.receipt_digest {
+        related_refs.push(decision_receipt_related_ref(receipt_digest));
+    }
 
     ucf::v1::ExperienceRecord {
         record_type: ucf::v1::RecordType::ActionExec.into(),
@@ -906,16 +912,22 @@ fn parse_tool_and_action(action: &ucf::v1::ActionSpec) -> (String, String) {
         .unwrap_or_else(|| (action.verb.clone(), action.verb.clone()))
 }
 
-fn ruleset_related_refs(ruleset_digest: Option<[u8; 32]>) -> Vec<ucf::v1::RelatedRef> {
-    ruleset_digest
-        .map(|digest| ucf::v1::RelatedRef {
-            id: "ruleset".to_string(),
-            digest: Some(ucf::v1::Digest32 {
-                value: digest.to_vec(),
-            }),
-        })
-        .into_iter()
-        .collect()
+fn decision_related_ref(decision_digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: "decision".to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: decision_digest.to_vec(),
+        }),
+    }
+}
+
+fn ruleset_related_ref(ruleset_digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: "ruleset".to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: ruleset_digest.to_vec(),
+        }),
+    }
 }
 
 fn policy_query_related_ref(policy_query_digest: [u8; 32]) -> ucf::v1::RelatedRef {
@@ -923,6 +935,15 @@ fn policy_query_related_ref(policy_query_digest: [u8; 32]) -> ucf::v1::RelatedRe
         id: "policy_query".to_string(),
         digest: Some(ucf::v1::Digest32 {
             value: policy_query_digest.to_vec(),
+        }),
+    }
+}
+
+fn decision_receipt_related_ref(receipt_digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: "decision_record_receipt".to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: receipt_digest.to_vec(),
         }),
     }
 }
@@ -1654,15 +1675,41 @@ mod tests {
             .clone();
         assert_eq!(records.len(), 2);
 
-        for record in records {
-            let related_refs = &record.related_refs;
-            assert!(related_refs.iter().any(|r| r.id == "policy_query"));
-            let ruleset_ref = related_refs
-                .iter()
-                .find(|r| r.id == "ruleset")
-                .expect("ruleset ref present");
-            assert_eq!(ruleset_ref.digest.as_ref().unwrap().value, vec![9u8; 32]);
-        }
+        let action_record = records
+            .iter()
+            .find(|r| {
+                ucf::v1::RecordType::try_from(r.record_type) == Ok(ucf::v1::RecordType::ActionExec)
+            })
+            .expect("action record present");
+
+        let related_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(related_ids, vec!["policy_query", "decision", "ruleset"]);
+
+        let decision_digest = action_record
+            .governance_frame
+            .as_ref()
+            .and_then(|g| g.policy_decision_refs.first())
+            .expect("decision ref in governance frame")
+            .value
+            .clone();
+
+        let decision_ref = action_record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "decision")
+            .expect("decision related ref present");
+        assert_eq!(decision_ref.digest.as_ref().unwrap().value, decision_digest);
+
+        let ruleset_ref = action_record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "ruleset")
+            .expect("ruleset ref present");
+        assert_eq!(ruleset_ref.digest.as_ref().unwrap().value, vec![9u8; 32]);
     }
 
     #[test]
@@ -1696,8 +1743,25 @@ mod tests {
                 ucf::v1::RecordType::try_from(r.record_type) == Ok(ucf::v1::RecordType::ActionExec)
             })
             .expect("action record present");
-        assert_eq!(action_record.related_refs.len(), 1);
+        assert_eq!(action_record.related_refs.len(), 2);
         assert_eq!(action_record.related_refs[0].id, "policy_query");
+        assert_eq!(action_record.related_refs[1].id, "decision");
+
+        let decision_digest = action_record
+            .governance_frame
+            .as_ref()
+            .and_then(|g| g.policy_decision_refs.first())
+            .expect("decision ref in governance frame")
+            .value
+            .clone();
+        assert_eq!(
+            action_record.related_refs[1]
+                .digest
+                .as_ref()
+                .expect("decision ref digest present")
+                .value,
+            decision_digest
+        );
     }
 
     #[test]
