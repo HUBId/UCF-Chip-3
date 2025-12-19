@@ -17,3 +17,7 @@ pvgs_verify = { path = "../pvgs_verify" }
 pvgs_client = { path = "../pvgs_client" }
 ed25519-dalek = "2"
 trm = { path = "../trm" }
+
+[dev-dependencies]
+chip4-pvgs = { path = "../../tests/chip4-pvgs" }
+ucf-test-utils = { path = "../test-utils" }

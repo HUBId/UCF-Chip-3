@@ -1,0 +1,12 @@
+[package]
+name = "chip4-pvgs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ucf-protocol = { path = "../../crates/ucf-protocol" }
+pvgs_verify = { path = "../../crates/pvgs_verify" }
+ucf-test-utils = { path = "../../crates/test-utils" }
+ed25519-dalek = "2"
+rand = { version = "0.8", features = ["std"] }
