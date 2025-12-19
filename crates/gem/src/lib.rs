@@ -326,6 +326,14 @@ impl Gate {
             DecisionForm::RequireSimulationFirst => GateResult::SimulationRequired { decision },
             DecisionForm::Allow | DecisionForm::AllowWithConstraints => {
                 if tool_profile.is_some() {
+                    if let Err(result) = self.enforce_decision_commit_success(
+                        action_type,
+                        &mut decision,
+                        &mut decision_context,
+                    ) {
+                        return result;
+                    }
+
                     if let Err(result) = self.enforce_receipt_gate(
                         action_type,
                         action_digest,
@@ -502,6 +510,36 @@ impl Gate {
         }
 
         Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn enforce_decision_commit_success(
+        &self,
+        action_type: ucf::v1::ToolActionType,
+        decision: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
+    ) -> Result<(), GateResult> {
+        if !requires_receipt(action_type) {
+            return Ok(());
+        }
+
+        let status = self
+            .decision_log
+            .lock()
+            .ok()
+            .and_then(|log| log.status(decision_ctx.decision_digest));
+
+        if matches!(status, Some(DecisionCommitState::Committed)) {
+            return Ok(());
+        }
+
+        let reason_codes = [PVGS_INTEGRITY_REASON.to_string()];
+        self.note_integrity_issue(&reason_codes);
+        self.deny_with_reasons(decision, decision_ctx, &reason_codes);
+
+        Err(GateResult::Denied {
+            decision: decision.clone(),
+        })
     }
 
     fn commit_record(&self, record: ucf::v1::ExperienceRecord, decision_ctx: &DecisionContext) {
@@ -2458,6 +2496,51 @@ mod tests {
             .top_reason_codes
             .iter()
             .any(|rc| rc.code == PVGS_INTEGRITY_REASON));
+    }
+
+    #[test]
+    fn write_actions_block_when_decision_commit_fails() {
+        let counting = CountingAdapter::default();
+        let integrity = integrity_counter();
+        let decision_log = default_decision_log();
+        let inner = Arc::new(Mutex::new(pvgs_client::LocalPvgsClient::rejecting(vec![
+            PVGS_INTEGRITY_REASON.to_string(),
+        ])));
+        let rejecting_client = boxed_client(SharedLocalClient::new(inner.clone()));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            rejecting_client,
+            integrity,
+            decision_log,
+            default_query_map(),
+        );
+
+        let result = gate.handle_action_spec("s", "step", base_action("mock.write", "apply"), ok_ctx());
+
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![PVGS_INTEGRITY_REASON.to_string()]
+                );
+            }
+            other => panic!("expected deny, got {other:?}"),
+        }
+
+        assert_eq!(counting.count(), 0, "adapter should not execute on failed commit");
+        assert_eq!(
+            inner
+                .lock()
+                .expect("pvgs client lock")
+                .committed_records
+                .len(),
+            1,
+            "action exec commit should be skipped",
+        );
     }
 
     #[test]
