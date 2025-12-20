@@ -1163,10 +1163,7 @@ mod tests {
                     .and_then(|g| g.policy_decision_refs.first())
                     .and_then(digest32_to_array)
                 {
-                    let mut guard = self
-                        .decision_counts
-                        .lock()
-                        .expect("decision count lock");
+                    let mut guard = self.decision_counts.lock().expect("decision count lock");
                     *guard.entry(digest).or_insert(0) += 1;
                 }
             }
@@ -1996,7 +1993,8 @@ mod tests {
             default_query_map(),
         );
 
-        let result = gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
         let decision_digest = match result {
             GateResult::Executed { decision, .. } => decision.decision_digest,
             other => panic!("expected execution, got {other:?}"),
@@ -2008,8 +2006,7 @@ mod tests {
             .committed_records
             .iter()
             .find(|r| {
-                ucf::v1::RecordType::try_from(r.record_type)
-                    == Ok(ucf::v1::RecordType::ActionExec)
+                ucf::v1::RecordType::try_from(r.record_type) == Ok(ucf::v1::RecordType::ActionExec)
             })
             .cloned()
             .expect("action record committed");
@@ -2068,9 +2065,10 @@ mod tests {
         let second = gate.handle_action_spec("s", "step", action, ctx);
 
         let (first_digest, second_digest) = match (first, second) {
-            (GateResult::Executed { decision: a, .. }, GateResult::Executed { decision: b, .. }) => {
-                (a.decision_digest, b.decision_digest)
-            }
+            (
+                GateResult::Executed { decision: a, .. },
+                GateResult::Executed { decision: b, .. },
+            ) => (a.decision_digest, b.decision_digest),
             other => panic!("expected both executions to succeed, got {other:?}"),
         };
 
@@ -2540,8 +2538,7 @@ mod tests {
 
         assert_eq!(pvgs.decision_commits(digest), 1);
         assert_eq!(
-            pvgs
-                .inner
+            pvgs.inner
                 .lock()
                 .expect("pvgs client lock")
                 .committed_records
@@ -2800,7 +2797,8 @@ mod tests {
             default_query_map(),
         );
 
-        let result = gate.handle_action_spec("s", "step", base_action("mock.write", "apply"), ok_ctx());
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.write", "apply"), ok_ctx());
 
         let _decision_digest = match result {
             GateResult::Denied { ref decision } => {
@@ -2816,7 +2814,11 @@ mod tests {
             other => panic!("expected denial due to decision commit failure, got {other:?}"),
         };
 
-        assert_eq!(counting.count(), 0, "adapter must not run when decision commit fails");
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run when decision commit fails"
+        );
         let log_guard = decision_log.lock().expect("decision log lock");
         let states: Vec<_> = log_guard.entries.values().map(|e| e.state).collect();
         assert!(
@@ -3048,7 +3050,11 @@ mod tests {
             other => panic!("expected denial from replay mismatch, got {other:?}"),
         }
 
-        assert_eq!(counting.count(), 0, "adapter suppressed on conflicting decisions");
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter suppressed on conflicting decisions"
+        );
         assert_eq!(
             query_map
                 .lock()
