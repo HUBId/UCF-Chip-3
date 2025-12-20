@@ -88,6 +88,11 @@ pub trait PvgsClient: Send + Sync {
         record: ucf::v1::ExperienceRecord,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 
+    fn commit_dlp_decision(
+        &mut self,
+        dlp: ucf::v1::DlpDecision,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
+
     fn commit_tool_registry(
         &mut self,
         trc: ucf::v1::ToolRegistryContainer,
@@ -128,6 +133,15 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(receipt)
     }
 
+    fn commit_dlp_decision(
+        &mut self,
+        dlp: ucf::v1::DlpDecision,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let (receipt, proof_receipt) = self.pvgs.append_dlp_decision(dlp);
+        self.last_proof_receipt = Some(proof_receipt);
+        Ok(receipt)
+    }
+
     fn commit_tool_registry(
         &mut self,
         trc: ucf::v1::ToolRegistryContainer,
@@ -144,6 +158,8 @@ pub struct LocalPvgsClient {
     reject_reason_codes: Vec<String>,
     pub committed_records: Vec<ucf::v1::ExperienceRecord>,
     pub committed_bytes: Vec<Vec<u8>>,
+    pub committed_dlp_decisions: Vec<ucf::v1::DlpDecision>,
+    pub committed_dlp_bytes: Vec<Vec<u8>>,
     pub committed_tool_registries: Vec<ucf::v1::ToolRegistryContainer>,
     pub committed_registry_bytes: Vec<Vec<u8>>,
 }
@@ -157,6 +173,8 @@ impl Default for LocalPvgsClient {
             reject_reason_codes: Vec::new(),
             committed_records: Vec::new(),
             committed_bytes: Vec::new(),
+            committed_dlp_decisions: Vec::new(),
+            committed_dlp_bytes: Vec::new(),
             committed_tool_registries: Vec::new(),
             committed_registry_bytes: Vec::new(),
         }
@@ -227,6 +245,56 @@ impl PvgsClient for LocalPvgsClient {
                 .metabolic_frame
                 .as_ref()
                 .and_then(|mf| mf.control_frame_ref.clone()),
+            tool_profile_digest: None,
+            reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
+                reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
+    fn commit_dlp_decision(
+        &mut self,
+        dlp: ucf::v1::DlpDecision,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let mut canonical = dlp.clone();
+        if let Some(rc) = canonical.reason_codes.as_mut() {
+            rc.codes.sort();
+            rc.codes.dedup();
+        }
+
+        let bytes = ucf_protocol::canonical_bytes(&canonical);
+        let dlp_digest = ucf_protocol::digest_proto("UCF:HASH:DLP_DECISION", &bytes);
+
+        let status = self.default_status;
+        let mut reject_reason_codes = self.reject_reason_codes.clone();
+        if status == ucf::v1::ReceiptStatus::Rejected && reject_reason_codes.is_empty() {
+            reject_reason_codes.push("RC.RE.SCHEMA.INVALID".to_string());
+        }
+
+        self.committed_dlp_decisions.push(dlp.clone());
+        self.committed_dlp_bytes.push(bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!("pvgs-local-dlp-{}", self.committed_dlp_decisions.len()),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: dlp_digest.to_vec(),
+            }),
+            status: status.into(),
+            action_digest: dlp.artifact_ref.clone(),
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: dlp_digest.to_vec(),
+            }),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
             tool_profile_digest: None,
             reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
                 reject_reason_codes
@@ -391,6 +459,13 @@ impl PvgsClient for MockPvgsClient {
         record: ucf::v1::ExperienceRecord,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         self.local.commit_experience_record(record)
+    }
+
+    fn commit_dlp_decision(
+        &mut self,
+        dlp: ucf::v1::DlpDecision,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.local.commit_dlp_decision(dlp)
     }
 
     fn commit_tool_registry(

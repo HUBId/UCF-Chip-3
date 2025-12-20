@@ -213,6 +213,66 @@ impl LocalPvgs {
         (receipt, proof_receipt)
     }
 
+    pub fn append_dlp_decision(
+        &self,
+        dlp: ucf::v1::DlpDecision,
+    ) -> (ucf::v1::PvgsReceipt, ucf::v1::ProofReceipt) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        let bytes = canonical_bytes(&dlp);
+        let digest = digest_proto("UCF:HASH:DLP_DECISION", &bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: format!("epoch-{}", guard.head_id + 1),
+            receipt_id: format!("dlp-{}", guard.head_id + 1),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            status: ucf::v1::ReceiptStatus::Accepted.into(),
+            action_digest: dlp.artifact_ref.clone(),
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            grant_id: "grant-local".to_string(),
+            charter_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![1u8; 32],
+            }),
+            policy_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![2u8; 32],
+            }),
+            prev_record_digest: guard
+                .head_record_digest
+                .as_ref()
+                .map(|digest| ucf::v1::Digest32 {
+                    value: digest.to_vec(),
+                }),
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: Vec::new(),
+            signer: None,
+        };
+
+        guard.head_id += 1;
+        guard.head_record_digest = Some(digest);
+
+        let proof_receipt = ucf::v1::ProofReceipt {
+            status: receipt.status,
+            receipt_digest: receipt.receipt_digest.clone(),
+            validator: Some(ucf::v1::Signature {
+                algorithm: "local-proof".to_string(),
+                signer: b"pvgs-proof".to_vec(),
+                signature: vec![2u8; 64],
+            }),
+        };
+
+        guard.sep_events.push(SepEvent {
+            record_digest: digest,
+            status: ucf::v1::ReceiptStatus::Accepted,
+        });
+        guard.proof_receipts.push(proof_receipt.clone());
+
+        (receipt, proof_receipt)
+    }
+
     pub fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
         self.inner
             .lock()

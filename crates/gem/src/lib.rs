@@ -415,6 +415,34 @@ impl Gate {
 
         let control_frame = self.resolve_control_frame(&ctx);
         let control_frame_digest = control::control_frame_digest(&control_frame);
+        let dlp_receipt = self
+            .pvgs_client
+            .lock()
+            .map(|mut client| client.commit_dlp_decision(dlp_decision.clone()));
+
+        let mut dlp_reject_reasons = None;
+        match dlp_receipt {
+            Ok(Ok(receipt)) => {
+                if ucf::v1::ReceiptStatus::try_from(receipt.status)
+                    != Ok(ucf::v1::ReceiptStatus::Accepted)
+                {
+                    let mut reasons = receipt.reject_reason_codes.clone();
+                    if reasons.is_empty() {
+                        reasons.push(PVGS_INTEGRITY_REASON.to_string());
+                    }
+                    dlp_reject_reasons = Some(reasons);
+                }
+            }
+            _ => {
+                dlp_reject_reasons = Some(vec![PVGS_INTEGRITY_REASON.to_string()]);
+            }
+        }
+
+        if let Some(reasons) = dlp_reject_reasons {
+            self.note_integrity_issue(&reasons);
+            return OutputResult::Blocked(dlp_decision, reasons);
+        }
+
         let record = build_output_record(
             session_id,
             step_id,
@@ -422,6 +450,9 @@ impl Gate {
             &dlp_decision,
             &control_frame,
             &control_frame_digest,
+            None,
+            None,
+            ctx.ruleset_digest,
         );
 
         if let Ok(mut client) = self.pvgs_client.lock() {
@@ -1011,6 +1042,9 @@ fn build_output_record(
     dlp_decision: &ucf::v1::DlpDecision,
     control_frame: &ucf::v1::ControlFrame,
     control_frame_digest: &[u8; 32],
+    policy_query_digest: Option<[u8; 32]>,
+    decision_digest: Option<[u8; 32]>,
+    ruleset_digest: Option<[u8; 32]>,
 ) -> ucf::v1::ExperienceRecord {
     let core_frame = ucf::v1::CoreFrame {
         session_id: session_id.to_string(),
@@ -1041,6 +1075,18 @@ fn build_output_record(
         .and_then(digest32_to_array)
     {
         related_refs.push(dlp_decision_related_ref(dlp_digest));
+    }
+
+    if let Some(digest) = policy_query_digest {
+        related_refs.push(policy_query_related_ref(digest));
+    }
+
+    if let Some(digest) = decision_digest {
+        related_refs.push(decision_related_ref(digest));
+    }
+
+    if let Some(digest) = ruleset_digest {
+        related_refs.push(ruleset_related_ref(digest));
     }
 
     ucf::v1::ExperienceRecord {
@@ -1319,6 +1365,7 @@ mod tests {
     struct CountingPvgsClient {
         inner: Arc<Mutex<pvgs_client::LocalPvgsClient>>,
         decision_counts: Arc<Mutex<HashMap<[u8; 32], usize>>>,
+        call_order: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl CountingPvgsClient {
@@ -1326,6 +1373,7 @@ mod tests {
             Self {
                 inner: Arc::new(Mutex::new(inner)),
                 decision_counts: Arc::new(Mutex::new(HashMap::new())),
+                call_order: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -1337,6 +1385,15 @@ mod tests {
                 .get(&digest)
                 .unwrap_or(&0)
         }
+
+        fn calls(&self) -> Vec<String> {
+            self.call_order
+                .lock()
+                .expect("call order lock")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
     }
 
     impl PvgsClient for CountingPvgsClient {
@@ -1344,6 +1401,11 @@ mod tests {
             &mut self,
             record: ucf::v1::ExperienceRecord,
         ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.call_order
+                .lock()
+                .expect("call order lock")
+                .push("commit_experience_record");
+
             if ucf::v1::RecordType::try_from(record.record_type)
                 == Ok(ucf::v1::RecordType::Decision)
             {
@@ -1364,6 +1426,21 @@ mod tests {
                 .commit_experience_record(record)
         }
 
+        fn commit_dlp_decision(
+            &mut self,
+            dlp: ucf::v1::DlpDecision,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.call_order
+                .lock()
+                .expect("call order lock")
+                .push("commit_dlp_decision");
+
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_dlp_decision(dlp)
+        }
+
         fn commit_tool_registry(
             &mut self,
             trc: ucf::v1::ToolRegistryContainer,
@@ -1382,6 +1459,15 @@ mod tests {
         fn commit_experience_record(
             &mut self,
             _record: ucf::v1::ExperienceRecord,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
+        fn commit_dlp_decision(
+            &mut self,
+            _dlp: ucf::v1::DlpDecision,
         ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
             Err(pvgs_client::PvgsClientError::CommitFailed(
                 "forced failure".to_string(),
@@ -1418,6 +1504,16 @@ mod tests {
                 .lock()
                 .expect("pvgs client lock")
                 .commit_experience_record(record)
+        }
+
+        fn commit_dlp_decision(
+            &mut self,
+            dlp: ucf::v1::DlpDecision,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_dlp_decision(dlp)
         }
 
         fn commit_tool_registry(
@@ -3277,7 +3373,10 @@ mod tests {
             artifact_digest: None,
         };
 
-        let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
+        let mut ctx = ok_ctx();
+        ctx.ruleset_digest = Some([9u8; 32]);
+
+        let result = gate.handle_output_artifact("s", "step", artifact, ctx);
         assert!(matches!(result, OutputResult::Allowed(_)));
 
         let guard = inner.lock().expect("pvgs client lock");
@@ -3285,13 +3384,92 @@ mod tests {
         let record = guard.committed_records.first().expect("output record");
 
         let ids: Vec<_> = record.related_refs.iter().map(|r| r.id.clone()).collect();
-        assert_eq!(ids, vec!["output_artifact", "dlp_decision"]);
+        assert_eq!(ids, vec!["output_artifact", "dlp_decision", "ruleset"]);
 
         let governance_frame = record
             .governance_frame
             .as_ref()
             .expect("governance frame present");
         assert_eq!(governance_frame.dlp_refs.len(), 1);
+    }
+
+    #[test]
+    fn dlp_commit_precedes_output_record_append() {
+        let counting = CountingAdapter::default();
+        let pvgs = CountingPvgsClient::new(pvgs_client::LocalPvgsClient::default());
+        let pvgs_handle: PvgsClientHandle =
+            Arc::new(Mutex::new(Box::new(pvgs.clone()) as Box<dyn PvgsClient>));
+
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_handle,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let artifact = ucf::v1::OutputArtifact {
+            artifact_id: "art-commit".to_string(),
+            content: "ok".to_string(),
+            artifact_digest: None,
+        };
+
+        let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
+        assert!(matches!(result, OutputResult::Allowed(_)));
+
+        let calls = pvgs.calls();
+        assert_eq!(
+            calls,
+            vec!["commit_dlp_decision", "commit_experience_record"]
+        );
+
+        let guard = pvgs.inner.lock().expect("pvgs client lock");
+        assert_eq!(guard.committed_dlp_decisions.len(), 1);
+        assert_eq!(guard.committed_records.len(), 1);
+    }
+
+    #[test]
+    fn rejecting_dlp_commit_blocks_output_record() {
+        let counting = CountingAdapter::default();
+        let inner = Arc::new(Mutex::new(pvgs_client::LocalPvgsClient::rejecting(vec![
+            PVGS_INTEGRITY_REASON.to_string(),
+        ])));
+        let pvgs_client = Arc::new(Mutex::new(
+            Box::new(SharedLocalClient::new(inner.clone())) as Box<dyn PvgsClient>
+        ));
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let artifact = ucf::v1::OutputArtifact {
+            artifact_id: "art-reject".to_string(),
+            content: "clean".to_string(),
+            artifact_digest: None,
+        };
+
+        let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
+        match result {
+            OutputResult::Blocked(_, reasons) => {
+                assert!(reasons.contains(&PVGS_INTEGRITY_REASON.to_string()))
+            }
+            other => panic!("expected blocked result, got {other:?}"),
+        }
+
+        let guard = inner.lock().expect("pvgs client lock");
+        assert_eq!(guard.committed_dlp_decisions.len(), 1);
+        assert!(guard.committed_records.is_empty());
     }
 
     #[test]
@@ -3361,6 +3539,9 @@ mod tests {
             &decision,
             &control_frame,
             &control_frame_digest,
+            None,
+            None,
+            None,
         );
         let record_b = build_output_record(
             "s",
@@ -3369,6 +3550,9 @@ mod tests {
             &decision,
             &control_frame,
             &control_frame_digest,
+            None,
+            None,
+            None,
         );
 
         assert_eq!(canonical_bytes(&record_a), canonical_bytes(&record_b));
