@@ -31,6 +31,7 @@ struct LocalPvgsState {
     sep_events: Vec<SepEvent>,
     proof_receipts: Vec<ucf::v1::ProofReceipt>,
     micro_milestones: Vec<ucf::v1::MicroMilestone>,
+    replay_plans: Vec<ucf::v1::ReplayPlan>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +65,7 @@ impl LocalPvgs {
                 sep_events: Vec::new(),
                 proof_receipts: Vec::new(),
                 micro_milestones: Vec::new(),
+                replay_plans: Vec::new(),
             })),
         }
     }
@@ -79,6 +81,23 @@ impl LocalPvgs {
     pub fn key_epochs(&self) -> Vec<ucf::v1::PvgsKeyEpoch> {
         let guard = self.inner.lock().expect("pvgs state lock");
         guard.key_epochs.clone()
+    }
+
+    pub fn add_replay_plan(&self, plan: ucf::v1::ReplayPlan) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard.replay_plans.push(plan);
+    }
+
+    pub fn get_pending_replay_plans(&self, _session_id: &str) -> Vec<ucf::v1::ReplayPlan> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard.replay_plans.clone()
+    }
+
+    pub fn consume_replay_plan(&self, replay_id: &str) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard
+            .replay_plans
+            .retain(|plan| plan.replay_id != replay_id);
     }
 
     pub fn commit_tool_registry(

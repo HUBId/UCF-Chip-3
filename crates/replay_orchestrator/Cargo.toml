@@ -1,0 +1,12 @@
+[package]
+name = "replay_orchestrator"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+frames = { path = "../frames" }
+pvgs_client = { path = "../pvgs_client" }
+thiserror = { workspace = true }
+tracing = "0.1"
+ucf-protocol = { path = "../ucf-protocol" }

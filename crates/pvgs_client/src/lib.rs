@@ -115,6 +115,15 @@ pub trait PvgsClient: Send + Sync {
 
     fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError>;
 
+    fn get_pending_replay_plans(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, PvgsClientError>;
+
+    fn consume_replay_plan(&mut self, _replay_id: &str) -> Result<(), PvgsClientError> {
+        Ok(())
+    }
+
     fn get_pvgs_head(&self) -> PvgsHead;
 }
 
@@ -122,6 +131,13 @@ pub trait PvgsReader: Send + Sync {
     fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector>;
     fn get_latest_pev_digest(&self) -> Option<[u8; 32]>;
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]>;
+
+    fn get_pending_replay_plans(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, PvgsClientError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(any(test, feature = "local-e2e"))]
@@ -186,6 +202,18 @@ impl PvgsClient for Chip4LocalPvgsClient {
 
     fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError> {
         Ok(false)
+    }
+
+    fn get_pending_replay_plans(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, PvgsClientError> {
+        Ok(self.pvgs.get_pending_replay_plans(session_id))
+    }
+
+    fn consume_replay_plan(&mut self, replay_id: &str) -> Result<(), PvgsClientError> {
+        self.pvgs.consume_replay_plan(replay_id);
+        Ok(())
     }
 
     fn get_pvgs_head(&self) -> PvgsHead {
@@ -519,6 +547,13 @@ impl PvgsClient for LocalPvgsClient {
         Ok(self.try_commit_macro_outcome.unwrap_or(false))
     }
 
+    fn get_pending_replay_plans(
+        &mut self,
+        _session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, PvgsClientError> {
+        Ok(Vec::new())
+    }
+
     fn get_pvgs_head(&self) -> PvgsHead {
         PvgsHead {
             head_experience_id: self.head_experience_id,
@@ -590,6 +625,10 @@ pub struct MockPvgsClient {
     pub meso_calls: u64,
     pub macro_calls: u64,
     pub last_call_order: Vec<MockCommitStage>,
+    pub pending_replay_plans: Vec<ucf::v1::ReplayPlan>,
+    pub consumed_replay_ids: Vec<String>,
+    pub pending_replay_plan_calls: u64,
+    pub experience_commit_statuses: Vec<ucf::v1::ReceiptStatus>,
 }
 
 impl MockPvgsClient {
@@ -693,7 +732,18 @@ impl PvgsClient for MockPvgsClient {
         &mut self,
         record: ucf::v1::ExperienceRecord,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
-        self.local.commit_experience_record(record)
+        let original_status = self.local.default_status;
+        if let Some(status) = self.experience_commit_statuses.first().copied() {
+            self.local.default_status = status;
+        }
+
+        let receipt = self.local.commit_experience_record(record);
+        if !self.experience_commit_statuses.is_empty() {
+            self.experience_commit_statuses.remove(0);
+        }
+
+        self.local.default_status = original_status;
+        receipt
     }
 
     fn commit_dlp_decision(
@@ -767,6 +817,19 @@ impl PvgsClient for MockPvgsClient {
         }
 
         Ok(should_commit(self.macro_calls, self.macro_commit_every))
+    }
+
+    fn get_pending_replay_plans(
+        &mut self,
+        _session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, PvgsClientError> {
+        self.pending_replay_plan_calls = self.pending_replay_plan_calls.saturating_add(1);
+        Ok(self.pending_replay_plans.clone())
+    }
+
+    fn consume_replay_plan(&mut self, replay_id: &str) -> Result<(), PvgsClientError> {
+        self.consumed_replay_ids.push(replay_id.to_string());
+        Ok(())
     }
 
     fn get_pvgs_head(&self) -> PvgsHead {
