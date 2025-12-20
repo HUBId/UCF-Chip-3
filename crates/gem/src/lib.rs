@@ -425,7 +425,7 @@ impl Gate {
         );
 
         if let Ok(mut client) = self.pvgs_client.lock() {
-            if let Err(_) = client.commit_experience_record(record.clone()) {
+            if client.commit_experience_record(record.clone()).is_err() {
                 self.note_integrity_issue(&[PVGS_INTEGRITY_REASON.to_string()]);
             }
         }
