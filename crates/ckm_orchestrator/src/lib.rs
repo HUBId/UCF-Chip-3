@@ -137,8 +137,10 @@ mod tests {
 
     #[test]
     fn micro_commit_triggered_after_threshold() {
-        let mut orchestrator = CkmOrchestrator::default();
-        orchestrator.micro_chunk_size = 2;
+        let mut orchestrator = CkmOrchestrator {
+            micro_chunk_size: 2,
+            ..Default::default()
+        };
         let mut pvgs = MockPvgsClient {
             micro_commit_every: Some(1),
             ..Default::default()
@@ -153,9 +155,11 @@ mod tests {
 
     #[test]
     fn bounded_steps_respected() {
-        let mut orchestrator = CkmOrchestrator::default();
-        orchestrator.micro_chunk_size = 1;
-        orchestrator.max_steps_per_tick = 3;
+        let mut orchestrator = CkmOrchestrator {
+            micro_chunk_size: 1,
+            max_steps_per_tick: 3,
+            ..Default::default()
+        };
         let mut pvgs = MockPvgsClient {
             micro_commit_every: Some(1),
             meso_commit_every: Some(1),
@@ -177,8 +181,10 @@ mod tests {
 
     #[test]
     fn order_micro_then_meso_then_macro() {
-        let mut orchestrator = CkmOrchestrator::default();
-        orchestrator.micro_chunk_size = 1;
+        let mut orchestrator = CkmOrchestrator {
+            micro_chunk_size: 1,
+            ..Default::default()
+        };
         let mut pvgs = MockPvgsClient {
             micro_commit_every: Some(1),
             meso_commit_every: Some(1),
@@ -201,8 +207,10 @@ mod tests {
     #[test]
     fn reject_stops_sequence_and_logs_integrity() {
         let agg = aggregator();
-        let mut orchestrator = CkmOrchestrator::with_aggregator(agg.clone());
-        orchestrator.micro_chunk_size = 1;
+        let mut orchestrator = CkmOrchestrator {
+            micro_chunk_size: 1,
+            ..CkmOrchestrator::with_aggregator(agg.clone())
+        };
         let mut pvgs = MockPvgsClient {
             micro_commit_every: Some(1),
             reject_stage: Some(MockCommitStage::Meso),
@@ -227,8 +235,10 @@ mod tests {
 
     #[test]
     fn disabled_orchestrator_noops() {
-        let mut orchestrator = CkmOrchestrator::default();
-        orchestrator.enabled = false;
+        let mut orchestrator = CkmOrchestrator {
+            enabled: false,
+            ..Default::default()
+        };
         let mut pvgs = MockPvgsClient {
             micro_commit_every: Some(1),
             ..Default::default()
