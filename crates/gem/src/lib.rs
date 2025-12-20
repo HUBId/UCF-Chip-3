@@ -2519,7 +2519,8 @@ mod tests {
             default_query_map(),
         );
 
-        let result = gate.handle_action_spec("s", "step", base_action("mock.write", "apply"), ok_ctx());
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.write", "apply"), ok_ctx());
 
         match result {
             GateResult::Denied { decision } => {
@@ -2531,7 +2532,11 @@ mod tests {
             other => panic!("expected deny, got {other:?}"),
         }
 
-        assert_eq!(counting.count(), 0, "adapter should not execute on failed commit");
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter should not execute on failed commit"
+        );
         assert_eq!(
             inner
                 .lock()
