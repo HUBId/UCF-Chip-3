@@ -16,6 +16,7 @@ members = [
     "crates/ucf-protocol",
     "crates/test-utils",
     "crates/ckm_client",
+    "crates/replay_orchestrator",
 ]
 resolver = "2"
 

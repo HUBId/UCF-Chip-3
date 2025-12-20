@@ -1588,6 +1588,13 @@ mod tests {
             Ok(false)
         }
 
+        fn get_pending_replay_plans(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<Vec<ucf::v1::ReplayPlan>, pvgs_client::PvgsClientError> {
+            Ok(Vec::new())
+        }
+
         fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
             self.inner.lock().expect("pvgs client lock").get_pvgs_head()
         }
@@ -1683,6 +1690,13 @@ mod tests {
             Ok(false)
         }
 
+        fn get_pending_replay_plans(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<Vec<ucf::v1::ReplayPlan>, pvgs_client::PvgsClientError> {
+            Ok(Vec::new())
+        }
+
         fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
             self.inner.lock().expect("pvgs client lock").get_pvgs_head()
         }
@@ -1747,6 +1761,13 @@ mod tests {
             Err(pvgs_client::PvgsClientError::CommitFailed(
                 "forced failure".to_string(),
             ))
+        }
+
+        fn get_pending_replay_plans(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<Vec<ucf::v1::ReplayPlan>, pvgs_client::PvgsClientError> {
+            Ok(Vec::new())
         }
 
         fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
@@ -1822,6 +1843,13 @@ mod tests {
 
         fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
             Ok(false)
+        }
+
+        fn get_pending_replay_plans(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<Vec<ucf::v1::ReplayPlan>, pvgs_client::PvgsClientError> {
+            Ok(Vec::new())
         }
 
         fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {

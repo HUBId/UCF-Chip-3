@@ -35,6 +35,13 @@ pub mod ucf {
             pub digest: ::core::option::Option<Digest32>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ReplayPlan {
+            #[prost(string, tag = "1")]
+            pub replay_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub replay_digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ReasonCodes {
             #[prost(string, repeated, tag = "1")]
             pub codes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -185,6 +192,7 @@ pub mod ucf {
             Decision = 4,
             ActionExec = 10,
             Output = 11,
+            Replay = 12,
         }
         impl RecordType {
             pub fn as_str_name(&self) -> &'static str {
@@ -196,6 +204,7 @@ pub mod ucf {
                     RecordType::Decision => "RECORD_TYPE_DECISION",
                     RecordType::ActionExec => "RECORD_TYPE_ACTION_EXEC",
                     RecordType::Output => "RECORD_TYPE_OUTPUT",
+                    RecordType::Replay => "RECORD_TYPE_REPLAY",
                 }
             }
             pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
@@ -207,6 +216,7 @@ pub mod ucf {
                     "RECORD_TYPE_DECISION" => Some(Self::Decision),
                     "RECORD_TYPE_ACTION_EXEC" => Some(Self::ActionExec),
                     "RECORD_TYPE_OUTPUT" => Some(Self::Output),
+                    "RECORD_TYPE_REPLAY" => Some(Self::Replay),
                     _ => None,
                 }
             }

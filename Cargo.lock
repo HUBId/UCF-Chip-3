@@ -544,6 +544,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "replay_orchestrator"
+version = "0.1.0"
+dependencies = [
+ "frames",
+ "pvgs_client",
+ "thiserror",
+ "tracing",
+ "ucf-protocol",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
