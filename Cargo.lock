@@ -95,6 +95,7 @@ name = "cdm"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "ucf-protocol",
 ]
 
 [[package]]
@@ -282,6 +283,7 @@ name = "gem"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "cdm",
  "control",
  "ed25519-dalek",
  "frames",
