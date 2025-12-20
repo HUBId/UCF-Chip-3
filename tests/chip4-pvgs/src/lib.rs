@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::sync::{Arc, Mutex};
+use std::{
+    convert::TryInto,
+    sync::{Arc, Mutex},
+};
 
 use ed25519_dalek::{Signer, SigningKey};
 use pvgs_verify::{pvgs_receipt_signing_preimage, PvgsKeyEpochStore};
@@ -27,6 +30,7 @@ struct LocalPvgsState {
     head_record_digest: Option<[u8; 32]>,
     sep_events: Vec<SepEvent>,
     proof_receipts: Vec<ucf::v1::ProofReceipt>,
+    micro_milestones: Vec<ucf::v1::MicroMilestone>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +63,7 @@ impl LocalPvgs {
                 head_record_digest: None,
                 sep_events: Vec::new(),
                 proof_receipts: Vec::new(),
+                micro_milestones: Vec::new(),
             })),
         }
     }
@@ -123,6 +128,54 @@ impl LocalPvgs {
         });
 
         receipt
+    }
+
+    pub fn append_micro_milestone(
+        &self,
+        mut micro: ucf::v1::MicroMilestone,
+    ) -> ucf::v1::PvgsReceipt {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        if micro.micro_digest.is_none() {
+            let digest = digest_proto("UCF:HASH:MICRO_MILESTONE", &canonical_bytes(&micro));
+            micro.micro_digest = Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            });
+        }
+
+        let digest: [u8; 32] = micro
+            .micro_digest
+            .as_ref()
+            .and_then(|d| d.value.clone().try_into().ok())
+            .unwrap_or([0u8; 32]);
+        guard.micro_milestones.push(micro.clone());
+
+        ucf::v1::PvgsReceipt {
+            receipt_epoch: format!("epoch-micro-{}", guard.micro_milestones.len()),
+            receipt_id: format!("micro-{}", guard.micro_milestones.len()),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            status: ucf::v1::ReceiptStatus::Accepted.into(),
+            action_digest: None,
+            decision_digest: micro.micro_digest.clone(),
+            grant_id: "grant-micro".to_string(),
+            charter_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![1u8; 32],
+            }),
+            policy_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![2u8; 32],
+            }),
+            prev_record_digest: guard
+                .head_record_digest
+                .as_ref()
+                .map(|digest| ucf::v1::Digest32 {
+                    value: digest.to_vec(),
+                }),
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: Vec::new(),
+            signer: None,
+        }
     }
 
     pub fn append_experience_record(
@@ -211,6 +264,11 @@ impl LocalPvgs {
         guard.proof_receipts.push(proof_receipt.clone());
 
         (receipt, proof_receipt)
+    }
+
+    pub fn head(&self) -> (u64, [u8; 32]) {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        (guard.head_id, guard.head_record_digest.unwrap_or([0u8; 32]))
     }
 
     pub fn append_dlp_decision(

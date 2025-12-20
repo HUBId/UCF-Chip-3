@@ -998,6 +998,65 @@ pub mod ucf {
             }
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ExperienceRange {
+            #[prost(uint64, tag = "1")]
+            pub start: u64,
+            #[prost(uint64, tag = "2")]
+            pub end: u64,
+            #[prost(message, optional, tag = "3")]
+            pub head_record_digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum MicroMilestoneState {
+            Unspecified = 0,
+            Draft = 1,
+            Sealed = 2,
+            Finalized = 3,
+        }
+        impl MicroMilestoneState {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    MicroMilestoneState::Unspecified => "MICRO_MILESTONE_STATE_UNSPECIFIED",
+                    MicroMilestoneState::Draft => "MICRO_MILESTONE_STATE_DRAFT",
+                    MicroMilestoneState::Sealed => "MICRO_MILESTONE_STATE_SEALED",
+                    MicroMilestoneState::Finalized => "MICRO_MILESTONE_STATE_FINALIZED",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "MICRO_MILESTONE_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                    "MICRO_MILESTONE_STATE_DRAFT" => Some(Self::Draft),
+                    "MICRO_MILESTONE_STATE_SEALED" => Some(Self::Sealed),
+                    "MICRO_MILESTONE_STATE_FINALIZED" => Some(Self::Finalized),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct MicroMilestone {
+            #[prost(string, tag = "1")]
+            pub micro_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub experience_range: ::core::option::Option<ExperienceRange>,
+            #[prost(message, optional, tag = "3")]
+            pub summary_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "HormoneClass", tag = "4")]
+            pub hormone_profile: i32,
+            #[prost(enumeration = "PriorityClass", tag = "5")]
+            pub priority_class: i32,
+            #[prost(message, optional, tag = "6")]
+            pub micro_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "MicroMilestoneState", tag = "7")]
+            pub state: i32,
+            #[prost(message, optional, tag = "8")]
+            pub vrf_proof_ref: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "9")]
+            pub proof_receipt_ref: ::core::option::Option<Digest32>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct CoreFrame {
             #[prost(string, tag = "1")]
             pub session_id: ::prost::alloc::string::String,

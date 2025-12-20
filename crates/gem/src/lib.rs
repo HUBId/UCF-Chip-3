@@ -1552,6 +1552,25 @@ mod tests {
                 .expect("pvgs client lock")
                 .commit_tool_registry(trc)
         }
+
+        fn commit_micro_milestone(
+            &mut self,
+            micro: ucf::v1::MicroMilestone,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.call_order
+                .lock()
+                .expect("call order lock")
+                .push("commit_micro_milestone");
+
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_micro_milestone(micro)
+        }
+
+        fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
+            self.inner.lock().expect("pvgs client lock").get_pvgs_head()
+        }
     }
 
     #[derive(Clone, Default)]
@@ -1615,6 +1634,23 @@ mod tests {
                 .expect("pvgs client lock")
                 .commit_tool_registry(trc)
         }
+
+        fn commit_micro_milestone(
+            &mut self,
+            _micro: ucf::v1::MicroMilestone,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.calls
+                .lock()
+                .expect("call order lock")
+                .push("commit_micro_milestone");
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "record rejected".to_string(),
+            ))
+        }
+
+        fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
+            self.inner.lock().expect("pvgs client lock").get_pvgs_head()
+        }
     }
 
     #[derive(Clone, Default)]
@@ -1646,6 +1682,22 @@ mod tests {
             Err(pvgs_client::PvgsClientError::CommitFailed(
                 "forced failure".to_string(),
             ))
+        }
+
+        fn commit_micro_milestone(
+            &mut self,
+            _micro: ucf::v1::MicroMilestone,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
+        fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
+            pvgs_client::PvgsHead {
+                head_experience_id: 0,
+                head_record_digest: [0u8; 32],
+            }
         }
     }
 
@@ -1689,6 +1741,20 @@ mod tests {
                 .lock()
                 .expect("pvgs client lock")
                 .commit_tool_registry(trc)
+        }
+
+        fn commit_micro_milestone(
+            &mut self,
+            micro: ucf::v1::MicroMilestone,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_micro_milestone(micro)
+        }
+
+        fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
+            self.inner.lock().expect("pvgs client lock").get_pvgs_head()
         }
     }
 
