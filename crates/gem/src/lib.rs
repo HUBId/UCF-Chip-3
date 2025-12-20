@@ -1097,6 +1097,7 @@ fn requires_receipt(action_type: ucf::v1::ToolActionType) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -1121,6 +1122,92 @@ mod tests {
     impl CountingAdapter {
         fn count(&self) -> usize {
             *self.calls.lock().expect("count lock")
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingPvgsClient {
+        inner: Arc<Mutex<pvgs_client::LocalPvgsClient>>,
+        decision_counts: Arc<Mutex<HashMap<[u8; 32], usize>>>,
+    }
+
+    impl CountingPvgsClient {
+        fn new(inner: pvgs_client::LocalPvgsClient) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(inner)),
+                decision_counts: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        fn decision_commits(&self, digest: [u8; 32]) -> usize {
+            *self
+                .decision_counts
+                .lock()
+                .expect("decision count lock")
+                .get(&digest)
+                .unwrap_or(&0)
+        }
+    }
+
+    impl PvgsClient for CountingPvgsClient {
+        fn commit_experience_record(
+            &mut self,
+            record: ucf::v1::ExperienceRecord,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            if ucf::v1::RecordType::try_from(record.record_type)
+                == Ok(ucf::v1::RecordType::Decision)
+            {
+                if let Some(digest) = record
+                    .governance_frame
+                    .as_ref()
+                    .and_then(|g| g.policy_decision_refs.first())
+                    .and_then(digest32_to_array)
+                {
+                    let mut guard = self
+                        .decision_counts
+                        .lock()
+                        .expect("decision count lock");
+                    *guard.entry(digest).or_insert(0) += 1;
+                }
+            }
+
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_experience_record(record)
+        }
+
+        fn commit_tool_registry(
+            &mut self,
+            trc: ucf::v1::ToolRegistryContainer,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_tool_registry(trc)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FailingPvgsClient;
+
+    impl PvgsClient for FailingPvgsClient {
+        fn commit_experience_record(
+            &mut self,
+            _record: ucf::v1::ExperienceRecord,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
+        fn commit_tool_registry(
+            &mut self,
+            _trc: ucf::v1::ToolRegistryContainer,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
         }
     }
 
@@ -1625,6 +1712,98 @@ mod tests {
     }
 
     #[test]
+    fn related_refs_are_deterministic() {
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+
+        let policy_query_digest = policy_query_digest(&policy_query);
+        let decision_digest = [2u8; 32];
+        let ruleset_digest = Some([3u8; 32]);
+        let decision = PolicyDecisionRecord {
+            decision_id: "sid:step".to_string(),
+            form: DecisionForm::Allow,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            policy_query_digest,
+            decision_digest,
+            pev_digest: None,
+            ruleset_digest,
+            policy_version_digest: String::new(),
+        };
+
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest,
+            ruleset_digest,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: Some([4u8; 32]),
+        };
+
+        let decision_record = build_decision_record(&decision, &decision_ctx);
+        let decision_ids: Vec<_> = decision_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        assert_eq!(
+            decision_ids,
+            vec![
+                "policy_query".to_string(),
+                POLICY_DECISION_REF.to_string(),
+                "ruleset".to_string(),
+            ]
+        );
+
+        let action_record = build_action_exec_record(
+            &base_action("mock.read", "get"),
+            [7u8; 32],
+            &decision,
+            &ucf::v1::OutcomePacket {
+                outcome_id: "oid".to_string(),
+                request_id: "sid:step".to_string(),
+                status: ucf::v1::OutcomeStatus::Success.into(),
+                payload: Vec::new(),
+                payload_digest: None,
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
+            },
+            &control_frame_open(),
+            &ok_ctx(),
+            &decision_ctx,
+        );
+
+        let action_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        assert_eq!(
+            action_ids,
+            vec![
+                "policy_query".to_string(),
+                "decision".to_string(),
+                "ruleset".to_string(),
+                "decision_record_receipt".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn executes_mock_read() {
         let gate = gate_with_adapter(Box::new(MockAdapter));
         let result =
@@ -1802,6 +1981,51 @@ mod tests {
     }
 
     #[test]
+    fn action_exec_references_decision_context_digest() {
+        let counting = CountingAdapter::default();
+        let (inner_client, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let result = gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+        let decision_digest = match result {
+            GateResult::Executed { decision, .. } => decision.decision_digest,
+            other => panic!("expected execution, got {other:?}"),
+        };
+
+        let action_record = inner_client
+            .lock()
+            .expect("pvgs client lock")
+            .committed_records
+            .iter()
+            .find(|r| {
+                ucf::v1::RecordType::try_from(r.record_type)
+                    == Ok(ucf::v1::RecordType::ActionExec)
+            })
+            .cloned()
+            .expect("action record committed");
+
+        let decision_ref = action_record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "decision")
+            .and_then(|r| r.digest.as_ref())
+            .expect("decision related ref present");
+
+        assert_eq!(decision_ref.value, decision_digest);
+        assert_eq!(counting.count(), 1, "adapter executes once for success");
+    }
+
+    #[test]
     fn experience_record_bytes_are_deterministic() {
         let counting = CountingAdapter::default();
         let (inner_client, pvgs_client) = shared_local_client();
@@ -1832,6 +2056,25 @@ mod tests {
         let guard = inner_client.lock().expect("pvgs client lock");
         assert_eq!(guard.committed_bytes.len(), 2);
         assert_eq!(guard.committed_bytes, first_bytes);
+    }
+
+    #[test]
+    fn identical_queries_share_decision_digest() {
+        let gate = gate_with_adapter(Box::new(MockAdapter));
+        let action = base_action("mock.read", "get");
+        let ctx = ok_ctx();
+
+        let first = gate.handle_action_spec("s", "step", action.clone(), ctx.clone());
+        let second = gate.handle_action_spec("s", "step", action, ctx);
+
+        let (first_digest, second_digest) = match (first, second) {
+            (GateResult::Executed { decision: a, .. }, GateResult::Executed { decision: b, .. }) => {
+                (a.decision_digest, b.decision_digest)
+            }
+            other => panic!("expected both executions to succeed, got {other:?}"),
+        };
+
+        assert_eq!(first_digest, second_digest);
     }
 
     #[test]
@@ -2268,6 +2511,47 @@ mod tests {
     }
 
     #[test]
+    fn single_rt_decision_commit_per_digest() {
+        let pvgs = CountingPvgsClient::new(pvgs_client::LocalPvgsClient::default());
+        let pvgs_handle = boxed_client(pvgs.clone());
+        let gate = gate_with_components(
+            Box::new(MockAdapter),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_handle,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let action = base_action("mock.read", "get");
+        let ctx = ok_ctx();
+        let first = gate.handle_action_spec("s", "step", action.clone(), ctx.clone());
+        let second = gate.handle_action_spec("s", "step", action, ctx);
+
+        let digest = match (first, second) {
+            (GateResult::Executed { decision, .. }, GateResult::Executed { .. }) => {
+                decision.decision_digest
+            }
+            other => panic!("expected both executions, got {other:?}"),
+        };
+
+        assert_eq!(pvgs.decision_commits(digest), 1);
+        assert_eq!(
+            pvgs
+                .inner
+                .lock()
+                .expect("pvgs client lock")
+                .committed_records
+                .len(),
+            2,
+            "only the first attempt should commit decision and action records",
+        );
+    }
+
+    #[test]
     fn simulate_first_overlay_blocks_execution() {
         let counting = CountingAdapter::default();
         let gate = gate_with_adapter(Box::new(counting.clone()));
@@ -2499,6 +2783,54 @@ mod tests {
     }
 
     #[test]
+    fn side_effect_execution_blocked_when_decision_commit_fails() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let integrity = integrity_counter();
+        let decision_log = default_decision_log();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator,
+            Arc::new(trm::registry_fixture()),
+            boxed_client(FailingPvgsClient),
+            integrity.clone(),
+            decision_log.clone(),
+            default_query_map(),
+        );
+
+        let result = gate.handle_action_spec("s", "step", base_action("mock.write", "apply"), ok_ctx());
+
+        let _decision_digest = match result {
+            GateResult::Denied { ref decision } => {
+                assert!(decision
+                    .decision
+                    .reason_codes
+                    .as_ref()
+                    .expect("reason codes present")
+                    .codes
+                    .contains(&PVGS_INTEGRITY_REASON.to_string()));
+                decision.decision_digest
+            }
+            other => panic!("expected denial due to decision commit failure, got {other:?}"),
+        };
+
+        assert_eq!(counting.count(), 0, "adapter must not run when decision commit fails");
+        let log_guard = decision_log.lock().expect("decision log lock");
+        let states: Vec<_> = log_guard.entries.values().map(|e| e.state).collect();
+        assert!(
+            states.contains(&DecisionCommitState::Failed),
+            "decision log should record failed commit"
+        );
+        assert_eq!(
+            *integrity.lock().expect("integrity counter lock"),
+            2,
+            "integrity issues should be signaled for commit failure"
+        );
+    }
+
+    #[test]
     fn write_actions_block_when_decision_commit_fails() {
         let counting = CountingAdapter::default();
         let integrity = integrity_counter();
@@ -2664,6 +2996,66 @@ mod tests {
                 .iter()
                 .any(|c| c.code == "RC.CD.DLP.EXPORT_BLOCKED"),
             "export blocked reason should appear in signal frame"
+        );
+    }
+
+    #[test]
+    fn query_decision_conflict_blocks_execution() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let decision_log = default_decision_log();
+        let query_map = default_query_map();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator,
+            Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
+            decision_log,
+            query_map.clone(),
+        );
+
+        let mut deny_ctx = ok_ctx();
+        deny_ctx.allowed_tools = vec!["mock.export".to_string()];
+        let action = base_action("mock.read", "get");
+        let first = gate.handle_action_spec("s", "step", action.clone(), deny_ctx);
+        assert!(matches!(first, GateResult::Denied { .. }));
+
+        let policy_query_digest = policy_query_digest(&ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        });
+        let before_conflict = query_map
+            .lock()
+            .expect("query map lock")
+            .lookup(policy_query_digest)
+            .expect("initial mapping stored");
+
+        let second = gate.handle_action_spec("s", "step", action, ok_ctx());
+        match second {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![REPLAY_MISMATCH_REASON.to_string()]
+                );
+            }
+            other => panic!("expected denial from replay mismatch, got {other:?}"),
+        }
+
+        assert_eq!(counting.count(), 0, "adapter suppressed on conflicting decisions");
+        assert_eq!(
+            query_map
+                .lock()
+                .expect("query map lock")
+                .lookup(policy_query_digest),
+            Some(before_conflict),
+            "conflict should not overwrite existing mapping",
         );
     }
 }
