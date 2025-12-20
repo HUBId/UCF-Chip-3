@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use cdm::dlp_check_output;
+use cdm::{dlp_check_output, dlp_decision_digest, output_artifact_digest};
 use control::ControlFrameStore;
 #[cfg(test)]
 use frames::FramesConfig;
@@ -31,7 +31,6 @@ const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
 const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
 const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
 const POLICY_DECISION_REF: &str = "policy_decision";
-const OUTPUT_ARTIFACT_DOMAIN: &str = "UCF:HASH:OUTPUT_ARTIFACT";
 
 /// Maps policy query digests to their corresponding decision digests to detect replay mismatches.
 #[derive(Debug, Default, Clone)]
@@ -389,12 +388,13 @@ impl Gate {
         mut artifact: ucf::v1::OutputArtifact,
         ctx: GateContext,
     ) -> OutputResult {
-        let artifact_digest = digest_proto(OUTPUT_ARTIFACT_DOMAIN, &canonical_bytes(&artifact));
+        let artifact_digest = output_artifact_digest(&artifact);
         artifact.artifact_digest = Some(ucf::v1::Digest32 {
             value: artifact_digest.to_vec(),
         });
 
-        let dlp_decision = dlp_check_output(&artifact);
+        let mut dlp_decision = dlp_check_output(&artifact);
+        ensure_dlp_decision_digest(&mut dlp_decision);
         let mut reason_codes = dlp_decision
             .reason_codes
             .as_ref()
@@ -868,6 +868,20 @@ fn digest32_to_array(d: &ucf::v1::Digest32) -> Option<[u8; 32]> {
     }
 }
 
+fn ensure_dlp_decision_digest(decision: &mut ucf::v1::DlpDecision) {
+    if let Some(rc) = decision.reason_codes.as_mut() {
+        rc.codes.sort();
+        rc.codes.dedup();
+    }
+
+    if decision.dlp_decision_digest.is_none() {
+        let digest = dlp_decision_digest(decision);
+        decision.dlp_decision_digest = Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        });
+    }
+}
+
 fn digest_array_matches(actual: Option<&ucf::v1::Digest32>, expected: Option<[u8; 32]>) -> bool {
     match (actual, expected) {
         (Some(act), Some(exp)) => act.value.as_slice() == exp,
@@ -1018,24 +1032,15 @@ fn build_output_record(
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
 
-    let mut related_refs = vec![ucf::v1::RelatedRef {
-        id: "output_artifact".to_string(),
-        digest: Some(ucf::v1::Digest32 {
-            value: artifact_digest.to_vec(),
-        }),
-    }];
+    let mut related_refs = Vec::new();
+    related_refs.push(output_artifact_related_ref(artifact_digest));
 
     if let Some(dlp_digest) = dlp_decision
         .dlp_decision_digest
         .as_ref()
         .and_then(digest32_to_array)
     {
-        related_refs.push(ucf::v1::RelatedRef {
-            id: "dlp_decision".to_string(),
-            digest: Some(ucf::v1::Digest32 {
-                value: dlp_digest.to_vec(),
-            }),
-        });
+        related_refs.push(dlp_decision_related_ref(dlp_digest));
     }
 
     ucf::v1::ExperienceRecord {
@@ -1218,6 +1223,24 @@ fn policy_query_related_ref(policy_query_digest: [u8; 32]) -> ucf::v1::RelatedRe
         id: "policy_query".to_string(),
         digest: Some(ucf::v1::Digest32 {
             value: policy_query_digest.to_vec(),
+        }),
+    }
+}
+
+fn output_artifact_related_ref(digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: "output_artifact".to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+    }
+}
+
+fn dlp_decision_related_ref(digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: "dlp_decision".to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
         }),
     }
 }
@@ -3230,5 +3253,124 @@ mod tests {
             Some(before_conflict),
             "conflict should not overwrite existing mapping",
         );
+    }
+
+    #[test]
+    fn output_record_related_refs_are_ordered() {
+        let counting = CountingAdapter::default();
+        let (inner, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let artifact = ucf::v1::OutputArtifact {
+            artifact_id: "art-1".to_string(),
+            content: "ok".to_string(),
+            artifact_digest: None,
+        };
+
+        let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
+        assert!(matches!(result, OutputResult::Allowed(_)));
+
+        let guard = inner.lock().expect("pvgs client lock");
+        assert_eq!(guard.committed_records.len(), 1);
+        let record = guard.committed_records.first().expect("output record");
+
+        let ids: Vec<_> = record.related_refs.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(ids, vec!["output_artifact", "dlp_decision"]);
+
+        let governance_frame = record
+            .governance_frame
+            .as_ref()
+            .expect("governance frame present");
+        assert_eq!(governance_frame.dlp_refs.len(), 1);
+    }
+
+    #[test]
+    fn blocked_output_still_commits_record() {
+        let counting = CountingAdapter::default();
+        let (inner, pvgs_client) = shared_local_client();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_client,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let artifact = ucf::v1::OutputArtifact {
+            artifact_id: "art-2".to_string(),
+            content: "SECRET plan".to_string(),
+            artifact_digest: None,
+        };
+
+        let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
+        match result {
+            OutputResult::Blocked(decision, reasons) => {
+                assert_eq!(reasons, vec!["RC.CD.DLP.SECRET_PATTERN".to_string()]);
+                assert_eq!(
+                    ucf::v1::DlpDecisionForm::try_from(decision.form),
+                    Ok(ucf::v1::DlpDecisionForm::Block)
+                );
+            }
+            other => panic!("expected blocked result, got {other:?}"),
+        }
+
+        let guard = inner.lock().expect("pvgs client lock");
+        assert_eq!(guard.committed_records.len(), 1);
+        let record = guard.committed_records.first().expect("output record");
+        let ids: Vec<_> = record.related_refs.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(ids, vec!["output_artifact", "dlp_decision"]);
+    }
+
+    #[test]
+    fn output_record_bytes_are_deterministic() {
+        let artifact = ucf::v1::OutputArtifact {
+            artifact_id: "art-3".to_string(),
+            content: "deterministic".to_string(),
+            artifact_digest: None,
+        };
+        let artifact_digest = output_artifact_digest(&artifact);
+
+        let mut decision = dlp_check_output(&artifact);
+        ensure_dlp_decision_digest(&mut decision);
+
+        let control_store = control::ControlFrameStore::default();
+        let control_frame = control_store
+            .current()
+            .cloned()
+            .unwrap_or_else(|| control_store.strict_fallback());
+        let control_frame_digest = control::control_frame_digest(&control_frame);
+
+        let record_a = build_output_record(
+            "s",
+            "step",
+            artifact_digest,
+            &decision,
+            &control_frame,
+            &control_frame_digest,
+        );
+        let record_b = build_output_record(
+            "s",
+            "step",
+            artifact_digest,
+            &decision,
+            &control_frame,
+            &control_frame_digest,
+        );
+
+        assert_eq!(canonical_bytes(&record_a), canonical_bytes(&record_b));
     }
 }
