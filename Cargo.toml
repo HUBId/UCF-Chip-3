@@ -9,6 +9,7 @@ members = [
     "crates/tom",
     "crates/tam",
     "crates/frames",
+    "crates/ckm_orchestrator",
     "crates/pvgs_client",
     "crates/pvgs_verify",
     "crates/app",

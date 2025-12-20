@@ -3,6 +3,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use chip4_pvgs::receipt_digest;
+use ckm_orchestrator::CkmOrchestrator;
 use common::spawn_local_pvgs;
 use frames::{FramesConfig, WindowEngine};
 use gem::{DecisionLogStore, Gate, GateContext, GateResult};
@@ -303,12 +304,17 @@ fn gate_with_components(
     registry: Arc<ToolRegistry>,
     receipt_store: Arc<PvgsKeyEpochStore>,
 ) -> Gate {
+    let aggregator = Arc::new(Mutex::new(
+        WindowEngine::new(FramesConfig::fallback()).expect("window engine"),
+    ));
+    let orchestrator = Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(
+        aggregator.clone(),
+    )));
     Gate {
         policy: PolicyEngine::new(),
         adapter,
-        aggregator: Arc::new(Mutex::new(
-            WindowEngine::new(FramesConfig::fallback()).expect("window engine"),
-        )),
+        aggregator: aggregator.clone(),
+        orchestrator,
         control_store: control_store_with_frame(export_control_frame()),
         receipt_store,
         registry,

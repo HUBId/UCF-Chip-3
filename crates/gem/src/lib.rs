@@ -7,6 +7,7 @@ use std::{
 };
 
 use cdm::{dlp_check_output, dlp_decision_digest, output_artifact_digest};
+use ckm_orchestrator::CkmOrchestrator;
 use control::ControlFrameStore;
 #[cfg(test)]
 use frames::FramesConfig;
@@ -161,6 +162,7 @@ pub struct Gate {
     pub policy: PolicyEngine,
     pub adapter: Box<dyn ToolAdapter>,
     pub aggregator: Arc<Mutex<WindowEngine>>,
+    pub orchestrator: Arc<Mutex<CkmOrchestrator>>,
     pub control_store: Arc<Mutex<ControlFrameStore>>,
     pub receipt_store: Arc<PvgsKeyEpochStore>,
     pub registry: Arc<ToolRegistry>,
@@ -752,19 +754,22 @@ impl Gate {
         match receipt_result {
             Ok(Ok(receipt)) => {
                 let receipt_digest = receipt.receipt_digest.as_ref().and_then(digest32_to_array);
+                let receipt_status = ucf::v1::ReceiptStatus::try_from(receipt.status);
                 if let Ok(mut log) = self.decision_log.lock() {
-                    if ucf::v1::ReceiptStatus::try_from(receipt.status)
-                        == Ok(ucf::v1::ReceiptStatus::Accepted)
-                    {
+                    if receipt_status == Ok(ucf::v1::ReceiptStatus::Accepted) {
                         log.mark_committed(decision_ctx.decision_digest, receipt_digest);
                     } else {
                         log.mark_failed(decision_ctx.decision_digest, receipt_digest);
                     }
                 }
 
-                if ucf::v1::ReceiptStatus::try_from(receipt.status)
-                    != Ok(ucf::v1::ReceiptStatus::Accepted)
-                {
+                if receipt_status == Ok(ucf::v1::ReceiptStatus::Accepted) {
+                    if let (Ok(mut orchestrator), Ok(mut pvgs)) =
+                        (self.orchestrator.lock(), self.pvgs_client.lock())
+                    {
+                        orchestrator.on_record_committed(pvgs.as_mut(), &decision_ctx.session_id);
+                    }
+                } else {
                     let reasons = if receipt.reject_reason_codes.is_empty() {
                         vec![PVGS_INTEGRITY_REASON.to_string()]
                     } else {
@@ -1568,6 +1573,21 @@ mod tests {
                 .commit_micro_milestone(micro)
         }
 
+        fn try_commit_next_micro(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
+        fn try_commit_next_meso(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
+        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
         fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
             self.inner.lock().expect("pvgs client lock").get_pvgs_head()
         }
@@ -1648,6 +1668,21 @@ mod tests {
             ))
         }
 
+        fn try_commit_next_micro(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
+        fn try_commit_next_meso(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
+        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
         fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
             self.inner.lock().expect("pvgs client lock").get_pvgs_head()
         }
@@ -1688,6 +1723,27 @@ mod tests {
             &mut self,
             _micro: ucf::v1::MicroMilestone,
         ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
+        fn try_commit_next_micro(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
+        fn try_commit_next_meso(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
+        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
             Err(pvgs_client::PvgsClientError::CommitFailed(
                 "forced failure".to_string(),
             ))
@@ -1751,6 +1807,21 @@ mod tests {
                 .lock()
                 .expect("pvgs client lock")
                 .commit_micro_milestone(micro)
+        }
+
+        fn try_commit_next_micro(
+            &mut self,
+            _session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
+        fn try_commit_next_meso(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
+        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
         }
 
         fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
@@ -1855,10 +1926,14 @@ mod tests {
         decision_log: Arc<Mutex<DecisionLogStore>>,
         query_decisions: Arc<Mutex<QueryDecisionMap>>,
     ) -> Gate {
+        let orchestrator = Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(
+            aggregator.clone(),
+        )));
         Gate {
             policy: PolicyEngine::new(),
             adapter,
             aggregator,
+            orchestrator,
             control_store: store,
             receipt_store,
             registry,
@@ -3477,6 +3552,9 @@ mod tests {
             policy: PolicyEngine::new(),
             adapter: Box::new(counting.clone()),
             aggregator: aggregator.clone(),
+            orchestrator: Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(
+                aggregator.clone(),
+            ))),
             control_store: store,
             receipt_store: Arc::new(PvgsKeyEpochStore::new()),
             registry: Arc::new(trm::registry_fixture()),
