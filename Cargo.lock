@@ -116,6 +116,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ckm_client"
+version = "0.1.0"
+dependencies = [
+ "pvgs_client",
+ "thiserror",
+ "ucf-protocol",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

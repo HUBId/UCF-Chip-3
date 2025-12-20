@@ -82,6 +82,12 @@ pub enum PvgsClientError {
     CommitFailed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PvgsHead {
+    pub head_experience_id: u64,
+    pub head_record_digest: [u8; 32],
+}
+
 pub trait PvgsClient: Send + Sync {
     fn commit_experience_record(
         &mut self,
@@ -97,6 +103,13 @@ pub trait PvgsClient: Send + Sync {
         &mut self,
         trc: ucf::v1::ToolRegistryContainer,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
+
+    fn commit_micro_milestone(
+        &mut self,
+        micro: ucf::v1::MicroMilestone,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
+
+    fn get_pvgs_head(&self) -> PvgsHead;
 }
 
 pub trait PvgsReader: Send + Sync {
@@ -148,6 +161,22 @@ impl PvgsClient for Chip4LocalPvgsClient {
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         Ok(self.pvgs.commit_tool_registry(trc))
     }
+
+    fn commit_micro_milestone(
+        &mut self,
+        micro: ucf::v1::MicroMilestone,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let receipt = self.pvgs.append_micro_milestone(micro);
+        Ok(receipt)
+    }
+
+    fn get_pvgs_head(&self) -> PvgsHead {
+        let (head_experience_id, head_record_digest) = self.pvgs.head();
+        PvgsHead {
+            head_experience_id,
+            head_record_digest,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -156,12 +185,16 @@ pub struct LocalPvgsClient {
     grant_id: String,
     default_status: ucf::v1::ReceiptStatus,
     reject_reason_codes: Vec<String>,
+    head_experience_id: u64,
+    head_record_digest: [u8; 32],
     pub committed_records: Vec<ucf::v1::ExperienceRecord>,
     pub committed_bytes: Vec<Vec<u8>>,
     pub committed_dlp_decisions: Vec<ucf::v1::DlpDecision>,
     pub committed_dlp_bytes: Vec<Vec<u8>>,
     pub committed_tool_registries: Vec<ucf::v1::ToolRegistryContainer>,
     pub committed_registry_bytes: Vec<Vec<u8>>,
+    pub committed_micro_milestones: Vec<ucf::v1::MicroMilestone>,
+    pub committed_micro_bytes: Vec<Vec<u8>>,
 }
 
 impl Default for LocalPvgsClient {
@@ -171,12 +204,16 @@ impl Default for LocalPvgsClient {
             grant_id: "local-grant".to_string(),
             default_status: ucf::v1::ReceiptStatus::Accepted,
             reject_reason_codes: Vec::new(),
+            head_experience_id: 0,
+            head_record_digest: [0u8; 32],
             committed_records: Vec::new(),
             committed_bytes: Vec::new(),
             committed_dlp_decisions: Vec::new(),
             committed_dlp_bytes: Vec::new(),
             committed_tool_registries: Vec::new(),
             committed_registry_bytes: Vec::new(),
+            committed_micro_milestones: Vec::new(),
+            committed_micro_bytes: Vec::new(),
         }
     }
 }
@@ -195,6 +232,11 @@ impl LocalPvgsClient {
             default_status: status,
             ..Self::default()
         }
+    }
+
+    pub fn set_head(&mut self, head_experience_id: u64, head_record_digest: [u8; 32]) {
+        self.head_experience_id = head_experience_id;
+        self.head_record_digest = head_record_digest;
     }
 
     pub fn committed_tool_registries(&self) -> &[ucf::v1::ToolRegistryContainer] {
@@ -224,6 +266,14 @@ impl PvgsClient for LocalPvgsClient {
         self.committed_records.push(record.clone());
         self.committed_bytes.push(bytes);
 
+        let prev_record_digest = if self.head_experience_id > 0 {
+            Some(ucf::v1::Digest32 {
+                value: self.head_record_digest.to_vec(),
+            })
+        } else {
+            None
+        };
+
         let receipt = ucf::v1::PvgsReceipt {
             receipt_epoch: self.receipt_epoch.clone(),
             receipt_id: format!("pvgs-local-{}", self.committed_records.len()),
@@ -240,7 +290,7 @@ impl PvgsClient for LocalPvgsClient {
             grant_id: self.grant_id.clone(),
             charter_version_digest: None,
             policy_version_digest: None,
-            prev_record_digest: None,
+            prev_record_digest,
             profile_digest: record
                 .metabolic_frame
                 .as_ref()
@@ -253,6 +303,11 @@ impl PvgsClient for LocalPvgsClient {
             },
             signer: None,
         };
+
+        if status == ucf::v1::ReceiptStatus::Accepted {
+            self.head_experience_id += 1;
+            self.head_record_digest = record_digest;
+        }
 
         Ok(receipt)
     }
@@ -350,6 +405,67 @@ impl PvgsClient for LocalPvgsClient {
         };
 
         Ok(receipt)
+    }
+
+    fn commit_micro_milestone(
+        &mut self,
+        mut micro: ucf::v1::MicroMilestone,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        if micro.micro_digest.is_none() {
+            let bytes = ucf_protocol::canonical_bytes(&micro);
+            let micro_digest = ucf_protocol::digest_proto("UCF:HASH:MICRO_MILESTONE", &bytes);
+            micro.micro_digest = Some(ucf::v1::Digest32 {
+                value: micro_digest.to_vec(),
+            });
+        }
+
+        let bytes = ucf_protocol::canonical_bytes(&micro);
+        let micro_digest: [u8; 32] = micro
+            .micro_digest
+            .as_ref()
+            .and_then(|d| d.value.clone().try_into().ok())
+            .unwrap_or([0u8; 32]);
+
+        let status = self.default_status;
+        let mut reject_reason_codes = self.reject_reason_codes.clone();
+        if status == ucf::v1::ReceiptStatus::Rejected && reject_reason_codes.is_empty() {
+            reject_reason_codes.push("RC.RE.SCHEMA.INVALID".to_string());
+        }
+
+        self.committed_micro_milestones.push(micro.clone());
+        self.committed_micro_bytes.push(bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!("pvgs-local-micro-{}", self.committed_micro_milestones.len()),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: micro_digest.to_vec(),
+            }),
+            status: status.into(),
+            action_digest: None,
+            decision_digest: micro.micro_digest.clone(),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
+                reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
+    fn get_pvgs_head(&self) -> PvgsHead {
+        PvgsHead {
+            head_experience_id: self.head_experience_id,
+            head_record_digest: self.head_record_digest,
+        }
     }
 }
 
@@ -473,6 +589,17 @@ impl PvgsClient for MockPvgsClient {
         trc: ucf::v1::ToolRegistryContainer,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         self.local.commit_tool_registry(trc)
+    }
+
+    fn commit_micro_milestone(
+        &mut self,
+        micro: ucf::v1::MicroMilestone,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.local.commit_micro_milestone(micro)
+    }
+
+    fn get_pvgs_head(&self) -> PvgsHead {
+        self.local.get_pvgs_head()
     }
 }
 

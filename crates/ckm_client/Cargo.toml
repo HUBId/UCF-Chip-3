@@ -1,0 +1,10 @@
+[package]
+name = "ckm_client"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+thiserror = { workspace = true }
+pvgs_client = { path = "../pvgs_client" }
+ucf-protocol = { workspace = true }
