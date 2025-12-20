@@ -776,7 +776,7 @@ impl PvgsClient for MockPvgsClient {
 
 fn should_commit(call_count: u64, every: Option<u64>) -> bool {
     match every {
-        Some(value) if value > 0 => call_count % value == 0,
+        Some(value) if value > 0 => call_count.is_multiple_of(value),
         _ => false,
     }
 }
