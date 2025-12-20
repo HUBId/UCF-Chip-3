@@ -6,10 +6,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use cdm::dlp_check_output;
 use control::ControlFrameStore;
 #[cfg(test)]
 use frames::FramesConfig;
-use frames::{ReceiptIssue, WindowEngine};
+use frames::{DlpDecision as FramesDlpDecision, ReceiptIssue, WindowEngine};
 use pbm::{
     compute_decision_digest, policy_query_digest, DecisionForm, PolicyContext,
     PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest,
@@ -30,6 +31,7 @@ const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
 const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
 const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
 const POLICY_DECISION_REF: &str = "policy_decision";
+const OUTPUT_ARTIFACT_DOMAIN: &str = "UCF:HASH:OUTPUT_ARTIFACT";
 
 /// Maps policy query digests to their corresponding decision digests to detect replay mismatches.
 #[derive(Debug, Default, Clone)]
@@ -218,6 +220,12 @@ pub enum GateResult {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputResult {
+    Allowed(ucf::v1::DlpDecision),
+    Blocked(ucf::v1::DlpDecision, Vec<String>),
+}
+
 impl Gate {
     pub fn handle_action_spec(
         &self,
@@ -371,6 +379,62 @@ impl Gate {
 
                 GateResult::Executed { decision, outcome }
             }
+        }
+    }
+
+    pub fn handle_output_artifact(
+        &self,
+        session_id: &str,
+        step_id: &str,
+        mut artifact: ucf::v1::OutputArtifact,
+        ctx: GateContext,
+    ) -> OutputResult {
+        let artifact_digest = digest_proto(OUTPUT_ARTIFACT_DOMAIN, &canonical_bytes(&artifact));
+        artifact.artifact_digest = Some(ucf::v1::Digest32 {
+            value: artifact_digest.to_vec(),
+        });
+
+        let dlp_decision = dlp_check_output(&artifact);
+        let mut reason_codes = dlp_decision
+            .reason_codes
+            .as_ref()
+            .map(|rc| rc.codes.clone())
+            .unwrap_or_default();
+        reason_codes.sort();
+        reason_codes.dedup();
+
+        if let Ok(mut agg) = self.aggregator.lock() {
+            let frames_decision = match ucf::v1::DlpDecisionForm::try_from(dlp_decision.form) {
+                Ok(ucf::v1::DlpDecisionForm::Block) => FramesDlpDecision::Block,
+                Ok(ucf::v1::DlpDecisionForm::Redact) => FramesDlpDecision::Redact,
+                Ok(ucf::v1::DlpDecisionForm::ClassifyUpgrade) => FramesDlpDecision::ClassifyUpgrade,
+                _ => FramesDlpDecision::Allow,
+            };
+            agg.on_dlp_decision(frames_decision, &reason_codes);
+        }
+
+        let control_frame = self.resolve_control_frame(&ctx);
+        let control_frame_digest = control::control_frame_digest(&control_frame);
+        let record = build_output_record(
+            session_id,
+            step_id,
+            artifact_digest,
+            &dlp_decision,
+            &control_frame,
+            &control_frame_digest,
+        );
+
+        if let Ok(mut client) = self.pvgs_client.lock() {
+            if client.commit_experience_record(record.clone()).is_err() {
+                self.note_integrity_issue(&[PVGS_INTEGRITY_REASON.to_string()]);
+            }
+        }
+
+        match ucf::v1::DlpDecisionForm::try_from(dlp_decision.form) {
+            Ok(ucf::v1::DlpDecisionForm::Block) => {
+                OutputResult::Blocked(dlp_decision, reason_codes)
+            }
+            _ => OutputResult::Allowed(dlp_decision),
         }
     }
 
@@ -925,6 +989,73 @@ fn build_action_exec_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_output_record(
+    session_id: &str,
+    step_id: &str,
+    artifact_digest: [u8; 32],
+    dlp_decision: &ucf::v1::DlpDecision,
+    control_frame: &ucf::v1::ControlFrame,
+    control_frame_digest: &[u8; 32],
+) -> ucf::v1::ExperienceRecord {
+    let core_frame = ucf::v1::CoreFrame {
+        session_id: session_id.to_string(),
+        step_id: step_id.to_string(),
+        input_packet_refs: Vec::new(),
+        intent_refs: Vec::new(),
+        candidate_refs: vec![ucf::v1::Digest32 {
+            value: artifact_digest.to_vec(),
+        }],
+        workspace_mode: ucf::v1::WorkspaceMode::ExecPlan.into(),
+    };
+
+    let metabolic_frame = build_metabolic_frame(control_frame, control_frame_digest);
+    let governance_frame = build_output_governance_frame(dlp_decision);
+
+    let core_frame_ref = digest_proto(CORE_FRAME_DOMAIN, &canonical_bytes(&core_frame));
+    let metabolic_frame_ref =
+        digest_proto(METABOLIC_FRAME_DOMAIN, &canonical_bytes(&metabolic_frame));
+    let governance_frame_ref =
+        digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
+
+    let mut related_refs = vec![ucf::v1::RelatedRef {
+        id: "output_artifact".to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: artifact_digest.to_vec(),
+        }),
+    }];
+
+    if let Some(dlp_digest) = dlp_decision
+        .dlp_decision_digest
+        .as_ref()
+        .and_then(digest32_to_array)
+    {
+        related_refs.push(ucf::v1::RelatedRef {
+            id: "dlp_decision".to_string(),
+            digest: Some(ucf::v1::Digest32 {
+                value: dlp_digest.to_vec(),
+            }),
+        });
+    }
+
+    ucf::v1::ExperienceRecord {
+        record_type: ucf::v1::RecordType::Output.into(),
+        core_frame: Some(core_frame),
+        metabolic_frame: Some(metabolic_frame),
+        governance_frame: Some(governance_frame),
+        core_frame_ref: Some(ucf::v1::Digest32 {
+            value: core_frame_ref.to_vec(),
+        }),
+        metabolic_frame_ref: Some(ucf::v1::Digest32 {
+            value: metabolic_frame_ref.to_vec(),
+        }),
+        governance_frame_ref: Some(ucf::v1::Digest32 {
+            value: governance_frame_ref.to_vec(),
+        }),
+        related_refs,
+    }
+}
+
 fn build_core_frame(decision_ctx: &DecisionContext, action_digest: [u8; 32]) -> ucf::v1::CoreFrame {
     ucf::v1::CoreFrame {
         session_id: decision_ctx.session_id.to_string(),
@@ -988,6 +1119,42 @@ fn build_governance_frame(
             value: digest_proto(BUDGET_SNAPSHOT_DOMAIN, b"budget").to_vec(),
         }),
         pvgs_receipt_ref,
+        reason_codes: if reason_codes.is_empty() {
+            None
+        } else {
+            Some(ucf::v1::ReasonCodes {
+                codes: reason_codes,
+            })
+        },
+    }
+}
+
+fn build_output_governance_frame(dlp_decision: &ucf::v1::DlpDecision) -> ucf::v1::GovernanceFrame {
+    let mut dlp_refs = Vec::new();
+    if let Some(digest) = dlp_decision
+        .dlp_decision_digest
+        .as_ref()
+        .and_then(digest32_to_array)
+    {
+        dlp_refs.push(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        });
+    }
+
+    let mut reason_codes = dlp_decision
+        .reason_codes
+        .as_ref()
+        .map(|rc| rc.codes.clone())
+        .unwrap_or_default();
+    reason_codes.sort();
+    reason_codes.dedup();
+
+    ucf::v1::GovernanceFrame {
+        policy_decision_refs: Vec::new(),
+        grant_refs: Vec::new(),
+        dlp_refs,
+        budget_snapshot_ref: None,
+        pvgs_receipt_ref: None,
         reason_codes: if reason_codes.is_empty() {
             None
         } else {

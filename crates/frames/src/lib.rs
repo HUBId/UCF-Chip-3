@@ -286,6 +286,7 @@ struct ExecCounts {
 
 #[derive(Debug, Clone, Default)]
 struct DlpCounts {
+    allow: u64,
     block: u64,
     redact: u64,
     classify_upgrade: u64,
@@ -316,6 +317,7 @@ pub enum ReceiptIssue {
 
 #[derive(Debug, Clone, Copy)]
 pub enum DlpDecision {
+    Allow,
     Block,
     Redact,
     ClassifyUpgrade,
@@ -479,6 +481,7 @@ impl<C: Clock> WindowEngine<C> {
     pub fn on_dlp_decision(&mut self, decision: DlpDecision, reason_codes: &[String]) {
         self.apply_to_windows(|state| {
             match decision {
+                DlpDecision::Allow => state.dlp_counts.allow += 1,
                 DlpDecision::Block => state.dlp_counts.block += 1,
                 DlpDecision::Redact => state.dlp_counts.redact += 1,
                 DlpDecision::ClassifyUpgrade => state.dlp_counts.classify_upgrade += 1,
@@ -625,6 +628,7 @@ impl<C: Clock> WindowEngine<C> {
 
             let dlp_stats = ucf::v1::DlpStats {
                 top_reason_codes: state.dlp_reasons.top(top_limit),
+                allow_count: state.dlp_counts.allow,
                 block_count: state.dlp_counts.block,
                 redact_count: state.dlp_counts.redact,
                 classify_upgrade_count: state.dlp_counts.classify_upgrade,

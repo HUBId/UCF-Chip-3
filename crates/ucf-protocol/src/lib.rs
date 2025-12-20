@@ -651,6 +651,15 @@ pub mod ucf {
             pub reason_codes: ::core::option::Option<ReasonCodes>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct OutputArtifact {
+            #[prost(string, tag = "1")]
+            pub artifact_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub content: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "3")]
+            pub artifact_digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct InputPacket {
             #[prost(string, tag = "1")]
             pub request_id: ::prost::alloc::string::String,
@@ -710,6 +719,51 @@ pub mod ucf {
             pub redact_count: u64,
             #[prost(uint64, tag = "4")]
             pub classify_upgrade_count: u64,
+            #[prost(uint64, tag = "5")]
+            pub allow_count: u64,
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum DlpDecisionForm {
+            Unspecified = 0,
+            Allow = 1,
+            Block = 2,
+            Redact = 3,
+            ClassifyUpgrade = 4,
+        }
+        impl DlpDecisionForm {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    DlpDecisionForm::Unspecified => "DLP_DECISION_FORM_UNSPECIFIED",
+                    DlpDecisionForm::Allow => "DLP_DECISION_FORM_ALLOW",
+                    DlpDecisionForm::Block => "DLP_DECISION_FORM_BLOCK",
+                    DlpDecisionForm::Redact => "DLP_DECISION_FORM_REDACT",
+                    DlpDecisionForm::ClassifyUpgrade => "DLP_DECISION_FORM_CLASSIFY_UPGRADE",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "DLP_DECISION_FORM_UNSPECIFIED" => Some(Self::Unspecified),
+                    "DLP_DECISION_FORM_ALLOW" => Some(Self::Allow),
+                    "DLP_DECISION_FORM_BLOCK" => Some(Self::Block),
+                    "DLP_DECISION_FORM_REDACT" => Some(Self::Redact),
+                    "DLP_DECISION_FORM_CLASSIFY_UPGRADE" => Some(Self::ClassifyUpgrade),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct DlpDecision {
+            #[prost(enumeration = "DlpDecisionForm", tag = "1")]
+            pub form: i32,
+            #[prost(message, optional, tag = "2")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+            #[prost(message, optional, tag = "3")]
+            pub dlp_decision_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "4")]
+            pub artifact_ref: ::core::option::Option<Digest32>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct BudgetStats {

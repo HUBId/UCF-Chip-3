@@ -15,6 +15,7 @@ control = { path = "../control" }
 pvgs_verify = { path = "../pvgs_verify" }
 pvgs_client = { path = "../pvgs_client" }
 trm = { path = "../trm" }
+cdm = { path = "../cdm" }
 hex = "0.4"
 
 [dev-dependencies]
