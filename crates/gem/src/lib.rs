@@ -220,9 +220,20 @@ pub enum GateResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum OutputResult {
-    Allowed(ucf::v1::DlpDecision),
-    Blocked(ucf::v1::DlpDecision, Vec<String>),
+pub enum OutputDisposition {
+    Delivered,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputResult {
+    pub disposition: OutputDisposition,
+    pub artifact_digest: [u8; 32],
+    pub dlp_decision_digest: [u8; 32],
+    pub record_digest: Option<[u8; 32]>,
+    pub reason_codes: Vec<String>,
+    pub delivered: bool,
 }
 
 impl Gate {
@@ -415,32 +426,48 @@ impl Gate {
 
         let control_frame = self.resolve_control_frame(&ctx);
         let control_frame_digest = control::control_frame_digest(&control_frame);
+
         let dlp_receipt = self
             .pvgs_client
             .lock()
             .map(|mut client| client.commit_dlp_decision(dlp_decision.clone()));
 
-        let mut dlp_reject_reasons = None;
-        match dlp_receipt {
-            Ok(Ok(receipt)) => {
-                if ucf::v1::ReceiptStatus::try_from(receipt.status)
-                    != Ok(ucf::v1::ReceiptStatus::Accepted)
-                {
-                    let mut reasons = receipt.reject_reason_codes.clone();
-                    if reasons.is_empty() {
-                        reasons.push(PVGS_INTEGRITY_REASON.to_string());
-                    }
-                    dlp_reject_reasons = Some(reasons);
-                }
-            }
-            _ => {
-                dlp_reject_reasons = Some(vec![PVGS_INTEGRITY_REASON.to_string()]);
-            }
-        }
+        let dlp_decision_digest = dlp_decision
+            .dlp_decision_digest
+            .as_ref()
+            .and_then(digest32_to_array)
+            .expect("dlp decision digest present");
 
-        if let Some(reasons) = dlp_reject_reasons {
+        let (dlp_committed, dlp_reasons) = match dlp_receipt {
+            Ok(Ok(receipt))
+                if ucf::v1::ReceiptStatus::try_from(receipt.status)
+                    == Ok(ucf::v1::ReceiptStatus::Accepted) =>
+            {
+                (true, reason_codes.clone())
+            }
+            Ok(Ok(receipt)) => {
+                let mut reasons = receipt.reject_reason_codes.clone();
+                if reasons.is_empty() {
+                    reasons.push(PVGS_INTEGRITY_REASON.to_string());
+                }
+                (false, reasons)
+            }
+            _ => (false, vec![PVGS_INTEGRITY_REASON.to_string()]),
+        };
+
+        if !dlp_committed {
+            let mut reasons = dlp_reasons;
+            reasons.sort();
+            reasons.dedup();
             self.note_integrity_issue(&reasons);
-            return OutputResult::Blocked(dlp_decision, reasons);
+            return OutputResult {
+                disposition: OutputDisposition::Failed,
+                artifact_digest,
+                dlp_decision_digest,
+                record_digest: None,
+                reason_codes: reasons,
+                delivered: false,
+            };
         }
 
         let record = build_output_record(
@@ -455,17 +482,92 @@ impl Gate {
             ctx.ruleset_digest,
         );
 
-        if let Ok(mut client) = self.pvgs_client.lock() {
-            if client.commit_experience_record(record.clone()).is_err() {
-                self.note_integrity_issue(&[PVGS_INTEGRITY_REASON.to_string()]);
-            }
-        }
+        let record_receipt = self
+            .pvgs_client
+            .lock()
+            .map(|mut client| client.commit_experience_record(record.clone()));
 
-        match ucf::v1::DlpDecisionForm::try_from(dlp_decision.form) {
-            Ok(ucf::v1::DlpDecisionForm::Block) => {
-                OutputResult::Blocked(dlp_decision, reason_codes)
+        let (_record_committed, record_reasons) = match record_receipt {
+            Ok(Ok(receipt))
+                if ucf::v1::ReceiptStatus::try_from(receipt.status)
+                    == Ok(ucf::v1::ReceiptStatus::Accepted) =>
+            {
+                let digest = receipt.receipt_digest.as_ref().and_then(digest32_to_array);
+                return self.finalize_output_result(
+                    &dlp_decision,
+                    artifact_digest,
+                    dlp_decision_digest,
+                    digest,
+                    reason_codes,
+                    &control_frame,
+                );
             }
-            _ => OutputResult::Allowed(dlp_decision),
+            Ok(Ok(receipt)) => {
+                let mut reasons = receipt.reject_reason_codes.clone();
+                if reasons.is_empty() {
+                    reasons.push(PVGS_INTEGRITY_REASON.to_string());
+                }
+                (false, reasons)
+            }
+            _ => (false, vec![PVGS_INTEGRITY_REASON.to_string()]),
+        };
+
+        let mut reasons = record_reasons;
+        reasons.sort();
+        reasons.dedup();
+        self.note_integrity_issue(&reasons);
+
+        OutputResult {
+            disposition: OutputDisposition::Failed,
+            artifact_digest,
+            dlp_decision_digest,
+            record_digest: None,
+            reason_codes: reasons,
+            delivered: false,
+        }
+    }
+
+    fn finalize_output_result(
+        &self,
+        dlp_decision: &ucf::v1::DlpDecision,
+        artifact_digest: [u8; 32],
+        dlp_decision_digest: [u8; 32],
+        record_digest: Option<[u8; 32]>,
+        mut reason_codes: Vec<String>,
+        control_frame: &ucf::v1::ControlFrame,
+    ) -> OutputResult {
+        reason_codes.sort();
+        reason_codes.dedup();
+
+        let form = ucf::v1::DlpDecisionForm::try_from(dlp_decision.form)
+            .unwrap_or(ucf::v1::DlpDecisionForm::Unspecified);
+        let delivery_allowed = matches!(
+            form,
+            ucf::v1::DlpDecisionForm::Allow | ucf::v1::DlpDecisionForm::Redact
+        ) && !control_frame
+            .overlays
+            .as_ref()
+            .map(|o| o.ovl_export_lock)
+            .unwrap_or(false)
+            && control_frame
+                .toolclass_mask
+                .as_ref()
+                .map(|m| m.enable_export)
+                .unwrap_or(false);
+
+        let disposition = match form {
+            ucf::v1::DlpDecisionForm::Block => OutputDisposition::Blocked,
+            _ if delivery_allowed => OutputDisposition::Delivered,
+            _ => OutputDisposition::Blocked,
+        };
+
+        OutputResult {
+            disposition,
+            artifact_digest,
+            dlp_decision_digest,
+            record_digest,
+            reason_codes,
+            delivered: delivery_allowed,
         }
     }
 
@@ -1435,6 +1537,69 @@ mod tests {
                 .expect("call order lock")
                 .push("commit_dlp_decision");
 
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_dlp_decision(dlp)
+        }
+
+        fn commit_tool_registry(
+            &mut self,
+            trc: ucf::v1::ToolRegistryContainer,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_tool_registry(trc)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordRejectingPvgsClient {
+        inner: Arc<Mutex<pvgs_client::LocalPvgsClient>>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl RecordRejectingPvgsClient {
+        fn new(inner: pvgs_client::LocalPvgsClient) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(inner)),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .expect("call order lock")
+                .iter()
+                .map(|c| c.to_string())
+                .collect()
+        }
+    }
+
+    impl PvgsClient for RecordRejectingPvgsClient {
+        fn commit_experience_record(
+            &mut self,
+            _record: ucf::v1::ExperienceRecord,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.calls
+                .lock()
+                .expect("call order lock")
+                .push("commit_experience_record");
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "record rejected".to_string(),
+            ))
+        }
+
+        fn commit_dlp_decision(
+            &mut self,
+            dlp: ucf::v1::DlpDecision,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.calls
+                .lock()
+                .expect("call order lock")
+                .push("commit_dlp_decision");
             self.inner
                 .lock()
                 .expect("pvgs client lock")
@@ -3377,7 +3542,8 @@ mod tests {
         ctx.ruleset_digest = Some([9u8; 32]);
 
         let result = gate.handle_output_artifact("s", "step", artifact, ctx);
-        assert!(matches!(result, OutputResult::Allowed(_)));
+        assert_eq!(result.disposition, OutputDisposition::Delivered);
+        assert!(result.delivered);
 
         let guard = inner.lock().expect("pvgs client lock");
         assert_eq!(guard.committed_records.len(), 1);
@@ -3419,7 +3585,7 @@ mod tests {
         };
 
         let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
-        assert!(matches!(result, OutputResult::Allowed(_)));
+        assert_eq!(result.disposition, OutputDisposition::Delivered);
 
         let calls = pvgs.calls();
         assert_eq!(
@@ -3460,12 +3626,11 @@ mod tests {
         };
 
         let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
-        match result {
-            OutputResult::Blocked(_, reasons) => {
-                assert!(reasons.contains(&PVGS_INTEGRITY_REASON.to_string()))
-            }
-            other => panic!("expected blocked result, got {other:?}"),
-        }
+        assert_eq!(result.disposition, OutputDisposition::Failed);
+        assert!(result
+            .reason_codes
+            .contains(&PVGS_INTEGRITY_REASON.to_string()));
+        assert!(!result.delivered);
 
         let guard = inner.lock().expect("pvgs client lock");
         assert_eq!(guard.committed_dlp_decisions.len(), 1);
@@ -3495,22 +3660,140 @@ mod tests {
         };
 
         let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
-        match result {
-            OutputResult::Blocked(decision, reasons) => {
-                assert_eq!(reasons, vec!["RC.CD.DLP.SECRET_PATTERN".to_string()]);
-                assert_eq!(
-                    ucf::v1::DlpDecisionForm::try_from(decision.form),
-                    Ok(ucf::v1::DlpDecisionForm::Block)
-                );
-            }
-            other => panic!("expected blocked result, got {other:?}"),
-        }
+        assert_eq!(result.disposition, OutputDisposition::Blocked);
+        assert!(!result.delivered);
+        assert_eq!(
+            result.reason_codes,
+            vec!["RC.CD.DLP.SECRET_PATTERN".to_string()]
+        );
 
         let guard = inner.lock().expect("pvgs client lock");
         assert_eq!(guard.committed_records.len(), 1);
         let record = guard.committed_records.first().expect("output record");
         let ids: Vec<_> = record.related_refs.iter().map(|r| r.id.clone()).collect();
         assert_eq!(ids, vec!["output_artifact", "dlp_decision"]);
+    }
+
+    #[test]
+    fn allowed_output_commits_and_delivers_when_export_enabled() {
+        let counting = CountingAdapter::default();
+        let pvgs = CountingPvgsClient::new(pvgs_client::LocalPvgsClient::default());
+        let pvgs_handle: PvgsClientHandle =
+            Arc::new(Mutex::new(Box::new(pvgs.clone()) as Box<dyn PvgsClient>));
+
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_handle,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let artifact = ucf::v1::OutputArtifact {
+            artifact_id: "art-allow".to_string(),
+            content: "clean".to_string(),
+            artifact_digest: None,
+        };
+
+        let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
+        assert_eq!(result.disposition, OutputDisposition::Delivered);
+        assert!(result.delivered);
+
+        let calls = pvgs.calls();
+        assert_eq!(
+            calls,
+            vec!["commit_dlp_decision", "commit_experience_record"]
+        );
+        let guard = pvgs.inner.lock().expect("pvgs client lock");
+        assert_eq!(guard.committed_dlp_decisions.len(), 1);
+        assert_eq!(guard.committed_records.len(), 1);
+    }
+
+    #[test]
+    fn record_commit_failure_results_in_failed_disposition() {
+        let counting = CountingAdapter::default();
+        let client = RecordRejectingPvgsClient::new(pvgs_client::LocalPvgsClient::default());
+        let pvgs_handle: PvgsClientHandle =
+            Arc::new(Mutex::new(Box::new(client.clone()) as Box<dyn PvgsClient>));
+
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_handle,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let artifact = ucf::v1::OutputArtifact {
+            artifact_id: "art-record-reject".to_string(),
+            content: "clean".to_string(),
+            artifact_digest: None,
+        };
+
+        let result = gate.handle_output_artifact("s", "step", artifact, ok_ctx());
+        assert_eq!(result.disposition, OutputDisposition::Failed);
+        assert!(!result.delivered);
+        assert!(result
+            .reason_codes
+            .contains(&PVGS_INTEGRITY_REASON.to_string()));
+
+        assert_eq!(
+            client.calls(),
+            vec!["commit_dlp_decision", "commit_experience_record"]
+        );
+    }
+
+    #[test]
+    fn signal_frame_tracks_dlp_counts_and_reasons() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
+            default_pvgs_client(),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let blocked = ucf::v1::OutputArtifact {
+            artifact_id: "art-block".to_string(),
+            content: "SECRET".to_string(),
+            artifact_digest: None,
+        };
+        let allowed = ucf::v1::OutputArtifact {
+            artifact_id: "art-allow".to_string(),
+            content: "ok".to_string(),
+            artifact_digest: None,
+        };
+
+        let _ = gate.handle_output_artifact("s", "step", blocked.clone(), ok_ctx());
+        let _ = gate.handle_output_artifact("s", "step2", blocked, ok_ctx());
+        let _ = gate.handle_output_artifact("s", "step3", allowed, ok_ctx());
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let stats = frames
+            .first()
+            .and_then(|f| f.dlp_stats.clone())
+            .expect("dlp stats present");
+
+        assert_eq!(stats.block_count, 2);
+        assert_eq!(stats.allow_count, 1);
+        assert!(stats
+            .top_reason_codes
+            .iter()
+            .any(|rc| rc.code == "RC.CD.DLP.SECRET_PATTERN"));
     }
 
     #[test]
