@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use ckm_orchestrator::CkmOrchestrator;
 use control::ControlFrameStore;
 use ed25519_dalek::{Signer, SigningKey};
 use frames::{FramesConfig, WindowEngine};
@@ -33,6 +34,9 @@ fn main() {
         policy: PolicyEngine::new(),
         adapter: Box::new(MockAdapter),
         aggregator: aggregator.clone(),
+        orchestrator: Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(
+            aggregator.clone(),
+        ))),
         control_store: control_store.clone(),
         receipt_store: receipt_store.clone(),
         registry: Arc::new(registry_fixture()),

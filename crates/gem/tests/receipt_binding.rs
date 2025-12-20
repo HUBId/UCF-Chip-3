@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use ckm_orchestrator::CkmOrchestrator;
 use control::ControlFrameStore;
 use ed25519_dalek::SigningKey;
 use frames::{FramesConfig, WindowEngine};
@@ -99,6 +100,9 @@ impl Harness {
             policy: pbm::PolicyEngine::new(),
             adapter: Box::new(adapter.clone()),
             aggregator: aggregator.clone(),
+            orchestrator: Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(
+                aggregator.clone(),
+            ))),
             control_store: control_store.clone(),
             receipt_store: Arc::new(receipt_store),
             registry: registry.clone(),

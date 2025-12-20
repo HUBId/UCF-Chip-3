@@ -1,0 +1,11 @@
+[package]
+name = "ckm_orchestrator"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+pvgs_client = { path = "../pvgs_client" }
+frames = { path = "../frames" }
+thiserror = { workspace = true }
+tracing = "0.1"

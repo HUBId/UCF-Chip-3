@@ -2,7 +2,7 @@
 
 use pvgs_verify::{IngestError, PvgsKeyEpochStore};
 use thiserror::Error;
-use ucf_protocol::ucf;
+use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
 // TODO: Bind commit/receipt messages to ucf-protocol definitions.
 
@@ -109,6 +109,12 @@ pub trait PvgsClient: Send + Sync {
         micro: ucf::v1::MicroMilestone,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 
+    fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError>;
+
+    fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError>;
+
+    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError>;
+
     fn get_pvgs_head(&self) -> PvgsHead;
 }
 
@@ -170,6 +176,18 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(receipt)
     }
 
+    fn try_commit_next_micro(&mut self, _session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(false)
+    }
+
+    fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError> {
+        Ok(false)
+    }
+
+    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError> {
+        Ok(false)
+    }
+
     fn get_pvgs_head(&self) -> PvgsHead {
         let (head_experience_id, head_record_digest) = self.pvgs.head();
         PvgsHead {
@@ -195,6 +213,10 @@ pub struct LocalPvgsClient {
     pub committed_registry_bytes: Vec<Vec<u8>>,
     pub committed_micro_milestones: Vec<ucf::v1::MicroMilestone>,
     pub committed_micro_bytes: Vec<Vec<u8>>,
+    pub micro_chunk_size: u64,
+    pub micro_last_end: u64,
+    pub try_commit_meso_outcome: Option<bool>,
+    pub try_commit_macro_outcome: Option<bool>,
 }
 
 impl Default for LocalPvgsClient {
@@ -214,6 +236,10 @@ impl Default for LocalPvgsClient {
             committed_registry_bytes: Vec::new(),
             committed_micro_milestones: Vec::new(),
             committed_micro_bytes: Vec::new(),
+            micro_chunk_size: 256,
+            micro_last_end: 0,
+            try_commit_meso_outcome: None,
+            try_commit_macro_outcome: None,
         }
     }
 }
@@ -461,6 +487,38 @@ impl PvgsClient for LocalPvgsClient {
         Ok(receipt)
     }
 
+    fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError> {
+        if self.micro_chunk_size == 0 {
+            return Ok(false);
+        }
+
+        let available = self.head_experience_id.saturating_sub(self.micro_last_end);
+        if available < self.micro_chunk_size {
+            return Ok(false);
+        }
+
+        let start = self.micro_last_end.saturating_add(1);
+        let end = start.saturating_add(self.micro_chunk_size - 1);
+        let micro = build_micro_milestone(session_id, start, end, self.head_record_digest);
+        let receipt = self.commit_micro_milestone(micro)?;
+        let accepted = ucf::v1::ReceiptStatus::try_from(receipt.status)
+            == Ok(ucf::v1::ReceiptStatus::Accepted);
+
+        if accepted {
+            self.micro_last_end = end;
+        }
+
+        Ok(accepted)
+    }
+
+    fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError> {
+        Ok(self.try_commit_meso_outcome.unwrap_or(false))
+    }
+
+    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError> {
+        Ok(self.try_commit_macro_outcome.unwrap_or(false))
+    }
+
     fn get_pvgs_head(&self) -> PvgsHead {
         PvgsHead {
             head_experience_id: self.head_experience_id,
@@ -469,15 +527,76 @@ impl PvgsClient for LocalPvgsClient {
     }
 }
 
+fn build_micro_milestone(
+    session_id: &str,
+    start: u64,
+    end: u64,
+    head_record_digest: [u8; 32],
+) -> ucf::v1::MicroMilestone {
+    let summary_preimage = [
+        start.to_le_bytes().as_slice(),
+        end.to_le_bytes().as_slice(),
+        session_id.as_bytes(),
+    ]
+    .concat();
+    let summary_digest = digest_proto("UCF:HASH:MICRO_SUMMARY", &summary_preimage);
+
+    let experience_range = ucf::v1::ExperienceRange {
+        start,
+        end,
+        head_record_digest: Some(ucf::v1::Digest32 {
+            value: head_record_digest.to_vec(),
+        }),
+    };
+
+    let mut micro = ucf::v1::MicroMilestone {
+        micro_id: format!("micro:{session_id}:{start}:{end}"),
+        experience_range: Some(experience_range),
+        summary_digest: Some(ucf::v1::Digest32 {
+            value: summary_digest.to_vec(),
+        }),
+        hormone_profile: ucf::v1::HormoneClass::Low.into(),
+        priority_class: ucf::v1::PriorityClass::Medium.into(),
+        micro_digest: None,
+        state: ucf::v1::MicroMilestoneState::Sealed.into(),
+        vrf_proof_ref: None,
+        proof_receipt_ref: None,
+    };
+
+    let micro_digest = digest_proto("UCF:HASH:MICRO_MILESTONE", &canonical_bytes(&micro));
+    micro.micro_digest = Some(ucf::v1::Digest32 {
+        value: micro_digest.to_vec(),
+    });
+
+    micro
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MockCommitStage {
+    Micro,
+    Meso,
+    Macro,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MockPvgsClient {
     pub local: LocalPvgsClient,
+    pub micro_commit_every: Option<u64>,
+    pub meso_commit_every: Option<u64>,
+    pub macro_commit_every: Option<u64>,
+    pub reject_stage: Option<MockCommitStage>,
+    pub reject_reason: String,
+    pub micro_calls: u64,
+    pub meso_calls: u64,
+    pub macro_calls: u64,
+    pub last_call_order: Vec<MockCommitStage>,
 }
 
 impl MockPvgsClient {
     pub fn rejecting(reason_codes: Vec<String>) -> Self {
         Self {
             local: LocalPvgsClient::rejecting(reason_codes),
+            ..Self::default()
         }
     }
 }
@@ -598,8 +717,67 @@ impl PvgsClient for MockPvgsClient {
         self.local.commit_micro_milestone(micro)
     }
 
+    fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError> {
+        self.micro_calls = self.micro_calls.saturating_add(1);
+        self.last_call_order.push(MockCommitStage::Micro);
+        if self.reject_stage == Some(MockCommitStage::Micro) {
+            return Err(PvgsClientError::CommitFailed(
+                if self.reject_reason.is_empty() {
+                    "RC.RE.INTEGRITY.DEGRADED".to_string()
+                } else {
+                    self.reject_reason.clone()
+                },
+            ));
+        }
+
+        let committed = should_commit(self.micro_calls, self.micro_commit_every);
+        if committed {
+            let _ = self.local.try_commit_next_micro(session_id);
+        }
+        Ok(committed)
+    }
+
+    fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError> {
+        self.meso_calls = self.meso_calls.saturating_add(1);
+        self.last_call_order.push(MockCommitStage::Meso);
+        if self.reject_stage == Some(MockCommitStage::Meso) {
+            return Err(PvgsClientError::CommitFailed(
+                if self.reject_reason.is_empty() {
+                    "RC.RE.INTEGRITY.DEGRADED".to_string()
+                } else {
+                    self.reject_reason.clone()
+                },
+            ));
+        }
+
+        Ok(should_commit(self.meso_calls, self.meso_commit_every))
+    }
+
+    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError> {
+        self.macro_calls = self.macro_calls.saturating_add(1);
+        self.last_call_order.push(MockCommitStage::Macro);
+        if self.reject_stage == Some(MockCommitStage::Macro) {
+            return Err(PvgsClientError::CommitFailed(
+                if self.reject_reason.is_empty() {
+                    "RC.RE.INTEGRITY.DEGRADED".to_string()
+                } else {
+                    self.reject_reason.clone()
+                },
+            ));
+        }
+
+        Ok(should_commit(self.macro_calls, self.macro_commit_every))
+    }
+
     fn get_pvgs_head(&self) -> PvgsHead {
         self.local.get_pvgs_head()
+    }
+}
+
+fn should_commit(call_count: u64, every: Option<u64>) -> bool {
+    match every {
+        Some(value) if value > 0 => call_count % value == 0,
+        _ => false,
     }
 }
 
