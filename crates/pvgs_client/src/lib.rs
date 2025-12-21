@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
+
 use pvgs_verify::{IngestError, PvgsKeyEpochStore};
 use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
@@ -88,6 +90,13 @@ pub struct PvgsHead {
     pub head_record_digest: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposedMacroInfo {
+    pub macro_id: String,
+    pub macro_digest: Option<[u8; 32]>,
+    pub session_id: Option<String>,
+}
+
 pub trait PvgsClient: Send + Sync {
     fn commit_experience_record(
         &mut self,
@@ -123,6 +132,19 @@ pub trait PvgsClient: Send + Sync {
         consistency_digest: Option<[u8; 32]>,
     ) -> Result<bool, PvgsClientError>;
 
+    fn try_propose_next_macro(&mut self) -> Result<Option<ProposedMacroInfo>, PvgsClientError> {
+        let _ = self;
+        Ok(None)
+    }
+
+    fn finalize_macro(
+        &mut self,
+        _macro_id: &str,
+        _consistency_digest: [u8; 32],
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        Err(PvgsClientError::CommitFailed("not implemented".to_string()))
+    }
+
     fn get_pending_replay_plans(
         &mut self,
         session_id: &str,
@@ -153,6 +175,8 @@ pub trait PvgsReader: Send + Sync {
 pub struct Chip4LocalPvgsClient {
     pub pvgs: chip4_pvgs::LocalPvgs,
     pub last_proof_receipt: Option<ucf::v1::ProofReceipt>,
+    pub proposed_macros: VecDeque<ProposedMacroInfo>,
+    pub finalized_macros: Vec<(String, [u8; 32])>,
 }
 
 #[cfg(any(test, feature = "local-e2e"))]
@@ -161,6 +185,8 @@ impl Chip4LocalPvgsClient {
         Self {
             pvgs,
             last_proof_receipt: None,
+            proposed_macros: VecDeque::new(),
+            finalized_macros: Vec::new(),
         }
     }
 }
@@ -224,6 +250,42 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(false)
     }
 
+    fn try_propose_next_macro(&mut self) -> Result<Option<ProposedMacroInfo>, PvgsClientError> {
+        Ok(self.proposed_macros.pop_front())
+    }
+
+    fn finalize_macro(
+        &mut self,
+        macro_id: &str,
+        consistency_digest: [u8; 32],
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.finalized_macros
+            .push((macro_id.to_string(), consistency_digest));
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: "chip4-local-epoch".to_string(),
+            receipt_id: format!("macro-{macro_id}"),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: consistency_digest.to_vec(),
+            }),
+            status: ucf::v1::ReceiptStatus::Accepted.into(),
+            action_digest: None,
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: consistency_digest.to_vec(),
+            }),
+            grant_id: "chip4-local-grant".to_string(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: Vec::new(),
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
     fn get_pending_replay_plans(
         &mut self,
         session_id: &str,
@@ -267,6 +329,8 @@ pub struct LocalPvgsClient {
     pub micro_last_end: u64,
     pub try_commit_meso_outcome: Option<bool>,
     pub try_commit_macro_outcome: Option<bool>,
+    pub proposed_macros: VecDeque<ProposedMacroInfo>,
+    pub finalized_macros: Vec<(String, [u8; 32])>,
 }
 
 impl Default for LocalPvgsClient {
@@ -292,6 +356,8 @@ impl Default for LocalPvgsClient {
             micro_last_end: 0,
             try_commit_meso_outcome: None,
             try_commit_macro_outcome: None,
+            proposed_macros: VecDeque::new(),
+            finalized_macros: Vec::new(),
         }
     }
 }
@@ -633,6 +699,52 @@ impl PvgsClient for LocalPvgsClient {
         Ok(self.try_commit_macro_outcome.unwrap_or(false))
     }
 
+    fn try_propose_next_macro(&mut self) -> Result<Option<ProposedMacroInfo>, PvgsClientError> {
+        Ok(self.proposed_macros.pop_front())
+    }
+
+    fn finalize_macro(
+        &mut self,
+        macro_id: &str,
+        consistency_digest: [u8; 32],
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.finalized_macros
+            .push((macro_id.to_string(), consistency_digest));
+
+        let status = self.default_status;
+        let mut reject_reason_codes = self.reject_reason_codes.clone();
+        if status == ucf::v1::ReceiptStatus::Rejected && reject_reason_codes.is_empty() {
+            reject_reason_codes.push("RC.RE.SCHEMA.INVALID".to_string());
+        }
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!("pvgs-local-macro-{}", self.finalized_macros.len()),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: consistency_digest.to_vec(),
+            }),
+            status: status.into(),
+            action_digest: None,
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: consistency_digest.to_vec(),
+            }),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
+                reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
     fn get_pending_replay_plans(
         &mut self,
         _session_id: &str,
@@ -697,7 +809,8 @@ pub enum MockCommitStage {
     Micro,
     Meso,
     Consistency,
-    Macro,
+    MacroPropose,
+    MacroFinalize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -711,6 +824,7 @@ pub struct MockPvgsClient {
     pub micro_calls: u64,
     pub meso_calls: u64,
     pub macro_calls: u64,
+    pub macro_finalize_calls: u64,
     pub last_call_order: Vec<MockCommitStage>,
     pub pending_replay_plans: Vec<ucf::v1::ReplayPlan>,
     pub consumed_replay_ids: Vec<String>,
@@ -718,6 +832,8 @@ pub struct MockPvgsClient {
     pub experience_commit_statuses: Vec<ucf::v1::ReceiptStatus>,
     pub committed_consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     pub macro_consistency_digests: Vec<Option<[u8; 32]>>,
+    pub proposed_macros: VecDeque<ProposedMacroInfo>,
+    pub finalized_macros: Vec<(String, [u8; 32])>,
 }
 
 impl MockPvgsClient {
@@ -916,8 +1032,8 @@ impl PvgsClient for MockPvgsClient {
         consistency_digest: Option<[u8; 32]>,
     ) -> Result<bool, PvgsClientError> {
         self.macro_calls = self.macro_calls.saturating_add(1);
-        self.last_call_order.push(MockCommitStage::Macro);
-        if self.reject_stage == Some(MockCommitStage::Macro) {
+        self.last_call_order.push(MockCommitStage::MacroFinalize);
+        if self.reject_stage == Some(MockCommitStage::MacroFinalize) {
             return Err(PvgsClientError::CommitFailed(
                 if self.reject_reason.is_empty() {
                     "RC.RE.INTEGRITY.DEGRADED".to_string()
@@ -930,6 +1046,50 @@ impl PvgsClient for MockPvgsClient {
         self.macro_consistency_digests.push(consistency_digest);
 
         Ok(should_commit(self.macro_calls, self.macro_commit_every))
+    }
+
+    fn try_propose_next_macro(&mut self) -> Result<Option<ProposedMacroInfo>, PvgsClientError> {
+        self.last_call_order.push(MockCommitStage::MacroPropose);
+        if self.reject_stage == Some(MockCommitStage::MacroPropose) {
+            return Err(PvgsClientError::CommitFailed(
+                if self.reject_reason.is_empty() {
+                    "RC.RE.INTEGRITY.DEGRADED".to_string()
+                } else {
+                    self.reject_reason.clone()
+                },
+            ));
+        }
+
+        Ok(self.proposed_macros.pop_front())
+    }
+
+    fn finalize_macro(
+        &mut self,
+        macro_id: &str,
+        consistency_digest: [u8; 32],
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.macro_finalize_calls = self.macro_finalize_calls.saturating_add(1);
+        self.last_call_order.push(MockCommitStage::MacroFinalize);
+        if self.reject_stage == Some(MockCommitStage::MacroFinalize) {
+            return Err(PvgsClientError::CommitFailed(
+                if self.reject_reason.is_empty() {
+                    "RC.RE.INTEGRITY.DEGRADED".to_string()
+                } else {
+                    self.reject_reason.clone()
+                },
+            ));
+        }
+
+        self.macro_consistency_digests
+            .push(Some(consistency_digest));
+        self.finalized_macros
+            .push((macro_id.to_string(), consistency_digest));
+
+        self.local
+            .finalize_macro(macro_id, consistency_digest)
+            .map_err(|err| match err {
+                PvgsClientError::CommitFailed(reason) => PvgsClientError::CommitFailed(reason),
+            })
     }
 
     fn get_pending_replay_plans(
