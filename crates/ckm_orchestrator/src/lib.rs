@@ -86,7 +86,10 @@ impl CkmOrchestrator {
     }
 
     fn on_commit_failure(&mut self) {
-        self.geist_signals.receipt_failures = self.geist_signals.receipt_failures.saturating_add(1);
+        self.geist_signals.receipt_missing_count =
+            self.geist_signals
+                .receipt_missing_count
+                .saturating_add(1);
         self.geist_signals.integrity_state = ucf::v1::IntegrityState::Degraded;
         self.log_integrity_issue();
     }
@@ -418,7 +421,7 @@ mod tests {
             micro_chunk_size: 1,
             ..Default::default()
         };
-        orchestrator.geist_signals.deny_count_medium_window = 25;
+        orchestrator.geist_signals.integrity_state = ucf::v1::IntegrityState::Degraded;
 
         let mut pvgs = MockPvgsClient {
             micro_commit_every: Some(1),
