@@ -191,10 +191,7 @@ impl From<ucf::v1::ReplayPlan> for InspectorReplayPlan {
     fn from(plan: ucf::v1::ReplayPlan) -> Self {
         Self {
             replay_id: plan.replay_id,
-            replay_digest: plan
-                .replay_digest
-                .as_ref()
-                .and_then(digest32_to_array),
+            replay_digest: plan.replay_digest.as_ref().and_then(digest32_to_array),
             last_signalframe_digest: None,
         }
     }
