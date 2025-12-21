@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use frames::WindowEngine;
 use geist_stub::{build_consistency_feedback, GeistSignals};
@@ -27,6 +30,7 @@ pub struct CkmOrchestrator {
     aggregator: Option<Arc<Mutex<WindowEngine>>>,
     records_since_micro: u64,
     consistency_tick: u64,
+    seen_proposed_macros: HashSet<String>,
 }
 
 impl std::fmt::Debug for CkmOrchestrator {
@@ -45,13 +49,14 @@ impl Default for CkmOrchestrator {
     fn default() -> Self {
         Self {
             micro_chunk_size: 256,
-            max_steps_per_tick: 3,
+            max_steps_per_tick: 5,
             enabled: true,
             geist_signals: GeistSignals::default(),
             latest_consistency_digest: None,
             aggregator: None,
             records_since_micro: 0,
             consistency_tick: 0,
+            seen_proposed_macros: HashSet::new(),
         }
     }
 }
@@ -156,22 +161,67 @@ impl CkmOrchestrator {
             }
         }
 
-        if steps < self.max_steps_per_tick {
-            match self.commit_consistency_feedback(pvgs, session_id) {
-                Ok(feedback) => {
-                    if feedback.consistency_class == ucf::v1::ConsistencyClass::Low as i32 {
-                        return;
-                    }
+        if steps >= self.max_steps_per_tick {
+            return;
+        }
 
-                    if let Err(err) = pvgs.try_commit_next_macro(self.latest_consistency_digest) {
-                        tracing::warn!("macro commit failed: {err:?}");
-                        self.on_commit_failure();
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("consistency feedback commit failed: {err:?}");
+        steps += 1;
+        let proposed_macro = match pvgs.try_propose_next_macro() {
+            Ok(proposed) => proposed,
+            Err(err) => {
+                tracing::warn!("macro propose failed: {err:?}");
+                self.on_commit_failure();
+                return;
+            }
+        };
+
+        let Some(proposed_macro) = proposed_macro else {
+            return;
+        };
+
+        if steps >= self.max_steps_per_tick {
+            return;
+        }
+
+        steps += 1;
+        let feedback = match self.commit_consistency_feedback(pvgs, session_id) {
+            Ok(feedback) => feedback,
+            Err(err) => {
+                tracing::warn!("consistency feedback commit failed: {err:?}");
+                self.on_commit_failure();
+                return;
+            }
+        };
+
+        if feedback.consistency_class == ucf::v1::ConsistencyClass::Low as i32 {
+            self.seen_proposed_macros
+                .insert(proposed_macro.macro_id.clone());
+            return;
+        }
+
+        if steps >= self.max_steps_per_tick {
+            return;
+        }
+
+        let digest = feedback
+            .cf_digest
+            .as_ref()
+            .and_then(|d| d.value.clone().try_into().ok())
+            .unwrap_or([0u8; 32]);
+        match pvgs.finalize_macro(&proposed_macro.macro_id, digest) {
+            Ok(receipt) => {
+                let accepted = ucf::v1::ReceiptStatus::try_from(receipt.status)
+                    == Ok(ucf::v1::ReceiptStatus::Accepted);
+                if !accepted {
+                    tracing::warn!("macro finalize rejected: {receipt:?}");
                     self.on_commit_failure();
+                    return;
                 }
+                self.seen_proposed_macros.remove(&proposed_macro.macro_id);
+            }
+            Err(err) => {
+                tracing::warn!("macro finalize failed: {err:?}");
+                self.on_commit_failure();
             }
         }
     }
@@ -182,7 +232,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use frames::{FramesConfig, WindowEngine};
-    use pvgs_client::{MockCommitStage, MockPvgsClient};
+    use pvgs_client::{MockCommitStage, MockPvgsClient, ProposedMacroInfo};
     use ucf_protocol::ucf;
 
     use super::CkmOrchestrator;
@@ -225,6 +275,12 @@ mod tests {
             ..Default::default()
         };
 
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-1".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+
         orchestrator.on_record_committed(&mut pvgs, "sess");
 
         assert_eq!(
@@ -232,16 +288,17 @@ mod tests {
             vec![
                 MockCommitStage::Micro,
                 MockCommitStage::Meso,
-                MockCommitStage::Consistency,
-                MockCommitStage::Macro,
+                MockCommitStage::MacroPropose,
             ]
         );
+        assert_eq!(pvgs.finalized_macros.len(), 0);
     }
 
     #[test]
     fn order_micro_then_meso_then_macro() {
         let mut orchestrator = CkmOrchestrator {
             micro_chunk_size: 1,
+            max_steps_per_tick: 5,
             ..Default::default()
         };
         let mut pvgs = MockPvgsClient {
@@ -251,6 +308,12 @@ mod tests {
             ..Default::default()
         };
 
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-1".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+
         orchestrator.on_record_committed(&mut pvgs, "sess");
 
         assert_eq!(
@@ -258,8 +321,9 @@ mod tests {
             vec![
                 MockCommitStage::Micro,
                 MockCommitStage::Meso,
+                MockCommitStage::MacroPropose,
                 MockCommitStage::Consistency,
-                MockCommitStage::Macro,
+                MockCommitStage::MacroFinalize,
             ]
         );
     }
@@ -323,6 +387,12 @@ mod tests {
             ..Default::default()
         };
 
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-1".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+
         orchestrator.on_record_committed(&mut pvgs, "sess");
 
         assert!(!pvgs.committed_consistency_feedback.is_empty());
@@ -331,8 +401,9 @@ mod tests {
             vec![
                 MockCommitStage::Micro,
                 MockCommitStage::Meso,
+                MockCommitStage::MacroPropose,
                 MockCommitStage::Consistency,
-                MockCommitStage::Macro,
+                MockCommitStage::MacroFinalize,
             ]
         );
         assert_eq!(
@@ -356,14 +427,21 @@ mod tests {
             ..Default::default()
         };
 
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-1".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+
         orchestrator.on_record_committed(&mut pvgs, "sess");
 
-        assert_eq!(pvgs.macro_calls, 0);
+        assert_eq!(pvgs.macro_finalize_calls, 0);
         assert_eq!(
             pvgs.last_call_order,
             vec![
                 MockCommitStage::Micro,
                 MockCommitStage::Meso,
+                MockCommitStage::MacroPropose,
                 MockCommitStage::Consistency,
             ]
         );
@@ -372,5 +450,113 @@ mod tests {
             .first()
             .map(|cf| cf.consistency_class);
         assert_eq!(class, Some(ucf::v1::ConsistencyClass::Low as i32));
+    }
+
+    #[test]
+    fn proposes_and_finalizes_macro_when_consistency_high() {
+        let mut orchestrator = CkmOrchestrator {
+            micro_chunk_size: 1,
+            max_steps_per_tick: 5,
+            ..Default::default()
+        };
+        let mut pvgs = MockPvgsClient {
+            micro_commit_every: Some(1),
+            meso_commit_every: Some(1),
+            macro_commit_every: Some(1),
+            ..Default::default()
+        };
+
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-1".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+
+        orchestrator.on_record_committed(&mut pvgs, "sess");
+
+        assert_eq!(pvgs.finalized_macros.len(), 1);
+        let (_, digest) = pvgs.finalized_macros[0].clone();
+        assert_eq!(Some(digest), orchestrator.latest_consistency_digest);
+        assert_eq!(
+            pvgs.last_call_order,
+            vec![
+                MockCommitStage::Micro,
+                MockCommitStage::Meso,
+                MockCommitStage::MacroPropose,
+                MockCommitStage::Consistency,
+                MockCommitStage::MacroFinalize,
+            ]
+        );
+    }
+
+    #[test]
+    fn only_one_macro_processed_per_tick() {
+        let mut orchestrator = CkmOrchestrator {
+            micro_chunk_size: 1,
+            max_steps_per_tick: 5,
+            ..Default::default()
+        };
+        let mut pvgs = MockPvgsClient {
+            micro_commit_every: Some(1),
+            meso_commit_every: Some(1),
+            macro_commit_every: Some(1),
+            ..Default::default()
+        };
+
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-1".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-2".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+
+        orchestrator.on_record_committed(&mut pvgs, "sess");
+
+        assert_eq!(pvgs.finalized_macros.len(), 1);
+        assert_eq!(pvgs.proposed_macros.len(), 1);
+    }
+
+    #[test]
+    fn finalize_rejection_stops_processing_and_logs_integrity() {
+        let agg = aggregator();
+        let mut orchestrator = CkmOrchestrator {
+            micro_chunk_size: 1,
+            max_steps_per_tick: 5,
+            ..CkmOrchestrator::with_aggregator(agg.clone())
+        };
+        let mut pvgs = MockPvgsClient {
+            micro_commit_every: Some(1),
+            meso_commit_every: Some(1),
+            macro_commit_every: Some(1),
+            reject_stage: Some(MockCommitStage::MacroFinalize),
+            ..Default::default()
+        };
+
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-1".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+        pvgs.proposed_macros.push_back(ProposedMacroInfo {
+            macro_id: "macro-2".to_string(),
+            macro_digest: None,
+            session_id: Some("sess".to_string()),
+        });
+
+        orchestrator.on_record_committed(&mut pvgs, "sess");
+
+        assert_eq!(pvgs.finalized_macros.len(), 0);
+        let frames = agg.lock().expect("aggregator lock").force_flush();
+        let integrity_issue_count = frames
+            .first()
+            .and_then(|frame| frame.integrity_stats.as_ref())
+            .map(|stats| stats.integrity_issue_count)
+            .unwrap_or_default();
+        assert_eq!(integrity_issue_count, 1);
+        assert_eq!(pvgs.proposed_macros.len(), 1);
     }
 }
