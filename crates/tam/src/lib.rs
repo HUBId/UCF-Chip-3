@@ -19,12 +19,12 @@ impl ToolAdapter for MockAdapter {
             ),
             "mock.fail" => (
                 ucf::v1::OutcomeStatus::Failure,
-                b"fail".to_vec(),
+                Vec::new(),
                 vec!["RC.TAM.MOCK.FAIL".to_string()],
             ),
             _ => (
                 ucf::v1::OutcomeStatus::Failure,
-                b"unknown tool".to_vec(),
+                Vec::new(),
                 vec!["RC.TAM.UNKNOWN_TOOL".to_string()],
             ),
         };
