@@ -1573,6 +1573,21 @@ mod tests {
                 .commit_micro_milestone(micro)
         }
 
+        fn commit_consistency_feedback(
+            &mut self,
+            feedback: ucf::v1::ConsistencyFeedback,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.call_order
+                .lock()
+                .expect("call order lock")
+                .push("commit_consistency_feedback");
+
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_consistency_feedback(feedback)
+        }
+
         fn try_commit_next_micro(
             &mut self,
             _session_id: &str,
@@ -1584,7 +1599,10 @@ mod tests {
             Ok(false)
         }
 
-        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+        fn try_commit_next_macro(
+            &mut self,
+            _consistency_digest: Option<[u8; 32]>,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
             Ok(false)
         }
 
@@ -1675,6 +1693,20 @@ mod tests {
             ))
         }
 
+        fn commit_consistency_feedback(
+            &mut self,
+            feedback: ucf::v1::ConsistencyFeedback,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.calls
+                .lock()
+                .expect("call order lock")
+                .push("commit_consistency_feedback");
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_consistency_feedback(feedback)
+        }
+
         fn try_commit_next_micro(
             &mut self,
             _session_id: &str,
@@ -1686,7 +1718,10 @@ mod tests {
             Ok(false)
         }
 
-        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+        fn try_commit_next_macro(
+            &mut self,
+            _consistency_digest: Option<[u8; 32]>,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
             Ok(false)
         }
 
@@ -1742,6 +1777,15 @@ mod tests {
             ))
         }
 
+        fn commit_consistency_feedback(
+            &mut self,
+            _feedback: ucf::v1::ConsistencyFeedback,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
         fn try_commit_next_micro(
             &mut self,
             _session_id: &str,
@@ -1757,7 +1801,10 @@ mod tests {
             ))
         }
 
-        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+        fn try_commit_next_macro(
+            &mut self,
+            _consistency_digest: Option<[u8; 32]>,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
             Err(pvgs_client::PvgsClientError::CommitFailed(
                 "forced failure".to_string(),
             ))
@@ -1830,6 +1877,16 @@ mod tests {
                 .commit_micro_milestone(micro)
         }
 
+        fn commit_consistency_feedback(
+            &mut self,
+            feedback: ucf::v1::ConsistencyFeedback,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_consistency_feedback(feedback)
+        }
+
         fn try_commit_next_micro(
             &mut self,
             _session_id: &str,
@@ -1841,7 +1898,10 @@ mod tests {
             Ok(false)
         }
 
-        fn try_commit_next_macro(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+        fn try_commit_next_macro(
+            &mut self,
+            _consistency_digest: Option<[u8; 32]>,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
             Ok(false)
         }
 

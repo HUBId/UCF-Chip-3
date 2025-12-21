@@ -109,11 +109,19 @@ pub trait PvgsClient: Send + Sync {
         micro: ucf::v1::MicroMilestone,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 
+    fn commit_consistency_feedback(
+        &mut self,
+        feedback: ucf::v1::ConsistencyFeedback,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
+
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError>;
 
     fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError>;
 
-    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError>;
+    fn try_commit_next_macro(
+        &mut self,
+        consistency_digest: Option<[u8; 32]>,
+    ) -> Result<bool, PvgsClientError>;
 
     fn get_pending_replay_plans(
         &mut self,
@@ -192,6 +200,15 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(receipt)
     }
 
+    fn commit_consistency_feedback(
+        &mut self,
+        feedback: ucf::v1::ConsistencyFeedback,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let (receipt, proof_receipt) = self.pvgs.append_consistency_feedback(feedback);
+        self.last_proof_receipt = Some(proof_receipt);
+        Ok(receipt)
+    }
+
     fn try_commit_next_micro(&mut self, _session_id: &str) -> Result<bool, PvgsClientError> {
         Ok(false)
     }
@@ -200,7 +217,10 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(false)
     }
 
-    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError> {
+    fn try_commit_next_macro(
+        &mut self,
+        _consistency_digest: Option<[u8; 32]>,
+    ) -> Result<bool, PvgsClientError> {
         Ok(false)
     }
 
@@ -241,6 +261,8 @@ pub struct LocalPvgsClient {
     pub committed_registry_bytes: Vec<Vec<u8>>,
     pub committed_micro_milestones: Vec<ucf::v1::MicroMilestone>,
     pub committed_micro_bytes: Vec<Vec<u8>>,
+    pub committed_consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
+    pub committed_consistency_bytes: Vec<Vec<u8>>,
     pub micro_chunk_size: u64,
     pub micro_last_end: u64,
     pub try_commit_meso_outcome: Option<bool>,
@@ -264,6 +286,8 @@ impl Default for LocalPvgsClient {
             committed_registry_bytes: Vec::new(),
             committed_micro_milestones: Vec::new(),
             committed_micro_bytes: Vec::new(),
+            committed_consistency_feedback: Vec::new(),
+            committed_consistency_bytes: Vec::new(),
             micro_chunk_size: 256,
             micro_last_end: 0,
             try_commit_meso_outcome: None,
@@ -515,6 +539,65 @@ impl PvgsClient for LocalPvgsClient {
         Ok(receipt)
     }
 
+    fn commit_consistency_feedback(
+        &mut self,
+        mut feedback: ucf::v1::ConsistencyFeedback,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        if feedback.cf_digest.is_none() {
+            let digest = ucf_protocol::digest_proto(
+                "UCF:HASH:CONSISTENCY_FEEDBACK",
+                &ucf_protocol::canonical_bytes(&feedback),
+            );
+            feedback.cf_digest = Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            });
+        }
+
+        let bytes = ucf_protocol::canonical_bytes(&feedback);
+        let cf_digest: [u8; 32] = feedback
+            .cf_digest
+            .as_ref()
+            .and_then(|d| d.value.clone().try_into().ok())
+            .unwrap_or([0u8; 32]);
+
+        let status = self.default_status;
+        let mut reject_reason_codes = self.reject_reason_codes.clone();
+        if status == ucf::v1::ReceiptStatus::Rejected && reject_reason_codes.is_empty() {
+            reject_reason_codes.push("RC.RE.SCHEMA.INVALID".to_string());
+        }
+
+        self.committed_consistency_feedback.push(feedback.clone());
+        self.committed_consistency_bytes.push(bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!(
+                "pvgs-local-cf-{}",
+                self.committed_consistency_feedback.len()
+            ),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: cf_digest.to_vec(),
+            }),
+            status: status.into(),
+            action_digest: None,
+            decision_digest: feedback.cf_digest.clone(),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
+                reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError> {
         if self.micro_chunk_size == 0 {
             return Ok(false);
@@ -543,7 +626,10 @@ impl PvgsClient for LocalPvgsClient {
         Ok(self.try_commit_meso_outcome.unwrap_or(false))
     }
 
-    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError> {
+    fn try_commit_next_macro(
+        &mut self,
+        _consistency_digest: Option<[u8; 32]>,
+    ) -> Result<bool, PvgsClientError> {
         Ok(self.try_commit_macro_outcome.unwrap_or(false))
     }
 
@@ -610,6 +696,7 @@ fn build_micro_milestone(
 pub enum MockCommitStage {
     Micro,
     Meso,
+    Consistency,
     Macro,
 }
 
@@ -629,6 +716,8 @@ pub struct MockPvgsClient {
     pub consumed_replay_ids: Vec<String>,
     pub pending_replay_plan_calls: u64,
     pub experience_commit_statuses: Vec<ucf::v1::ReceiptStatus>,
+    pub committed_consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
+    pub macro_consistency_digests: Vec<Option<[u8; 32]>>,
 }
 
 impl MockPvgsClient {
@@ -767,6 +856,25 @@ impl PvgsClient for MockPvgsClient {
         self.local.commit_micro_milestone(micro)
     }
 
+    fn commit_consistency_feedback(
+        &mut self,
+        feedback: ucf::v1::ConsistencyFeedback,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.last_call_order.push(MockCommitStage::Consistency);
+        if self.reject_stage == Some(MockCommitStage::Consistency) {
+            return Err(PvgsClientError::CommitFailed(
+                if self.reject_reason.is_empty() {
+                    "RC.RE.INTEGRITY.DEGRADED".to_string()
+                } else {
+                    self.reject_reason.clone()
+                },
+            ));
+        }
+
+        self.committed_consistency_feedback.push(feedback.clone());
+        self.local.commit_consistency_feedback(feedback)
+    }
+
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError> {
         self.micro_calls = self.micro_calls.saturating_add(1);
         self.last_call_order.push(MockCommitStage::Micro);
@@ -803,7 +911,10 @@ impl PvgsClient for MockPvgsClient {
         Ok(should_commit(self.meso_calls, self.meso_commit_every))
     }
 
-    fn try_commit_next_macro(&mut self) -> Result<bool, PvgsClientError> {
+    fn try_commit_next_macro(
+        &mut self,
+        consistency_digest: Option<[u8; 32]>,
+    ) -> Result<bool, PvgsClientError> {
         self.macro_calls = self.macro_calls.saturating_add(1);
         self.last_call_order.push(MockCommitStage::Macro);
         if self.reject_stage == Some(MockCommitStage::Macro) {
@@ -815,6 +926,8 @@ impl PvgsClient for MockPvgsClient {
                 },
             ));
         }
+
+        self.macro_consistency_digests.push(consistency_digest);
 
         Ok(should_commit(self.macro_calls, self.macro_commit_every))
     }

@@ -184,6 +184,63 @@ pub mod ucf {
             Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
         )]
         #[repr(i32)]
+        pub enum ConsistencyClass {
+            Unspecified = 0,
+            Low = 1,
+            Medium = 2,
+            High = 3,
+        }
+        impl ConsistencyClass {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ConsistencyClass::Unspecified => "CONSISTENCY_CLASS_UNSPECIFIED",
+                    ConsistencyClass::Low => "CONSISTENCY_CLASS_LOW",
+                    ConsistencyClass::Medium => "CONSISTENCY_CLASS_MEDIUM",
+                    ConsistencyClass::High => "CONSISTENCY_CLASS_HIGH",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "CONSISTENCY_CLASS_UNSPECIFIED" => Some(Self::Unspecified),
+                    "CONSISTENCY_CLASS_LOW" => Some(Self::Low),
+                    "CONSISTENCY_CLASS_MEDIUM" => Some(Self::Medium),
+                    "CONSISTENCY_CLASS_HIGH" => Some(Self::High),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ConsolidationEligibility {
+            Unspecified = 0,
+            Allow = 1,
+            Deny = 2,
+        }
+        impl ConsolidationEligibility {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ConsolidationEligibility::Unspecified => {
+                        "CONSOLIDATION_ELIGIBILITY_UNSPECIFIED"
+                    }
+                    ConsolidationEligibility::Allow => "CONSOLIDATION_ELIGIBILITY_ALLOW",
+                    ConsolidationEligibility::Deny => "CONSOLIDATION_ELIGIBILITY_DENY",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "CONSOLIDATION_ELIGIBILITY_UNSPECIFIED" => Some(Self::Unspecified),
+                    "CONSOLIDATION_ELIGIBILITY_ALLOW" => Some(Self::Allow),
+                    "CONSOLIDATION_ELIGIBILITY_DENY" => Some(Self::Deny),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
         pub enum RecordType {
             Unspecified = 0,
             Policy = 1,
@@ -831,6 +888,39 @@ pub mod ucf {
             pub receipt_stats: ::core::option::Option<ReceiptStats>,
             #[prost(message, optional, tag = "12")]
             pub integrity_stats: ::core::option::Option<IntegrityStats>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ConsistencyFeedback {
+            #[prost(string, tag = "1")]
+            pub cf_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub cf_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "ConsistencyClass", tag = "3")]
+            pub consistency_class: i32,
+            #[prost(string, repeated, tag = "4")]
+            pub flags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            #[prost(enumeration = "NoiseClass", tag = "5")]
+            pub recommended_noise_class: i32,
+            #[prost(enumeration = "ConsolidationEligibility", tag = "6")]
+            pub consolidation_eligibility: i32,
+            #[prost(bool, tag = "7")]
+            pub replay_trigger_hint: bool,
+            #[prost(message, optional, tag = "8")]
+            pub pev_ref: ::core::option::Option<Digest32>,
+            #[prost(message, repeated, tag = "9")]
+            pub ism_refs: ::prost::alloc::vec::Vec<Digest32>,
+            #[prost(message, optional, tag = "10")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+            #[prost(uint32, tag = "11")]
+            pub deny_count_medium_window: u32,
+            #[prost(enumeration = "IntegrityState", tag = "12")]
+            pub integrity_state: i32,
+            #[prost(uint32, tag = "13")]
+            pub receipt_failures: u32,
+            #[prost(message, optional, tag = "14")]
+            pub ruleset_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "15")]
+            pub cbv_digest: ::core::option::Option<Digest32>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ControlFrame {
