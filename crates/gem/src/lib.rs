@@ -18,7 +18,7 @@ use pbm::{
     compute_decision_digest, policy_query_digest, DecisionForm, PolicyContext,
     PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest,
 };
-use pvgs_client::PvgsClient;
+use pvgs_client::PvgsClientReader;
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore, VerifyError};
 use tam::ToolAdapter;
 use trm::ToolRegistry;
@@ -28,6 +28,8 @@ const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
 const RECEIPT_UNKNOWN_KEY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
 const PVGS_INTEGRITY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
 const REPLAY_MISMATCH_REASON: &str = "RC.RE.REPLAY.MISMATCH";
+const FORENSIC_ACTION_REASON: &str = "RC.RX.ACTION.FORENSIC";
+const INTEGRITY_FAIL_REASON: &str = "RC.RE.INTEGRITY.FAIL";
 const CORE_FRAME_DOMAIN: &str = "UCF:HASH:CORE_FRAME";
 const METABOLIC_FRAME_DOMAIN: &str = "UCF:HASH:METABOLIC_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
@@ -168,7 +170,7 @@ pub struct Gate {
     pub control_store: Arc<Mutex<ControlFrameStore>>,
     pub receipt_store: Arc<PvgsKeyEpochStore>,
     pub registry: Arc<ToolRegistry>,
-    pub pvgs_client: Arc<Mutex<Box<dyn PvgsClient>>>,
+    pub pvgs_client: Arc<Mutex<Box<dyn PvgsClientReader>>>,
     pub integrity_issues: Arc<Mutex<u64>>,
     pub decision_log: Arc<Mutex<DecisionLogStore>>,
     pub query_decisions: Arc<Mutex<QueryDecisionMap>>,
@@ -185,6 +187,7 @@ pub struct GateContext {
     pub pev: Option<ucf::v1::PolicyEcologyVector>,
     pub pev_digest: Option<[u8; 32]>,
     pub ruleset_digest: Option<[u8; 32]>,
+    pub session_sealed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +251,7 @@ impl Gate {
         action: ucf::v1::ActionSpec,
         ctx: GateContext,
     ) -> GateResult {
+        let mut ctx = ctx;
         if action.verb.is_empty() {
             return GateResult::ValidationError {
                 code: "RC.GE.VALIDATION.SCHEMA_INVALID".to_string(),
@@ -332,6 +336,16 @@ impl Gate {
                 &mut decision_context,
                 &["RC.PB.DENY.TOOL_NOT_ALLOWED".to_string()],
             );
+        }
+
+        if let Some(result) = self.enforce_seal_policy(
+            session_id,
+            action_type,
+            &mut ctx,
+            &mut decision,
+            &mut decision_context,
+        ) {
+            return result;
         }
 
         // TODO: budget accounting hook.
@@ -807,7 +821,68 @@ impl Gate {
         }
     }
 
-    #[allow(clippy::result_large_err, clippy::too_many_arguments)]
+    fn note_forensic_seal(&self, reason_codes: &[String]) {
+        let mut codes = reason_codes.to_vec();
+        codes.sort();
+        codes.dedup();
+
+        if let Ok(mut guard) = self.integrity_issues.lock() {
+            *guard += 1;
+        }
+
+        if let Ok(mut agg) = self.aggregator.lock() {
+            agg.on_integrity_issue(&codes);
+            agg.on_integrity_state(ucf::v1::IntegrityState::Fail);
+        }
+    }
+
+    fn enforce_seal_policy(
+        &self,
+        session_id: &str,
+        action_type: ucf::v1::ToolActionType,
+        ctx: &mut GateContext,
+        decision: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
+    ) -> Option<GateResult> {
+        let sealed = self.session_sealed_state(session_id).unwrap_or(true);
+
+        ctx.session_sealed = sealed;
+        if !sealed {
+            return None;
+        }
+
+        ctx.integrity_state = "FAIL".to_string();
+        let reason_codes = self.forensic_reason_codes();
+        self.note_forensic_seal(&reason_codes);
+
+        if is_side_effect_action(action_type) {
+            self.deny_with_reasons(decision, decision_ctx, &reason_codes);
+            return Some(GateResult::Denied {
+                decision: decision.clone(),
+            });
+        }
+
+        None
+    }
+
+    fn session_sealed_state(&self, session_id: &str) -> Option<bool> {
+        self.pvgs_client
+            .lock()
+            .ok()
+            .and_then(|client| client.is_session_sealed(session_id).ok())
+    }
+
+    fn forensic_reason_codes(&self) -> Vec<String> {
+        let mut codes = vec![
+            FORENSIC_ACTION_REASON.to_string(),
+            INTEGRITY_FAIL_REASON.to_string(),
+        ];
+        codes.sort();
+        codes
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)]
     fn enforce_receipt_gate(
         &self,
         action_type: ucf::v1::ToolActionType,
@@ -1440,6 +1515,15 @@ fn requires_receipt(action_type: ucf::v1::ToolActionType) -> bool {
     )
 }
 
+fn is_side_effect_action(action_type: ucf::v1::ToolActionType) -> bool {
+    matches!(
+        action_type,
+        ucf::v1::ToolActionType::Write
+            | ucf::v1::ToolActionType::Execute
+            | ucf::v1::ToolActionType::Export
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1448,7 +1532,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use pbm::policy_query_digest;
-    use pvgs_client::MockPvgsClient;
+    use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
     use pvgs_verify::{
         pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
     };
@@ -1457,7 +1541,7 @@ mod tests {
     use tam::MockAdapter;
 
     type LocalClientHandle = Arc<Mutex<pvgs_client::LocalPvgsClient>>;
-    type PvgsClientHandle = Arc<Mutex<Box<dyn PvgsClient>>>;
+    type PvgsClientHandle = Arc<Mutex<Box<dyn PvgsClientReader>>>;
 
     #[derive(Clone, Default)]
     struct CountingAdapter {
@@ -1620,6 +1704,53 @@ mod tests {
         }
     }
 
+    impl PvgsReader for CountingPvgsClient {
+        fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_pev()
+        }
+
+        fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_pev_digest()
+        }
+
+        fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_current_ruleset_digest()
+        }
+
+        fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_cbv_digest()
+        }
+
+        fn is_session_sealed(
+            &self,
+            session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .is_session_sealed(session_id)
+        }
+
+        fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_session_seal_digest(session_id)
+        }
+    }
+
     #[derive(Clone, Default)]
     struct RecordRejectingPvgsClient {
         inner: Arc<Mutex<pvgs_client::LocalPvgsClient>>,
@@ -1739,6 +1870,53 @@ mod tests {
         }
     }
 
+    impl PvgsReader for RecordRejectingPvgsClient {
+        fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_pev()
+        }
+
+        fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_pev_digest()
+        }
+
+        fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_current_ruleset_digest()
+        }
+
+        fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_cbv_digest()
+        }
+
+        fn is_session_sealed(
+            &self,
+            session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .is_session_sealed(session_id)
+        }
+
+        fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_session_seal_digest(session_id)
+        }
+    }
+
     #[derive(Clone, Default)]
     struct FailingPvgsClient;
 
@@ -1824,6 +2002,31 @@ mod tests {
                 head_experience_id: 0,
                 head_record_digest: [0u8; 32],
             }
+        }
+    }
+
+    impl PvgsReader for FailingPvgsClient {
+        fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+            None
+        }
+
+        fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+            None
+        }
+
+        fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+            None
+        }
+
+        fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
+            None
+        }
+
+        fn is_session_sealed(
+            &self,
+            _session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
         }
     }
 
@@ -1919,6 +2122,53 @@ mod tests {
         }
     }
 
+    impl PvgsReader for SharedLocalClient {
+        fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_pev()
+        }
+
+        fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_pev_digest()
+        }
+
+        fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_current_ruleset_digest()
+        }
+
+        fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_cbv_digest()
+        }
+
+        fn is_session_sealed(
+            &self,
+            session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .is_session_sealed(session_id)
+        }
+
+        fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_session_seal_digest(session_id)
+        }
+    }
+
     fn default_aggregator() -> Arc<Mutex<WindowEngine>> {
         Arc::new(Mutex::new(
             WindowEngine::new(FramesConfig::fallback()).expect("window engine"),
@@ -1946,7 +2196,7 @@ mod tests {
 
     fn default_pvgs_client() -> PvgsClientHandle {
         Arc::new(Mutex::new(
-            Box::new(MockPvgsClient::default()) as Box<dyn PvgsClient>
+            Box::new(MockPvgsClient::default()) as Box<dyn PvgsClientReader>
         ))
     }
 
@@ -1954,8 +2204,8 @@ mod tests {
         Arc::new(Mutex::new(0))
     }
 
-    fn boxed_client(client: impl PvgsClient + 'static) -> PvgsClientHandle {
-        Arc::new(Mutex::new(Box::new(client) as Box<dyn PvgsClient>))
+    fn boxed_client(client: impl PvgsClientReader + 'static) -> PvgsClientHandle {
+        Arc::new(Mutex::new(Box::new(client) as Box<dyn PvgsClientReader>))
     }
 
     #[allow(clippy::type_complexity)]
@@ -2130,6 +2380,7 @@ mod tests {
             pev: None,
             pev_digest: None,
             ruleset_digest: None,
+            session_sealed: false,
         }
     }
 
@@ -3515,6 +3766,93 @@ mod tests {
     }
 
     #[test]
+    fn sealed_session_blocks_side_effects() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let client = MockPvgsClient {
+            session_sealed: true,
+            ..Default::default()
+        };
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator,
+            Arc::new(trm::registry_fixture()),
+            boxed_client(client),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.export", "render"), ok_ctx());
+
+        match result {
+            GateResult::Denied { decision } => {
+                let reason_codes = decision.decision.reason_codes.expect("reason codes").codes;
+                assert_eq!(
+                    reason_codes,
+                    vec![
+                        INTEGRITY_FAIL_REASON.to_string(),
+                        FORENSIC_ACTION_REASON.to_string()
+                    ]
+                );
+            }
+            other => panic!("expected denial for sealed session, got {other:?}"),
+        }
+
+        assert_eq!(counting.count(), 0, "adapter must not run when sealed");
+    }
+
+    #[test]
+    fn sealed_session_allows_read_actions() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let client = MockPvgsClient {
+            session_sealed: true,
+            ..Default::default()
+        };
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
+            boxed_client(client),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+
+        assert!(matches!(result, GateResult::Executed { .. }));
+        assert_eq!(counting.count(), 1, "read should execute when sealed");
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let frame = frames.first().expect("frame emitted");
+        assert_eq!(
+            frame.integrity_state,
+            ucf::v1::IntegrityState::Fail.into(),
+            "seal should mark integrity as FAIL",
+        );
+
+        let integrity_stats = frame
+            .integrity_stats
+            .as_ref()
+            .expect("integrity stats present");
+        let reason_codes: Vec<_> = integrity_stats
+            .top_reason_codes
+            .iter()
+            .map(|rc| rc.code.clone())
+            .collect();
+        assert!(reason_codes.contains(&INTEGRITY_FAIL_REASON.to_string()));
+        assert!(reason_codes.contains(&FORENSIC_ACTION_REASON.to_string()));
+    }
+
+    #[test]
     fn write_actions_block_when_decision_commit_fails() {
         let counting = CountingAdapter::default();
         let integrity = integrity_counter();
@@ -3797,8 +4135,9 @@ mod tests {
     fn dlp_commit_precedes_output_record_append() {
         let counting = CountingAdapter::default();
         let pvgs = CountingPvgsClient::new(pvgs_client::LocalPvgsClient::default());
-        let pvgs_handle: PvgsClientHandle =
-            Arc::new(Mutex::new(Box::new(pvgs.clone()) as Box<dyn PvgsClient>));
+        let pvgs_handle: PvgsClientHandle = Arc::new(Mutex::new(
+            Box::new(pvgs.clone()) as Box<dyn PvgsClientReader>
+        ));
 
         let gate = gate_with_components(
             Box::new(counting.clone()),
@@ -3839,7 +4178,7 @@ mod tests {
             PVGS_INTEGRITY_REASON.to_string(),
         ])));
         let pvgs_client = Arc::new(Mutex::new(
-            Box::new(SharedLocalClient::new(inner.clone())) as Box<dyn PvgsClient>
+            Box::new(SharedLocalClient::new(inner.clone())) as Box<dyn PvgsClientReader>
         ));
         let gate = gate_with_components(
             Box::new(counting.clone()),
@@ -3912,8 +4251,9 @@ mod tests {
     fn allowed_output_commits_and_delivers_when_export_enabled() {
         let counting = CountingAdapter::default();
         let pvgs = CountingPvgsClient::new(pvgs_client::LocalPvgsClient::default());
-        let pvgs_handle: PvgsClientHandle =
-            Arc::new(Mutex::new(Box::new(pvgs.clone()) as Box<dyn PvgsClient>));
+        let pvgs_handle: PvgsClientHandle = Arc::new(Mutex::new(
+            Box::new(pvgs.clone()) as Box<dyn PvgsClientReader>
+        ));
 
         let gate = gate_with_components(
             Box::new(counting.clone()),
@@ -3951,8 +4291,9 @@ mod tests {
     fn record_commit_failure_results_in_failed_disposition() {
         let counting = CountingAdapter::default();
         let client = RecordRejectingPvgsClient::new(pvgs_client::LocalPvgsClient::default());
-        let pvgs_handle: PvgsClientHandle =
-            Arc::new(Mutex::new(Box::new(client.clone()) as Box<dyn PvgsClient>));
+        let pvgs_handle: PvgsClientHandle = Arc::new(Mutex::new(
+            Box::new(client.clone()) as Box<dyn PvgsClientReader>
+        ));
 
         let gate = gate_with_components(
             Box::new(counting.clone()),

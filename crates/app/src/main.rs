@@ -80,7 +80,7 @@ fn run_demo() {
         receipt_store: receipt_store.clone(),
         registry: Arc::new(registry_fixture()),
         pvgs_client: Arc::new(Mutex::new(
-            Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClient>
+            Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClientReader>
         )),
         integrity_issues: Arc::new(Mutex::new(0)),
         decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
@@ -108,6 +108,7 @@ fn run_demo() {
         pev: None,
         pev_digest: None,
         ruleset_digest: None,
+        session_sealed: false,
     };
 
     let read_action = ucf::v1::ActionSpec {
