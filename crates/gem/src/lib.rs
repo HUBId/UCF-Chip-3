@@ -882,6 +882,7 @@ impl Gate {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)]
     fn enforce_receipt_gate(
         &self,
         action_type: ucf::v1::ToolActionType,
