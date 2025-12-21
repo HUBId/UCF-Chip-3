@@ -85,6 +85,8 @@ fn ruleset_digest_changes_decision_digest() {
         pev: None,
         pev_digest: None,
         ruleset_digest: Some(ruleset_digest_1),
+        session_sealed: false,
+        unlock_present: false,
     };
 
     let query = ucf::v1::PolicyQuery {
@@ -354,6 +356,7 @@ fn gate_context(
         pev_digest: None,
         ruleset_digest,
         session_sealed: false,
+        session_unlock_permit: false,
     }
 }
 
@@ -376,6 +379,8 @@ fn policy_decision_for(
         pev: ctx.pev.clone(),
         pev_digest: ctx.pev_digest,
         ruleset_digest: ctx.ruleset_digest,
+        session_sealed: ctx.session_sealed,
+        unlock_present: ctx.session_unlock_permit,
     };
 
     gate.policy.decide_with_context(PolicyEvaluationRequest {

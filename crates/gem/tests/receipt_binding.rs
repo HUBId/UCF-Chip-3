@@ -159,6 +159,7 @@ impl Harness {
             pev_digest: None,
             ruleset_digest: None,
             session_sealed: false,
+            session_unlock_permit: false,
         }
     }
 
@@ -182,6 +183,8 @@ impl Harness {
             pev: base_ctx.pev,
             pev_digest: base_ctx.pev_digest,
             ruleset_digest: base_ctx.ruleset_digest,
+            session_sealed: base_ctx.session_sealed,
+            unlock_present: base_ctx.session_unlock_permit,
         };
 
         let query = ucf::v1::PolicyQuery {

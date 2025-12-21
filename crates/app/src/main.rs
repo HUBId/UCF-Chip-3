@@ -109,6 +109,7 @@ fn run_demo() {
         pev_digest: None,
         ruleset_digest: None,
         session_sealed: false,
+        session_unlock_permit: false,
     };
 
     let read_action = ucf::v1::ActionSpec {

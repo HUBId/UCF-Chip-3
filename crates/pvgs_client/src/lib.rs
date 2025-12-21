@@ -170,6 +170,16 @@ pub trait PvgsReader: Send + Sync {
 
     fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError>;
 
+    fn has_unlock_permit(&self, session_id: &str) -> Result<bool, PvgsClientError>;
+
+    fn get_unlock_permit_digest(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<[u8; 32]>, PvgsClientError> {
+        let _ = session_id;
+        Ok(None)
+    }
+
     fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
         let _ = session_id;
         None
@@ -452,8 +462,19 @@ impl PvgsReader for Chip4LocalPvgsClient {
         Ok(self.pvgs.is_session_sealed(session_id))
     }
 
+    fn has_unlock_permit(&self, session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.pvgs.has_unlock_permit(session_id))
+    }
+
     fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
         self.pvgs.get_session_seal_digest(session_id)
+    }
+
+    fn get_unlock_permit_digest(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<[u8; 32]>, PvgsClientError> {
+        Ok(self.pvgs.get_unlock_permit_digest(session_id))
     }
 }
 
@@ -482,6 +503,7 @@ pub struct LocalPvgsClient {
     pub proposed_macros: VecDeque<ProposedMacroInfo>,
     pub finalized_macros: Vec<(String, [u8; 32])>,
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
+    unlock_permits: HashMap<String, Option<[u8; 32]>>,
 }
 
 impl Default for LocalPvgsClient {
@@ -510,6 +532,7 @@ impl Default for LocalPvgsClient {
             proposed_macros: VecDeque::new(),
             finalized_macros: Vec::new(),
             sealed_sessions: HashMap::new(),
+            unlock_permits: HashMap::new(),
         }
     }
 }
@@ -541,6 +564,10 @@ impl LocalPvgsClient {
 
     pub fn set_session_sealed(&mut self, session_id: impl Into<String>, digest: Option<[u8; 32]>) {
         self.sealed_sessions.insert(session_id.into(), digest);
+    }
+
+    pub fn set_unlock_permit(&mut self, session_id: impl Into<String>, digest: Option<[u8; 32]>) {
+        self.unlock_permits.insert(session_id.into(), digest);
     }
 }
 
@@ -937,10 +964,24 @@ impl PvgsReader for LocalPvgsClient {
         Ok(self.sealed_sessions.contains_key(session_id))
     }
 
+    fn has_unlock_permit(&self, session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.unlock_permits.contains_key(session_id))
+    }
+
     fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
         self.sealed_sessions
             .get(session_id)
             .and_then(|digest| *digest)
+    }
+
+    fn get_unlock_permit_digest(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<[u8; 32]>, PvgsClientError> {
+        Ok(self
+            .unlock_permits
+            .get(session_id)
+            .and_then(|digest| *digest))
     }
 }
 
@@ -1023,6 +1064,8 @@ pub struct MockPvgsClient {
     pub latest_cbv_digest: Option<CbvDigest>,
     pub session_sealed: bool,
     pub session_seal_digest: Option<[u8; 32]>,
+    pub unlock_permit: bool,
+    pub unlock_permit_digest: Option<[u8; 32]>,
 }
 
 impl MockPvgsClient {
@@ -1055,8 +1098,19 @@ impl PvgsReader for MockPvgsClient {
         Ok(self.session_sealed)
     }
 
+    fn has_unlock_permit(&self, _session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.unlock_permit)
+    }
+
     fn get_session_seal_digest(&self, _session_id: &str) -> Option<[u8; 32]> {
         self.session_seal_digest
+    }
+
+    fn get_unlock_permit_digest(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<[u8; 32]>, PvgsClientError> {
+        Ok(self.unlock_permit_digest)
     }
 
     fn get_pending_replay_plans(
@@ -1078,6 +1132,8 @@ pub struct MockPvgsReader {
     ruleset_digest: Option<[u8; 32]>,
     session_sealed: bool,
     session_seal_digest: Option<[u8; 32]>,
+    unlock_permit: bool,
+    unlock_permit_digest: Option<[u8; 32]>,
 }
 
 impl Default for MockPvgsReader {
@@ -1099,6 +1155,8 @@ impl Default for MockPvgsReader {
             ruleset_digest: None,
             session_sealed: false,
             session_seal_digest: None,
+            unlock_permit: false,
+            unlock_permit_digest: None,
         }
     }
 }
@@ -1126,6 +1184,8 @@ impl MockPvgsReader {
             ruleset_digest: None,
             session_sealed: false,
             session_seal_digest: None,
+            unlock_permit: false,
+            unlock_permit_digest: None,
         }
     }
 
@@ -1147,6 +1207,12 @@ impl MockPvgsReader {
     pub fn with_session_sealed(mut self, digest: Option<[u8; 32]>) -> Self {
         self.session_sealed = true;
         self.session_seal_digest = digest;
+        self
+    }
+
+    pub fn with_unlock_permit(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.unlock_permit = true;
+        self.unlock_permit_digest = digest;
         self
     }
 }
@@ -1173,8 +1239,19 @@ impl PvgsReader for MockPvgsReader {
         Ok(self.session_sealed)
     }
 
+    fn has_unlock_permit(&self, _session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.unlock_permit)
+    }
+
     fn get_session_seal_digest(&self, _session_id: &str) -> Option<[u8; 32]> {
         self.session_seal_digest
+    }
+
+    fn get_unlock_permit_digest(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<[u8; 32]>, PvgsClientError> {
+        Ok(self.unlock_permit_digest)
     }
 }
 

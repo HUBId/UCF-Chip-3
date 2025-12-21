@@ -35,6 +35,7 @@ struct LocalPvgsState {
     consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     replay_plans: Vec<ucf::v1::ReplayPlan>,
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
+    unlock_permits: HashMap<String, Option<[u8; 32]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +72,7 @@ impl LocalPvgs {
                 consistency_feedback: Vec::new(),
                 replay_plans: Vec::new(),
                 sealed_sessions: HashMap::new(),
+                unlock_permits: HashMap::new(),
             })),
         }
     }
@@ -117,6 +119,18 @@ impl LocalPvgs {
         guard.sealed_sessions.remove(session_id);
     }
 
+    pub fn grant_unlock_permit(&self, session_id: &str, permit_digest: Option<[u8; 32]>) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard
+            .unlock_permits
+            .insert(session_id.to_string(), permit_digest);
+    }
+
+    pub fn revoke_unlock_permit(&self, session_id: &str) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard.unlock_permits.remove(session_id);
+    }
+
     pub fn is_session_sealed(&self, session_id: &str) -> bool {
         let guard = self.inner.lock().expect("pvgs state lock");
         guard.sealed_sessions.contains_key(session_id)
@@ -126,6 +140,19 @@ impl LocalPvgs {
         let guard = self.inner.lock().expect("pvgs state lock");
         guard
             .sealed_sessions
+            .get(session_id)
+            .and_then(|digest| *digest)
+    }
+
+    pub fn has_unlock_permit(&self, session_id: &str) -> bool {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard.unlock_permits.contains_key(session_id)
+    }
+
+    pub fn get_unlock_permit_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard
+            .unlock_permits
             .get(session_id)
             .and_then(|digest| *digest)
     }
