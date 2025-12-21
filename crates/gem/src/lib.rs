@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod inflight;
+
 use std::{
     collections::HashMap,
     convert::TryFrom,
