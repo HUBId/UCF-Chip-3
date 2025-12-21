@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::convert::TryFrom;
+use std::{collections::HashMap, convert::TryFrom};
 
 use blake3::Hasher;
 use ucf_protocol::{canonical_bytes, digest32, ucf};
@@ -37,6 +37,8 @@ pub struct PolicyContext {
     pub pev: Option<ucf::v1::PolicyEcologyVector>,
     pub pev_digest: Option<[u8; 32]>,
     pub ruleset_digest: Option<[u8; 32]>,
+    pub session_sealed: bool,
+    pub unlock_present: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +58,7 @@ pub struct PolicyDecisionRecord {
     pub decision_digest: [u8; 32],
     pub pev_digest: Option<[u8; 32]>,
     pub ruleset_digest: Option<[u8; 32]>,
+    pub metadata: HashMap<String, String>,
 }
 
 impl PolicyEngine {
@@ -90,6 +93,8 @@ impl PolicyEngine {
             pev,
             pev_digest,
             ruleset_digest,
+            session_sealed: _,
+            unlock_present: _,
         } = context;
 
         allowed_tools.sort();
@@ -153,6 +158,7 @@ impl PolicyEngine {
             decision_digest,
             pev_digest,
             ruleset_digest,
+            metadata: HashMap::new(),
         }
     }
 }
@@ -463,6 +469,8 @@ mod tests {
                 pev: None,
                 pev_digest: None,
                 ruleset_digest: None,
+                session_sealed: false,
+                unlock_present: false,
             },
         }
     }

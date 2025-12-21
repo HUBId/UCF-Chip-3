@@ -30,6 +30,8 @@ const PVGS_INTEGRITY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
 const REPLAY_MISMATCH_REASON: &str = "RC.RE.REPLAY.MISMATCH";
 const FORENSIC_ACTION_REASON: &str = "RC.RX.ACTION.FORENSIC";
 const INTEGRITY_FAIL_REASON: &str = "RC.RE.INTEGRITY.FAIL";
+const RECOVERY_UNLOCK_GRANTED_REASON: &str = "RC.GV.RECOVERY.UNLOCK_GRANTED";
+const RECOVERY_READONLY_REASON: &str = "RC.GV.RECOVERY.READONLY_MODE";
 const CORE_FRAME_DOMAIN: &str = "UCF:HASH:CORE_FRAME";
 const METABOLIC_FRAME_DOMAIN: &str = "UCF:HASH:METABOLIC_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
@@ -188,6 +190,7 @@ pub struct GateContext {
     pub pev_digest: Option<[u8; 32]>,
     pub ruleset_digest: Option<[u8; 32]>,
     pub session_sealed: bool,
+    pub session_unlock_permit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +206,12 @@ pub struct DecisionContext {
     pub tool_profile_digest: Option<[u8; 32]>,
     pub commit_disposition: DecisionCommitDisposition,
     pub receipt_digest: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Copy)]
+struct SealStatus {
+    sealed: bool,
+    unlock_present: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,6 +283,10 @@ impl Gate {
         let canonical = canonical_bytes(&action);
         let action_digest = digest32("UCF:HASH:ACTION_SPEC", "ActionSpec", "v1", &canonical);
 
+        let seal_status = self.session_seal_status(session_id);
+        ctx.session_sealed = seal_status.sealed;
+        ctx.session_unlock_permit = seal_status.unlock_present;
+
         let policy_query = ucf::v1::PolicyQuery {
             principal: "chip3".to_string(),
             action: Some(action.clone()),
@@ -297,6 +310,8 @@ impl Gate {
             pev: ctx.pev.clone(),
             pev_digest: ctx.pev_digest,
             ruleset_digest: ctx.ruleset_digest,
+            session_sealed: seal_status.sealed,
+            unlock_present: seal_status.unlock_present,
         };
 
         let mut decision = self.policy.decide_with_context(PolicyEvaluationRequest {
@@ -339,11 +354,11 @@ impl Gate {
         }
 
         if let Some(result) = self.enforce_seal_policy(
-            session_id,
             action_type,
             &mut ctx,
             &mut decision,
             &mut decision_context,
+            seal_status,
         ) {
             return result;
         }
@@ -836,26 +851,59 @@ impl Gate {
         }
     }
 
+    fn note_recovery_unlock(&self, reason_codes: &[String]) {
+        let mut codes = reason_codes.to_vec();
+        codes.sort();
+        codes.dedup();
+
+        if let Ok(mut guard) = self.integrity_issues.lock() {
+            *guard += 1;
+        }
+
+        if let Ok(mut agg) = self.aggregator.lock() {
+            agg.on_integrity_issue(&codes);
+            agg.on_integrity_state(ucf::v1::IntegrityState::Fail);
+        }
+    }
+
     fn enforce_seal_policy(
         &self,
-        session_id: &str,
         action_type: ucf::v1::ToolActionType,
-        ctx: &mut GateContext,
+        _ctx: &mut GateContext,
         decision: &mut PolicyDecisionRecord,
         decision_ctx: &mut DecisionContext,
+        seal_status: SealStatus,
     ) -> Option<GateResult> {
-        let sealed = self.session_sealed_state(session_id).unwrap_or(true);
+        let SealStatus {
+            sealed,
+            unlock_present,
+        } = seal_status;
 
-        ctx.session_sealed = sealed;
         if !sealed {
             return None;
         }
 
-        ctx.integrity_state = "FAIL".to_string();
-        let reason_codes = self.forensic_reason_codes();
-        self.note_forensic_seal(&reason_codes);
+        let integrity_reasons = if unlock_present {
+            self.recovery_reason_codes()
+        } else {
+            self.forensic_reason_codes()
+        };
+
+        if unlock_present {
+            decision
+                .metadata
+                .insert("recovery_readonly".to_string(), "true".to_string());
+            self.note_recovery_unlock(&integrity_reasons);
+        } else {
+            self.note_forensic_seal(&integrity_reasons);
+        }
 
         if is_side_effect_action(action_type) {
+            let reason_codes = if unlock_present {
+                self.recovery_enforcement_reason_codes()
+            } else {
+                integrity_reasons.clone()
+            };
             self.deny_with_reasons(decision, decision_ctx, &reason_codes);
             return Some(GateResult::Denied {
                 decision: decision.clone(),
@@ -865,17 +913,51 @@ impl Gate {
         None
     }
 
-    fn session_sealed_state(&self, session_id: &str) -> Option<bool> {
-        self.pvgs_client
-            .lock()
-            .ok()
-            .and_then(|client| client.is_session_sealed(session_id).ok())
+    fn session_seal_status(&self, session_id: &str) -> SealStatus {
+        match self.pvgs_client.lock() {
+            Ok(client) => {
+                let sealed = client.is_session_sealed(session_id).unwrap_or(true);
+                let unlock_present = if sealed {
+                    client.has_unlock_permit(session_id).unwrap_or(false)
+                } else {
+                    false
+                };
+                SealStatus {
+                    sealed,
+                    unlock_present,
+                }
+            }
+            Err(_) => SealStatus {
+                sealed: true,
+                unlock_present: false,
+            },
+        }
     }
 
     fn forensic_reason_codes(&self) -> Vec<String> {
         let mut codes = vec![
             FORENSIC_ACTION_REASON.to_string(),
             INTEGRITY_FAIL_REASON.to_string(),
+        ];
+        codes.sort();
+        codes
+    }
+
+    fn recovery_reason_codes(&self) -> Vec<String> {
+        let mut codes = vec![
+            INTEGRITY_FAIL_REASON.to_string(),
+            RECOVERY_UNLOCK_GRANTED_REASON.to_string(),
+        ];
+        codes.sort();
+        codes
+    }
+
+    fn recovery_enforcement_reason_codes(&self) -> Vec<String> {
+        let mut codes = vec![
+            FORENSIC_ACTION_REASON.to_string(),
+            INTEGRITY_FAIL_REASON.to_string(),
+            RECOVERY_READONLY_REASON.to_string(),
+            RECOVERY_UNLOCK_GRANTED_REASON.to_string(),
         ];
         codes.sort();
         codes
@@ -1743,6 +1825,16 @@ mod tests {
                 .is_session_sealed(session_id)
         }
 
+        fn has_unlock_permit(
+            &self,
+            session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .has_unlock_permit(session_id)
+        }
+
         fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
             self.inner
                 .lock()
@@ -1909,6 +2001,16 @@ mod tests {
                 .is_session_sealed(session_id)
         }
 
+        fn has_unlock_permit(
+            &self,
+            session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .has_unlock_permit(session_id)
+        }
+
         fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
             self.inner
                 .lock()
@@ -2023,6 +2125,13 @@ mod tests {
         }
 
         fn is_session_sealed(
+            &self,
+            _session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            Ok(false)
+        }
+
+        fn has_unlock_permit(
             &self,
             _session_id: &str,
         ) -> Result<bool, pvgs_client::PvgsClientError> {
@@ -2159,6 +2268,16 @@ mod tests {
                 .lock()
                 .expect("pvgs client lock")
                 .is_session_sealed(session_id)
+        }
+
+        fn has_unlock_permit(
+            &self,
+            session_id: &str,
+        ) -> Result<bool, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .has_unlock_permit(session_id)
         }
 
         fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
@@ -2381,6 +2500,7 @@ mod tests {
             pev_digest: None,
             ruleset_digest: None,
             session_sealed: false,
+            session_unlock_permit: false,
         }
     }
 
@@ -2469,6 +2589,8 @@ mod tests {
             pev: ctx.pev.clone(),
             pev_digest: ctx.pev_digest,
             ruleset_digest: ctx.ruleset_digest,
+            session_sealed: ctx.session_sealed,
+            unlock_present: ctx.session_unlock_permit,
         };
 
         gate.policy.decide_with_context(PolicyEvaluationRequest {
@@ -2668,6 +2790,7 @@ mod tests {
             pev_digest: None,
             ruleset_digest,
             policy_version_digest: String::new(),
+            metadata: std::collections::HashMap::new(),
         };
 
         let decision_ctx = DecisionContext {
@@ -2778,6 +2901,8 @@ mod tests {
             pev: ctx.pev.clone(),
             pev_digest: ctx.pev_digest,
             ruleset_digest: ctx.ruleset_digest,
+            session_sealed: ctx.session_sealed,
+            unlock_present: ctx.session_unlock_permit,
         };
 
         let canonical_action = canonical_bytes(&action);
@@ -3850,6 +3975,94 @@ mod tests {
             .collect();
         assert!(reason_codes.contains(&INTEGRITY_FAIL_REASON.to_string()));
         assert!(reason_codes.contains(&FORENSIC_ACTION_REASON.to_string()));
+    }
+
+    #[test]
+    fn sealed_session_with_unlock_blocks_side_effects() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let client = MockPvgsClient {
+            session_sealed: true,
+            unlock_permit: true,
+            ..Default::default()
+        };
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator,
+            Arc::new(trm::registry_fixture()),
+            boxed_client(client),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.export", "render"), ok_ctx());
+
+        match result {
+            GateResult::Denied { decision } => {
+                let reason_codes = decision.decision.reason_codes.expect("reason codes").codes;
+                assert!(reason_codes.contains(&RECOVERY_UNLOCK_GRANTED_REASON.to_string()));
+                assert!(reason_codes.contains(&RECOVERY_READONLY_REASON.to_string()));
+            }
+            other => panic!("expected denial for sealed session with unlock, got {other:?}"),
+        }
+
+        assert_eq!(counting.count(), 0, "adapter must not run when sealed");
+    }
+
+    #[test]
+    fn sealed_session_with_unlock_allows_read_actions_and_marks_metadata() {
+        let counting = CountingAdapter::default();
+        let aggregator = default_aggregator();
+        let client = MockPvgsClient {
+            session_sealed: true,
+            unlock_permit: true,
+            ..Default::default()
+        };
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+            Arc::new(trm::registry_fixture()),
+            boxed_client(client),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+
+        match result {
+            GateResult::Executed { decision, .. } => {
+                assert_eq!(counting.count(), 1, "read should execute when unlocked");
+                assert_eq!(
+                    decision
+                        .metadata
+                        .get("recovery_readonly")
+                        .map(String::as_str),
+                    Some("true")
+                );
+            }
+            other => panic!("expected execution when sealed with unlock, got {other:?}"),
+        }
+
+        let frames = aggregator.lock().expect("agg lock").force_flush();
+        let integrity_stats = frames
+            .first()
+            .and_then(|f| f.integrity_stats.as_ref())
+            .expect("integrity stats present");
+        let reason_codes: Vec<_> = integrity_stats
+            .top_reason_codes
+            .iter()
+            .map(|rc| rc.code.clone())
+            .collect();
+        assert!(reason_codes.contains(&RECOVERY_UNLOCK_GRANTED_REASON.to_string()));
+        assert!(reason_codes.contains(&INTEGRITY_FAIL_REASON.to_string()));
     }
 
     #[test]
