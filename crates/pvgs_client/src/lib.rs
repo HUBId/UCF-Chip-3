@@ -168,6 +168,11 @@ pub trait PvgsReader: Send + Sync {
     fn get_latest_pev_digest(&self) -> Option<[u8; 32]>;
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]>;
 
+    fn get_recovery_state(&self, session_id: &str) -> Result<Option<String>, PvgsClientError> {
+        let _ = session_id;
+        Ok(None)
+    }
+
     fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError>;
 
     fn has_unlock_permit(&self, session_id: &str) -> Result<bool, PvgsClientError>;
@@ -221,6 +226,9 @@ impl From<ucf::v1::ReplayPlan> for InspectorReplayPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorDump {
     pub ruleset_digest: Option<[u8; 32]>,
+    pub sealed: bool,
+    pub unlock_permit: bool,
+    pub recovery_state: Option<String>,
     pub cbv_digest: Option<CbvDigest>,
     pub pev_digest: Option<[u8; 32]>,
     pub replay_plans: Vec<InspectorReplayPlan>,
@@ -252,6 +260,9 @@ where
 
         Ok(InspectorDump {
             ruleset_digest: self.pvgs.get_current_ruleset_digest(),
+            sealed: self.pvgs.is_session_sealed(session_id)?,
+            unlock_permit: self.pvgs.has_unlock_permit(session_id)?,
+            recovery_state: self.pvgs.get_recovery_state(session_id)?,
             cbv_digest: self.pvgs.get_latest_cbv_digest(),
             pev_digest: self.pvgs.get_latest_pev_digest(),
             replay_plans,
@@ -260,6 +271,7 @@ where
 
     pub fn format_dump(dump: &InspectorDump) -> String {
         let ruleset_digest = format_optional_digest(dump.ruleset_digest);
+        let recovery_state = dump.recovery_state.as_deref().unwrap_or("NONE").to_string();
         let cbv_epoch = dump
             .cbv_digest
             .as_ref()
@@ -274,6 +286,9 @@ where
 
         let mut lines = vec![
             format!("ruleset_digest: {ruleset_digest}"),
+            format!("sealed: {}", dump.sealed),
+            format!("unlock_permit: {}", dump.unlock_permit),
+            format!("recovery_state: {recovery_state}"),
             format!("cbv: epoch={cbv_epoch} digest={cbv_digest}"),
             format!("pev_digest: {pev_digest}"),
             format!("pending_replay_plans: {}", dump.replay_plans.len()),
@@ -454,6 +469,10 @@ impl PvgsReader for Chip4LocalPvgsClient {
         None
     }
 
+    fn get_recovery_state(&self, _session_id: &str) -> Result<Option<String>, PvgsClientError> {
+        Ok(None)
+    }
+
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
         None
     }
@@ -504,6 +523,7 @@ pub struct LocalPvgsClient {
     pub finalized_macros: Vec<(String, [u8; 32])>,
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
     unlock_permits: HashMap<String, Option<[u8; 32]>>,
+    recovery_states: HashMap<String, Option<String>>,
 }
 
 impl Default for LocalPvgsClient {
@@ -533,6 +553,7 @@ impl Default for LocalPvgsClient {
             finalized_macros: Vec::new(),
             sealed_sessions: HashMap::new(),
             unlock_permits: HashMap::new(),
+            recovery_states: HashMap::new(),
         }
     }
 }
@@ -568,6 +589,10 @@ impl LocalPvgsClient {
 
     pub fn set_unlock_permit(&mut self, session_id: impl Into<String>, digest: Option<[u8; 32]>) {
         self.unlock_permits.insert(session_id.into(), digest);
+    }
+
+    pub fn set_recovery_state(&mut self, session_id: impl Into<String>, state: Option<String>) {
+        self.recovery_states.insert(session_id.into(), state);
     }
 }
 
@@ -956,6 +981,10 @@ impl PvgsReader for LocalPvgsClient {
         None
     }
 
+    fn get_recovery_state(&self, session_id: &str) -> Result<Option<String>, PvgsClientError> {
+        Ok(self.recovery_states.get(session_id).cloned().flatten())
+    }
+
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
         None
     }
@@ -1066,6 +1095,7 @@ pub struct MockPvgsClient {
     pub session_seal_digest: Option<[u8; 32]>,
     pub unlock_permit: bool,
     pub unlock_permit_digest: Option<[u8; 32]>,
+    pub recovery_state: Option<String>,
 }
 
 impl MockPvgsClient {
@@ -1088,6 +1118,10 @@ impl PvgsReader for MockPvgsClient {
 
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
         self.ruleset_digest
+    }
+
+    fn get_recovery_state(&self, _session_id: &str) -> Result<Option<String>, PvgsClientError> {
+        Ok(self.recovery_state.clone())
     }
 
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
@@ -1134,6 +1168,7 @@ pub struct MockPvgsReader {
     session_seal_digest: Option<[u8; 32]>,
     unlock_permit: bool,
     unlock_permit_digest: Option<[u8; 32]>,
+    recovery_state: Option<String>,
 }
 
 impl Default for MockPvgsReader {
@@ -1157,6 +1192,7 @@ impl Default for MockPvgsReader {
             session_seal_digest: None,
             unlock_permit: false,
             unlock_permit_digest: None,
+            recovery_state: None,
         }
     }
 }
@@ -1186,6 +1222,7 @@ impl MockPvgsReader {
             session_seal_digest: None,
             unlock_permit: false,
             unlock_permit_digest: None,
+            recovery_state: None,
         }
     }
 
@@ -1215,6 +1252,11 @@ impl MockPvgsReader {
         self.unlock_permit_digest = digest;
         self
     }
+
+    pub fn with_recovery_state(mut self, state: Option<String>) -> Self {
+        self.recovery_state = state;
+        self
+    }
 }
 
 impl PvgsReader for MockPvgsReader {
@@ -1233,6 +1275,10 @@ impl PvgsReader for MockPvgsReader {
 
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
         self.ruleset_digest
+    }
+
+    fn get_recovery_state(&self, _session_id: &str) -> Result<Option<String>, PvgsClientError> {
+        Ok(self.recovery_state.clone())
     }
 
     fn is_session_sealed(&self, _session_id: &str) -> Result<bool, PvgsClientError> {
@@ -1877,6 +1923,8 @@ mod tests {
                 epoch: 7,
                 digest: [0x33; 32],
             }),
+            session_sealed: true,
+            recovery_state: Some("R1_STABILIZED".to_string()),
             pending_replay_plans: vec![
                 replay_plan_with_digest("b-replay", 0x44),
                 replay_plan_with_digest("a-replay", 0x55),
@@ -1890,7 +1938,7 @@ mod tests {
             .expect("inspect dump succeeds");
 
         let expected = format!(
-            "ruleset_digest: {ruleset}\ncbv: epoch=7 digest={cbv}\npev_digest: {pev}\n\
+            "ruleset_digest: {ruleset}\nsealed: true\nunlock_permit: false\nrecovery_state: R1_STABILIZED\ncbv: epoch=7 digest={cbv}\npev_digest: {pev}\n\
 pending_replay_plans: 2\n\
 - a-replay digest={a_digest}\n  last_signalframe_digest: NONE\n\
 - b-replay digest={b_digest}\n  last_signalframe_digest: NONE\n",

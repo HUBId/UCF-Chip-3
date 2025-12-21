@@ -1808,6 +1808,16 @@ mod tests {
                 .get_current_ruleset_digest()
         }
 
+        fn get_recovery_state(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<String>, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_recovery_state(session_id)
+        }
+
         fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
             self.inner
                 .lock()
@@ -1984,6 +1994,16 @@ mod tests {
                 .get_current_ruleset_digest()
         }
 
+        fn get_recovery_state(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<String>, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_recovery_state(session_id)
+        }
+
         fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
             self.inner
                 .lock()
@@ -2120,6 +2140,13 @@ mod tests {
             None
         }
 
+        fn get_recovery_state(
+            &self,
+            _session_id: &str,
+        ) -> Result<Option<String>, pvgs_client::PvgsClientError> {
+            Ok(None)
+        }
+
         fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
             None
         }
@@ -2251,6 +2278,16 @@ mod tests {
                 .lock()
                 .expect("pvgs client lock")
                 .get_current_ruleset_digest()
+        }
+
+        fn get_recovery_state(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<String>, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_recovery_state(session_id)
         }
 
         fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
