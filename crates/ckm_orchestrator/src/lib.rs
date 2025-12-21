@@ -87,9 +87,7 @@ impl CkmOrchestrator {
 
     fn on_commit_failure(&mut self) {
         self.geist_signals.receipt_missing_count =
-            self.geist_signals
-                .receipt_missing_count
-                .saturating_add(1);
+            self.geist_signals.receipt_missing_count.saturating_add(1);
         self.geist_signals.integrity_state = ucf::v1::IntegrityState::Degraded;
         self.log_integrity_issue();
     }
