@@ -90,6 +90,12 @@ pub struct PvgsHead {
     pub head_record_digest: [u8; 32],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CbvDigest {
+    pub epoch: u64,
+    pub digest: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposedMacroInfo {
     pub macro_id: String,
@@ -162,12 +168,121 @@ pub trait PvgsReader: Send + Sync {
     fn get_latest_pev_digest(&self) -> Option<[u8; 32]>;
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]>;
 
+    fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
+        None
+    }
+
     fn get_pending_replay_plans(
         &self,
         _session_id: &str,
     ) -> Result<Vec<ucf::v1::ReplayPlan>, PvgsClientError> {
         Ok(Vec::new())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorReplayPlan {
+    pub replay_id: String,
+    pub replay_digest: Option<[u8; 32]>,
+    pub last_signalframe_digest: Option<[u8; 32]>,
+}
+
+impl From<ucf::v1::ReplayPlan> for InspectorReplayPlan {
+    fn from(plan: ucf::v1::ReplayPlan) -> Self {
+        Self {
+            replay_id: plan.replay_id,
+            replay_digest: plan
+                .replay_digest
+                .as_ref()
+                .and_then(|digest| digest32_to_array(digest)),
+            last_signalframe_digest: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorDump {
+    pub ruleset_digest: Option<[u8; 32]>,
+    pub cbv_digest: Option<CbvDigest>,
+    pub pev_digest: Option<[u8; 32]>,
+    pub replay_plans: Vec<InspectorReplayPlan>,
+}
+
+pub struct InspectorClient<'a, T>
+where
+    T: PvgsClient + PvgsReader,
+{
+    pvgs: &'a mut T,
+}
+
+impl<'a, T> InspectorClient<'a, T>
+where
+    T: PvgsClient + PvgsReader,
+{
+    pub fn new(pvgs: &'a mut T) -> Self {
+        Self { pvgs }
+    }
+
+    pub fn collect_dump(&mut self, session_id: &str) -> Result<InspectorDump, PvgsClientError> {
+        let mut replay_plans: Vec<InspectorReplayPlan> = self
+            .pvgs
+            .get_pending_replay_plans(session_id)?
+            .into_iter()
+            .map(InspectorReplayPlan::from)
+            .collect();
+        replay_plans.sort_by(|a, b| a.replay_id.cmp(&b.replay_id));
+
+        Ok(InspectorDump {
+            ruleset_digest: self.pvgs.get_current_ruleset_digest(),
+            cbv_digest: self.pvgs.get_latest_cbv_digest(),
+            pev_digest: self.pvgs.get_latest_pev_digest(),
+            replay_plans,
+        })
+    }
+
+    pub fn format_dump(dump: &InspectorDump) -> String {
+        let ruleset_digest = format_optional_digest(dump.ruleset_digest);
+        let cbv_epoch = dump
+            .cbv_digest
+            .as_ref()
+            .map(|cbv| cbv.epoch.to_string())
+            .unwrap_or_else(|| "NONE".to_string());
+        let cbv_digest = dump
+            .cbv_digest
+            .as_ref()
+            .map(|cbv| format_optional_digest(Some(cbv.digest)))
+            .unwrap_or_else(|| "NONE".to_string());
+        let pev_digest = format_optional_digest(dump.pev_digest);
+
+        let mut lines = vec![
+            format!("ruleset_digest: {ruleset_digest}"),
+            format!("cbv: epoch={cbv_epoch} digest={cbv_digest}"),
+            format!("pev_digest: {pev_digest}"),
+            format!("pending_replay_plans: {}", dump.replay_plans.len()),
+        ];
+
+        for plan in &dump.replay_plans {
+            let replay_digest = format_optional_digest(plan.replay_digest);
+            let last_signalframe_digest = format_optional_digest(plan.last_signalframe_digest);
+            lines.push(format!("- {} digest={replay_digest}", plan.replay_id));
+            lines.push(format!(
+                "  last_signalframe_digest: {last_signalframe_digest}"
+            ));
+        }
+
+        lines.join("\n") + "\n"
+    }
+
+    pub fn inspect_dump(&mut self, session_id: &str) -> Result<String, PvgsClientError> {
+        let dump = self.collect_dump(session_id)?;
+        Ok(Self::format_dump(&dump))
+    }
+}
+
+fn format_optional_digest(digest: Option<[u8; 32]>) -> String {
+    digest
+        .map(hex::encode)
+        .unwrap_or_else(|| "NONE".to_string())
 }
 
 #[cfg(any(test, feature = "local-e2e"))]
@@ -760,6 +875,24 @@ impl PvgsClient for LocalPvgsClient {
     }
 }
 
+impl PvgsReader for LocalPvgsClient {
+    fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+        None
+    }
+
+    fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+        None
+    }
+
+    fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+        None
+    }
+
+    fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
+        None
+    }
+}
+
 fn build_micro_milestone(
     session_id: &str,
     start: u64,
@@ -834,6 +967,9 @@ pub struct MockPvgsClient {
     pub macro_consistency_digests: Vec<Option<[u8; 32]>>,
     pub proposed_macros: VecDeque<ProposedMacroInfo>,
     pub finalized_macros: Vec<(String, [u8; 32])>,
+    pub pev_digest: Option<[u8; 32]>,
+    pub ruleset_digest: Option<[u8; 32]>,
+    pub latest_cbv_digest: Option<CbvDigest>,
 }
 
 impl MockPvgsClient {
@@ -842,6 +978,35 @@ impl MockPvgsClient {
             local: LocalPvgsClient::rejecting(reason_codes),
             ..Self::default()
         }
+    }
+}
+
+impl PvgsReader for MockPvgsClient {
+    fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+        None
+    }
+
+    fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+        self.pev_digest
+    }
+
+    fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+        self.ruleset_digest
+    }
+
+    fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
+        self.latest_cbv_digest
+    }
+
+    fn get_pending_replay_plans(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, PvgsClientError> {
+        if session_id.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(self.pending_replay_plans.clone())
     }
 }
 
@@ -1543,5 +1708,49 @@ mod tests {
             .sep_events()
             .last()
             .is_some_and(|ev| ev.status == ucf::v1::ReceiptStatus::Rejected));
+    }
+
+    #[test]
+    fn formats_inspector_dump() {
+        let mut client = MockPvgsClient::default();
+        client.ruleset_digest = Some([0x11; 32]);
+        client.pev_digest = Some([0x22; 32]);
+        client.latest_cbv_digest = Some(CbvDigest {
+            epoch: 7,
+            digest: [0x33; 32],
+        });
+        client.pending_replay_plans = vec![
+            replay_plan_with_digest("b-replay", 0x44),
+            replay_plan_with_digest("a-replay", 0x55),
+        ];
+
+        let mut inspector = InspectorClient::new(&mut client);
+        let output = inspector
+            .inspect_dump("session-abc")
+            .expect("inspect dump succeeds");
+
+        let expected = format!(
+            "ruleset_digest: {ruleset}\ncbv: epoch=7 digest={cbv}\npev_digest: {pev}\n\
+pending_replay_plans: 2\n\
+- a-replay digest={a_digest}\n  last_signalframe_digest: NONE\n\
+- b-replay digest={b_digest}\n  last_signalframe_digest: NONE\n",
+            ruleset = hex::encode([0x11; 32]),
+            cbv = hex::encode([0x33; 32]),
+            pev = hex::encode([0x22; 32]),
+            a_digest = hex::encode([0x55; 32]),
+            b_digest = hex::encode([0x44; 32]),
+        );
+
+        assert_eq!(output, expected);
+    }
+
+    fn replay_plan_with_digest(id: &str, value: u8) -> ucf::v1::ReplayPlan {
+        ucf::v1::ReplayPlan {
+            replay_id: id.to_string(),
+            replay_digest: Some(ucf::v1::Digest32 {
+                value: vec![value; 32],
+            }),
+            trigger_reason_codes: None,
+        }
     }
 }

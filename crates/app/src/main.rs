@@ -2,6 +2,7 @@
 
 use std::{
     convert::TryFrom,
+    env, process,
     sync::{Arc, Mutex},
 };
 
@@ -11,7 +12,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use frames::{FramesConfig, WindowEngine};
 use gem::{DecisionLogStore, Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
-use pvgs_client::{KeyEpochSync, LocalPvgsClient};
+use pvgs_client::{InspectorClient, KeyEpochSync, LocalPvgsClient};
 use pvgs_verify::{
     pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
     verify_pvgs_receipt, PvgsKeyEpochStore,
@@ -21,6 +22,44 @@ use trm::registry_fixture;
 use ucf_protocol::ucf;
 
 fn main() {
+    let mut args = env::args().skip(1).peekable();
+    if let Some(subcommand) = args.peek() {
+        if subcommand == "inspect-dump" {
+            args.next();
+            let session_id = match (args.next(), args.next()) {
+                (Some(flag), Some(id)) if flag == "--session" => id,
+                _ => {
+                    eprintln!("usage: app inspect-dump --session <id>");
+                    process::exit(1);
+                }
+            };
+
+            if args.next().is_some() {
+                eprintln!("usage: app inspect-dump --session <id>");
+                process::exit(1);
+            }
+
+            run_inspect_dump(&session_id);
+            return;
+        }
+    }
+
+    run_demo();
+}
+
+fn run_inspect_dump(session_id: &str) {
+    let mut pvgs = LocalPvgsClient::default();
+    let mut inspector = InspectorClient::new(&mut pvgs);
+    match inspector.inspect_dump(session_id) {
+        Ok(output) => print!("{output}"),
+        Err(err) => {
+            eprintln!("inspect-dump failed: {err}");
+            process::exit(1);
+        }
+    }
+}
+
+fn run_demo() {
     let frames_config = FramesConfig::load_from_dir(".").unwrap_or_else(|err| {
         eprintln!("using fallback frames config: {err}");
         FramesConfig::fallback()

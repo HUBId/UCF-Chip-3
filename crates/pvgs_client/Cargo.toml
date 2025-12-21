@@ -12,6 +12,7 @@ thiserror = { workspace = true }
 ucf-protocol = { workspace = true }
 pvgs_verify = { path = "../pvgs_verify" }
 chip4-pvgs = { path = "../../tests/chip4-pvgs", optional = true }
+hex = "0.4"
 
 [dev-dependencies]
 ed25519-dalek = "2"

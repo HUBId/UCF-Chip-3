@@ -489,6 +489,7 @@ version = "0.1.0"
 dependencies = [
  "chip4-pvgs",
  "ed25519-dalek",
+ "hex",
  "pvgs_verify",
  "rand",
  "thiserror",
