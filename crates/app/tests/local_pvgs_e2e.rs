@@ -8,7 +8,7 @@ use common::spawn_local_pvgs;
 use frames::{FramesConfig, WindowEngine};
 use gem::{DecisionLogStore, Gate, GateContext, GateResult};
 use pbm::{PolicyContext, PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest};
-use pvgs_client::{MockPvgsClient, PvgsClient};
+use pvgs_client::{MockPvgsClient, PvgsClientReader};
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore};
 use tam::ToolAdapter;
 use trm::ToolRegistry;
@@ -319,7 +319,7 @@ fn gate_with_components(
         receipt_store,
         registry,
         pvgs_client: Arc::new(Mutex::new(
-            Box::new(MockPvgsClient::default()) as Box<dyn PvgsClient>
+            Box::new(MockPvgsClient::default()) as Box<dyn PvgsClientReader>
         )),
         integrity_issues: Arc::new(Mutex::new(0)),
         decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
@@ -353,6 +353,7 @@ fn gate_context(
         pev: None,
         pev_digest: None,
         ruleset_digest,
+        session_sealed: false,
     }
 }
 

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::HashMap,
     convert::TryInto,
     sync::{Arc, Mutex},
 };
@@ -33,6 +34,7 @@ struct LocalPvgsState {
     micro_milestones: Vec<ucf::v1::MicroMilestone>,
     consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     replay_plans: Vec<ucf::v1::ReplayPlan>,
+    sealed_sessions: HashMap<String, Option<[u8; 32]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +70,7 @@ impl LocalPvgs {
                 micro_milestones: Vec::new(),
                 consistency_feedback: Vec::new(),
                 replay_plans: Vec::new(),
+                sealed_sessions: HashMap::new(),
             })),
         }
     }
@@ -100,6 +103,31 @@ impl LocalPvgs {
         guard
             .replay_plans
             .retain(|plan| plan.replay_id != replay_id);
+    }
+
+    pub fn seal_session(&self, session_id: &str, seal_digest: Option<[u8; 32]>) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard
+            .sealed_sessions
+            .insert(session_id.to_string(), seal_digest);
+    }
+
+    pub fn unseal_session(&self, session_id: &str) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard.sealed_sessions.remove(session_id);
+    }
+
+    pub fn is_session_sealed(&self, session_id: &str) -> bool {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard.sealed_sessions.contains_key(session_id)
+    }
+
+    pub fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard
+            .sealed_sessions
+            .get(session_id)
+            .and_then(|digest| *digest)
     }
 
     pub fn commit_tool_registry(

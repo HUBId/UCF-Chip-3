@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use pvgs_verify::{IngestError, PvgsKeyEpochStore};
 use thiserror::Error;
@@ -168,6 +168,13 @@ pub trait PvgsReader: Send + Sync {
     fn get_latest_pev_digest(&self) -> Option<[u8; 32]>;
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]>;
 
+    fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError>;
+
+    fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+        let _ = session_id;
+        None
+    }
+
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
         None
     }
@@ -179,6 +186,10 @@ pub trait PvgsReader: Send + Sync {
         Ok(Vec::new())
     }
 }
+
+pub trait PvgsClientReader: PvgsClient + PvgsReader {}
+
+impl<T> PvgsClientReader for T where T: PvgsClient + PvgsReader {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorReplayPlan {
@@ -419,6 +430,33 @@ impl PvgsClient for Chip4LocalPvgsClient {
     }
 }
 
+#[cfg(any(test, feature = "local-e2e"))]
+impl PvgsReader for Chip4LocalPvgsClient {
+    fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+        None
+    }
+
+    fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+        None
+    }
+
+    fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+        None
+    }
+
+    fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
+        None
+    }
+
+    fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.pvgs.is_session_sealed(session_id))
+    }
+
+    fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+        self.pvgs.get_session_seal_digest(session_id)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalPvgsClient {
     receipt_epoch: String,
@@ -443,6 +481,7 @@ pub struct LocalPvgsClient {
     pub try_commit_macro_outcome: Option<bool>,
     pub proposed_macros: VecDeque<ProposedMacroInfo>,
     pub finalized_macros: Vec<(String, [u8; 32])>,
+    sealed_sessions: HashMap<String, Option<[u8; 32]>>,
 }
 
 impl Default for LocalPvgsClient {
@@ -470,6 +509,7 @@ impl Default for LocalPvgsClient {
             try_commit_macro_outcome: None,
             proposed_macros: VecDeque::new(),
             finalized_macros: Vec::new(),
+            sealed_sessions: HashMap::new(),
         }
     }
 }
@@ -497,6 +537,10 @@ impl LocalPvgsClient {
 
     pub fn committed_tool_registries(&self) -> &[ucf::v1::ToolRegistryContainer] {
         &self.committed_tool_registries
+    }
+
+    pub fn set_session_sealed(&mut self, session_id: impl Into<String>, digest: Option<[u8; 32]>) {
+        self.sealed_sessions.insert(session_id.into(), digest);
     }
 }
 
@@ -888,6 +932,16 @@ impl PvgsReader for LocalPvgsClient {
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
         None
     }
+
+    fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.sealed_sessions.contains_key(session_id))
+    }
+
+    fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+        self.sealed_sessions
+            .get(session_id)
+            .and_then(|digest| *digest)
+    }
 }
 
 fn build_micro_milestone(
@@ -967,6 +1021,8 @@ pub struct MockPvgsClient {
     pub pev_digest: Option<[u8; 32]>,
     pub ruleset_digest: Option<[u8; 32]>,
     pub latest_cbv_digest: Option<CbvDigest>,
+    pub session_sealed: bool,
+    pub session_seal_digest: Option<[u8; 32]>,
 }
 
 impl MockPvgsClient {
@@ -995,6 +1051,14 @@ impl PvgsReader for MockPvgsClient {
         self.latest_cbv_digest
     }
 
+    fn is_session_sealed(&self, _session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.session_sealed)
+    }
+
+    fn get_session_seal_digest(&self, _session_id: &str) -> Option<[u8; 32]> {
+        self.session_seal_digest
+    }
+
     fn get_pending_replay_plans(
         &self,
         session_id: &str,
@@ -1012,6 +1076,8 @@ pub struct MockPvgsReader {
     pev: Option<ucf::v1::PolicyEcologyVector>,
     pev_digest: Option<[u8; 32]>,
     ruleset_digest: Option<[u8; 32]>,
+    session_sealed: bool,
+    session_seal_digest: Option<[u8; 32]>,
 }
 
 impl Default for MockPvgsReader {
@@ -1031,6 +1097,8 @@ impl Default for MockPvgsReader {
             pev: Some(pev),
             pev_digest: Some(digest),
             ruleset_digest: None,
+            session_sealed: false,
+            session_seal_digest: None,
         }
     }
 }
@@ -1056,6 +1124,8 @@ impl MockPvgsReader {
             pev: pev_with_digest,
             pev_digest,
             ruleset_digest: None,
+            session_sealed: false,
+            session_seal_digest: None,
         }
     }
 
@@ -1071,6 +1141,12 @@ impl MockPvgsReader {
 
     pub fn with_ruleset_digest(mut self, ruleset_digest: [u8; 32]) -> Self {
         self.ruleset_digest = Some(ruleset_digest);
+        self
+    }
+
+    pub fn with_session_sealed(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.session_sealed = true;
+        self.session_seal_digest = digest;
         self
     }
 }
@@ -1091,6 +1167,14 @@ impl PvgsReader for MockPvgsReader {
 
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
         self.ruleset_digest
+    }
+
+    fn is_session_sealed(&self, _session_id: &str) -> Result<bool, PvgsClientError> {
+        Ok(self.session_sealed)
+    }
+
+    fn get_session_seal_digest(&self, _session_id: &str) -> Option<[u8; 32]> {
+        self.session_seal_digest
     }
 }
 

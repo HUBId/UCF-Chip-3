@@ -107,7 +107,7 @@ impl Harness {
             receipt_store: Arc::new(receipt_store),
             registry: registry.clone(),
             pvgs_client: Arc::new(Mutex::new(
-                Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClient>
+                Box::new(LocalPvgsClient::default()) as Box<dyn pvgs_client::PvgsClientReader>
             )),
             integrity_issues: Arc::new(Mutex::new(0)),
             decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
@@ -158,6 +158,7 @@ impl Harness {
             pev: None,
             pev_digest: None,
             ruleset_digest: None,
+            session_sealed: false,
         }
     }
 
