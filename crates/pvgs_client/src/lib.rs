@@ -194,7 +194,7 @@ impl From<ucf::v1::ReplayPlan> for InspectorReplayPlan {
             replay_digest: plan
                 .replay_digest
                 .as_ref()
-                .and_then(|digest| digest32_to_array(digest)),
+                .and_then(digest32_to_array),
             last_signalframe_digest: None,
         }
     }
@@ -1712,17 +1712,19 @@ mod tests {
 
     #[test]
     fn formats_inspector_dump() {
-        let mut client = MockPvgsClient::default();
-        client.ruleset_digest = Some([0x11; 32]);
-        client.pev_digest = Some([0x22; 32]);
-        client.latest_cbv_digest = Some(CbvDigest {
-            epoch: 7,
-            digest: [0x33; 32],
-        });
-        client.pending_replay_plans = vec![
-            replay_plan_with_digest("b-replay", 0x44),
-            replay_plan_with_digest("a-replay", 0x55),
-        ];
+        let mut client = MockPvgsClient {
+            ruleset_digest: Some([0x11; 32]),
+            pev_digest: Some([0x22; 32]),
+            latest_cbv_digest: Some(CbvDigest {
+                epoch: 7,
+                digest: [0x33; 32],
+            }),
+            pending_replay_plans: vec![
+                replay_plan_with_digest("b-replay", 0x44),
+                replay_plan_with_digest("a-replay", 0x55),
+            ],
+            ..Default::default()
+        };
 
         let mut inspector = InspectorClient::new(&mut client);
         let output = inspector
