@@ -40,6 +40,8 @@ pub mod ucf {
             pub replay_id: ::prost::alloc::string::String,
             #[prost(message, optional, tag = "2")]
             pub replay_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "3")]
+            pub trigger_reason_codes: ::core::option::Option<ReasonCodes>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ReasonCodes {

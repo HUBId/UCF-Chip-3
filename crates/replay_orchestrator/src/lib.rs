@@ -9,6 +9,7 @@ use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
 const MAX_REPLAY_PLANS_PER_TICK: usize = 3;
+const MAX_REASON_CODES: usize = 16;
 const CORE_FRAME_DOMAIN: &str = "UCF:HASH:CORE_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
 const INTEGRITY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
@@ -71,7 +72,6 @@ impl ReplayOrchestrator {
         plans.sort_by(|a, b| a.replay_id.cmp(&b.replay_id));
 
         let mut processed_this_tick = 0usize;
-        let mut sequence = self.seen_replay_ids.len() as u64;
 
         for plan in plans {
             if processed_this_tick >= self.max_plans_per_tick {
@@ -82,8 +82,7 @@ impl ReplayOrchestrator {
                 continue;
             }
 
-            sequence = sequence.saturating_add(1);
-            let step_id = format!("replay-tick-{sequence}");
+            let step_id = replay_step_id(session_id, &plan.replay_id);
             let record = build_replay_record(session_id, &step_id, &plan, None);
 
             let accepted = match commit.commit_experience_record(record) {
@@ -128,6 +127,8 @@ fn build_replay_record(
     plan: &ucf::v1::ReplayPlan,
     ruleset_digest: Option<[u8; 32]>,
 ) -> ucf::v1::ExperienceRecord {
+    let reason_codes = replay_reason_codes(plan);
+
     let core_frame = ucf::v1::CoreFrame {
         session_id: session_id.to_string(),
         step_id: step_id.to_string(),
@@ -144,7 +145,7 @@ fn build_replay_record(
         budget_snapshot_ref: None,
         pvgs_receipt_ref: None,
         reason_codes: Some(ucf::v1::ReasonCodes {
-            codes: vec![REPLAY_REASON_CODE.to_string()],
+            codes: reason_codes,
         }),
     };
 
@@ -182,6 +183,24 @@ fn build_replay_record(
     }
 }
 
+fn replay_reason_codes(plan: &ucf::v1::ReplayPlan) -> Vec<String> {
+    let mut codes = vec![REPLAY_REASON_CODE.to_string()];
+
+    if let Some(trigger_codes) = plan.trigger_reason_codes.as_ref() {
+        codes.extend(trigger_codes.codes.iter().cloned());
+    }
+
+    codes.sort();
+    codes.dedup();
+    codes.truncate(MAX_REASON_CODES);
+
+    codes
+}
+
+fn replay_step_id(session_id: &str, replay_id: &str) -> String {
+    format!("replay:{session_id}:{replay_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,11 +208,18 @@ mod tests {
     use pvgs_client::MockPvgsClient;
 
     fn replay_plan(id: &str) -> ucf::v1::ReplayPlan {
+        replay_plan_with_reason_codes(id, None)
+    }
+
+    fn replay_plan_with_reason_codes(id: &str, codes: Option<Vec<&str>>) -> ucf::v1::ReplayPlan {
         let digest = digest_proto("UCF:HASH:REPLAY_PLAN", id.as_bytes());
         ucf::v1::ReplayPlan {
             replay_id: id.to_string(),
             replay_digest: Some(ucf::v1::Digest32 {
                 value: digest.to_vec(),
+            }),
+            trigger_reason_codes: codes.map(|codes| ucf::v1::ReasonCodes {
+                codes: codes.into_iter().map(String::from).collect(),
             }),
         }
     }
@@ -279,6 +305,8 @@ mod tests {
         assert_eq!(commit.local.committed_records.len(), 2);
         assert_eq!(orchestrator.seen_replay_ids.len(), 1);
 
+        assert_eq!(pvgs.consumed_replay_ids, vec!["plan-1".to_string()]);
+
         let frames = aggregator.lock().unwrap().force_flush();
         let integrity_issue_count = frames
             .first()
@@ -331,5 +359,43 @@ mod tests {
             .collect();
 
         assert_eq!(committed_order, expected_order);
+    }
+
+    #[test]
+    fn replay_record_includes_trigger_reason_codes() {
+        let plan = replay_plan_with_reason_codes(
+            "plan-rc",
+            Some(vec!["RC.TH.POLICY_PROBING", "RC.GV.CONSISTENCY.LOW"]),
+        );
+        let step_id = replay_step_id("sess", &plan.replay_id);
+
+        let record = build_replay_record("sess", &step_id, &plan, None);
+
+        let codes = record
+            .governance_frame
+            .as_ref()
+            .and_then(|gov| gov.reason_codes.as_ref())
+            .map(|rc| rc.codes.clone())
+            .unwrap_or_default();
+
+        assert_eq!(
+            codes,
+            vec![
+                "RC.GV.CONSISTENCY.LOW".to_string(),
+                "RC.GV.REPLAY.PLANNED".to_string(),
+                "RC.TH.POLICY_PROBING".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_record_is_deterministic() {
+        let plan = replay_plan_with_reason_codes("plan-det", Some(vec!["RC.TH.POLICY_PROBING"]));
+        let step_id = replay_step_id("sess", &plan.replay_id);
+
+        let record_a = build_replay_record("sess", &step_id, &plan, None);
+        let record_b = build_replay_record("sess", &step_id, &plan, None);
+
+        assert_eq!(canonical_bytes(&record_a), canonical_bytes(&record_b));
     }
 }
