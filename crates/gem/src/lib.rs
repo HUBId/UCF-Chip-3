@@ -338,7 +338,7 @@ impl Gate {
             );
         }
 
-        if let Err(result) = self.enforce_seal_policy(
+        if let Some(result) = self.enforce_seal_policy(
             session_id,
             action_type,
             &mut ctx,
@@ -843,12 +843,12 @@ impl Gate {
         ctx: &mut GateContext,
         decision: &mut PolicyDecisionRecord,
         decision_ctx: &mut DecisionContext,
-    ) -> Result<(), GateResult> {
+    ) -> Option<GateResult> {
         let sealed = self.session_sealed_state(session_id).unwrap_or(true);
 
         ctx.session_sealed = sealed;
         if !sealed {
-            return Ok(());
+            return None;
         }
 
         ctx.integrity_state = "FAIL".to_string();
@@ -857,12 +857,12 @@ impl Gate {
 
         if is_side_effect_action(action_type) {
             self.deny_with_reasons(decision, decision_ctx, &reason_codes);
-            return Err(GateResult::Denied {
+            return Some(GateResult::Denied {
                 decision: decision.clone(),
             });
         }
 
-        Ok(())
+        None
     }
 
     fn session_sealed_state(&self, session_id: &str) -> Option<bool> {
@@ -881,7 +881,7 @@ impl Gate {
         codes
     }
 
-    #[allow(clippy::result_large_err, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn enforce_receipt_gate(
         &self,
         action_type: ucf::v1::ToolActionType,
@@ -3768,8 +3768,10 @@ mod tests {
     fn sealed_session_blocks_side_effects() {
         let counting = CountingAdapter::default();
         let aggregator = default_aggregator();
-        let mut client = MockPvgsClient::default();
-        client.session_sealed = true;
+        let client = MockPvgsClient {
+            session_sealed: true,
+            ..Default::default()
+        };
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
@@ -3806,8 +3808,10 @@ mod tests {
     fn sealed_session_allows_read_actions() {
         let counting = CountingAdapter::default();
         let aggregator = default_aggregator();
-        let mut client = MockPvgsClient::default();
-        client.session_sealed = true;
+        let client = MockPvgsClient {
+            session_sealed: true,
+            ..Default::default()
+        };
         let gate = gate_with_components(
             Box::new(counting.clone()),
             open_control_store(),
