@@ -31,6 +31,7 @@ struct LocalPvgsState {
     sep_events: Vec<SepEvent>,
     proof_receipts: Vec<ucf::v1::ProofReceipt>,
     micro_milestones: Vec<ucf::v1::MicroMilestone>,
+    consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     replay_plans: Vec<ucf::v1::ReplayPlan>,
 }
 
@@ -65,6 +66,7 @@ impl LocalPvgs {
                 sep_events: Vec::new(),
                 proof_receipts: Vec::new(),
                 micro_milestones: Vec::new(),
+                consistency_feedback: Vec::new(),
                 replay_plans: Vec::new(),
             })),
         }
@@ -195,6 +197,67 @@ impl LocalPvgs {
             reject_reason_codes: Vec::new(),
             signer: None,
         }
+    }
+
+    pub fn append_consistency_feedback(
+        &self,
+        mut feedback: ucf::v1::ConsistencyFeedback,
+    ) -> (ucf::v1::PvgsReceipt, ucf::v1::ProofReceipt) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        if feedback.cf_digest.is_none() {
+            let digest = digest_proto("UCF:HASH:CONSISTENCY_FEEDBACK", &canonical_bytes(&feedback));
+            feedback.cf_digest = Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            });
+        }
+
+        let digest: [u8; 32] = feedback
+            .cf_digest
+            .as_ref()
+            .and_then(|d| d.value.clone().try_into().ok())
+            .unwrap_or([0u8; 32]);
+        guard.consistency_feedback.push(feedback.clone());
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: format!("epoch-cf-{}", guard.consistency_feedback.len()),
+            receipt_id: format!("cf-{}", guard.consistency_feedback.len()),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            status: ucf::v1::ReceiptStatus::Accepted.into(),
+            action_digest: None,
+            decision_digest: feedback.cf_digest.clone(),
+            grant_id: "grant-cf".to_string(),
+            charter_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![1u8; 32],
+            }),
+            policy_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![2u8; 32],
+            }),
+            prev_record_digest: guard
+                .head_record_digest
+                .as_ref()
+                .map(|digest| ucf::v1::Digest32 {
+                    value: digest.to_vec(),
+                }),
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: Vec::new(),
+            signer: None,
+        };
+
+        let proof_receipt = ucf::v1::ProofReceipt {
+            status: receipt.status,
+            receipt_digest: receipt.receipt_digest.clone(),
+            validator: Some(ucf::v1::Signature {
+                algorithm: "local-proof".to_string(),
+                signer: b"pvgs-proof".to_vec(),
+                signature: vec![3u8; 64],
+            }),
+        };
+
+        guard.proof_receipts.push(proof_receipt.clone());
+        (receipt, proof_receipt)
     }
 
     pub fn append_experience_record(

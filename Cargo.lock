@@ -130,9 +130,11 @@ name = "ckm_orchestrator"
 version = "0.1.0"
 dependencies = [
  "frames",
+ "geist_stub",
  "pvgs_client",
  "thiserror",
  "tracing",
+ "ucf-protocol",
 ]
 
 [[package]]
@@ -295,6 +297,13 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror",
+ "ucf-protocol",
+]
+
+[[package]]
+name = "geist_stub"
+version = "0.1.0"
+dependencies = [
  "ucf-protocol",
 ]
 

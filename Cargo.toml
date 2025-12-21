@@ -17,6 +17,7 @@ members = [
     "crates/test-utils",
     "crates/ckm_client",
     "crates/replay_orchestrator",
+    "crates/geist_stub",
 ]
 resolver = "2"
 

@@ -9,3 +9,5 @@ pvgs_client = { path = "../pvgs_client" }
 frames = { path = "../frames" }
 thiserror = { workspace = true }
 tracing = "0.1"
+geist_stub = { path = "../geist_stub" }
+ucf-protocol = { path = "../ucf-protocol" }
