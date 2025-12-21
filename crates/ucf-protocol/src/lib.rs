@@ -921,6 +921,20 @@ pub mod ucf {
             pub ruleset_digest: ::core::option::Option<Digest32>,
             #[prost(message, optional, tag = "15")]
             pub cbv_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "16")]
+            pub cbv: ::core::option::Option<CharacterBaselineVector>,
+            #[prost(message, optional, tag = "17")]
+            pub pev: ::core::option::Option<PolicyEcologyVector>,
+            #[prost(message, optional, tag = "18")]
+            pub ruleset_digest_current: ::core::option::Option<Digest32>,
+            #[prost(uint32, tag = "19")]
+            pub ruleset_change_count_medium_window: u32,
+            #[prost(uint32, tag = "20")]
+            pub receipt_invalid_count: u32,
+            #[prost(uint32, tag = "21")]
+            pub receipt_missing_count: u32,
+            #[prost(uint32, optional, tag = "22")]
+            pub dlp_block_count_medium_window: ::core::option::Option<u32>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ControlFrame {
