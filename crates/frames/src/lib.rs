@@ -6,6 +6,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+pub mod emotion;
+
 use pbm::DecisionForm;
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;

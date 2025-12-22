@@ -13,6 +13,7 @@ members = [
     "crates/pvgs_client",
     "crates/pvgs_verify",
     "crates/app",
+    "crates/chip2_client",
     "crates/ucf-protocol",
     "crates/test-utils",
     "crates/ckm_client",

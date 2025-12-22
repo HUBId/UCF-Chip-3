@@ -3997,7 +3997,7 @@ mod tests {
         let frame = frames.first().expect("frame emitted");
         assert_eq!(
             frame.integrity_state,
-            ucf::v1::IntegrityState::Fail.into(),
+            ucf::v1::IntegrityState::Fail as i32,
             "seal should mark integrity as FAIL",
         );
 
