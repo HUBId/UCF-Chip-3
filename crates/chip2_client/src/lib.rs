@@ -6,7 +6,7 @@ pub trait Chip2Reader: Send + Sync {
     fn get_latest_emotion_field(&self) -> Option<EmotionField>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MockChip2Reader {
     field: Option<EmotionField>,
 }
@@ -14,12 +14,6 @@ pub struct MockChip2Reader {
 impl MockChip2Reader {
     pub fn new(field: Option<EmotionField>) -> Self {
         Self { field }
-    }
-}
-
-impl Default for MockChip2Reader {
-    fn default() -> Self {
-        Self { field: None }
     }
 }
 
