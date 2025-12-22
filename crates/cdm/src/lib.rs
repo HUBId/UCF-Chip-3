@@ -3,6 +3,8 @@
 use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
+pub mod emotion;
+
 const OUTPUT_ARTIFACT_DOMAIN: &str = "UCF:HASH:OUTPUT_ARTIFACT";
 const DLP_DECISION_DOMAIN: &str = "UCF:HASH:DLP_DECISION";
 
