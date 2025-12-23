@@ -863,7 +863,7 @@ windows:
         let mut engine = engine_with_config(FramesConfig::fallback());
         let reason = "RC.GV.TOOL.SUSPENDED".to_string();
 
-        engine.on_suspension(&[reason.clone()]);
+        engine.on_suspension(std::slice::from_ref(&reason));
 
         let frames = engine.force_flush();
         for frame in frames {
