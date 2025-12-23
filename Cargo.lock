@@ -780,7 +780,10 @@ dependencies = [
 name = "tom"
 version = "0.1.0"
 dependencies = [
+ "control",
+ "pbm",
  "pvgs_client",
+ "suspension",
  "thiserror",
  "trm",
  "ucf-protocol",
