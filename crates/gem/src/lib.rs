@@ -2830,7 +2830,11 @@ mod tests {
             other => panic!("unexpected gate result: {other:?}"),
         }
 
-        assert_eq!(counting.count(), 0, "adapter must not run for suspended tools");
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run for suspended tools"
+        );
 
         let top_codes: Vec<_> = aggregator
             .lock()

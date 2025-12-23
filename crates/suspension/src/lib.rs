@@ -198,7 +198,11 @@ mod tests {
         let second = state.apply_recommendations(vec![rec], 11);
 
         assert_eq!(state.suspended.len(), 1);
-        assert_eq!(state.suspended().len(), 1, "suspended set should only grow once");
+        assert_eq!(
+            state.suspended().len(),
+            1,
+            "suspended set should only grow once"
+        );
         assert!(first[0].applied);
         assert!(!second[0].applied);
         assert_eq!(first[0].suspended_at_ms, 10);
