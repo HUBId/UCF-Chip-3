@@ -9,3 +9,8 @@ thiserror = { workspace = true }
 pvgs_client = { path = "../pvgs_client" }
 trm = { path = "../trm" }
 ucf-protocol = { workspace = true }
+suspension = { path = "../suspension" }
+
+[dev-dependencies]
+pbm = { path = "../pbm" }
+control = { path = "../control" }

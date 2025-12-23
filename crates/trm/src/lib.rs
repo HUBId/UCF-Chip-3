@@ -101,7 +101,16 @@ impl ToolRegistry {
         registry_version: &str,
         created_at_ms: u64,
     ) -> ucf::v1::ToolRegistryContainer {
-        let mut tool_actions: Vec<_> = self.entries.values().cloned().collect();
+        let mut tool_actions: Vec<_> = self
+            .entries
+            .values()
+            .filter(|tap| {
+                !self
+                    .suspended
+                    .contains(&(tap.tool_id.clone(), tap.action_id.clone()))
+            })
+            .cloned()
+            .collect();
         tool_actions.sort_by(|a, b| {
             let tool_cmp = a.tool_id.cmp(&b.tool_id);
             if tool_cmp == std::cmp::Ordering::Equal {
@@ -291,6 +300,28 @@ mod tests {
     }
 
     #[test]
+    fn suspended_actions_are_excluded_from_registry_container() {
+        let mut registry = registry_fixture();
+        registry.suspend("mock.read", "get");
+
+        let container = registry.build_registry_container("registry", "v1", 123);
+        let verbs: Vec<_> = container
+            .tool_actions
+            .iter()
+            .map(|tap| format!("{}/{}", tap.tool_id, tap.action_id))
+            .collect();
+
+        assert!(!verbs.contains(&"mock.read/get".to_string()));
+        assert_eq!(
+            verbs,
+            vec![
+                "mock.export/render".to_string(),
+                "mock.write/apply".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn deterministic_registry_digest() {
         let registry_one = registry_fixture();
         let registry_two = {
@@ -360,5 +391,26 @@ mod tests {
             canonical_bytes(&container_one),
             canonical_bytes(&container_two)
         );
+    }
+
+    #[test]
+    fn deterministic_registry_digest_ignores_suspensions_order() {
+        let mut registry_one = registry_fixture();
+        registry_one.suspend("mock.read", "get");
+        registry_one.suspend("mock.write", "apply");
+
+        let mut registry_two = registry_fixture();
+        registry_two.suspend("mock.write", "apply");
+        registry_two.suspend("mock.read", "get");
+
+        let container_one = registry_one.build_registry_container("registry", "v1", 123);
+        let container_two = registry_two.build_registry_container("registry", "v1", 123);
+
+        assert_eq!(container_one.registry_digest, container_two.registry_digest);
+        assert_eq!(
+            canonical_bytes(&container_one),
+            canonical_bytes(&container_two)
+        );
+        assert_eq!(container_one.tool_actions.len(), 1);
     }
 }
