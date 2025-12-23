@@ -24,6 +24,7 @@ pub fn make_control_frame(
         toolclass_mask: Some(mask),
         deescalation_lock: false,
         reason_codes: None,
+        evidence_refs: Vec::new(),
     };
 
     let digest = control_frame_digest(&frame);

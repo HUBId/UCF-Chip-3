@@ -39,6 +39,7 @@ const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
 const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
 const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
 const POLICY_DECISION_REF: &str = "policy_decision";
+const MAX_RELATED_REFS: usize = 8;
 
 /// Maps policy query digests to their corresponding decision digests to detect replay mismatches.
 #[derive(Debug, Default, Clone)]
@@ -207,6 +208,19 @@ pub struct DecisionContext {
     pub tool_profile_digest: Option<[u8; 32]>,
     pub commit_disposition: DecisionCommitDisposition,
     pub receipt_digest: Option<[u8; 32]>,
+    pub(crate) micro_evidence: MicroEvidence,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MicroEvidence {
+    lc_digest: Option<[u8; 32]>,
+    sn_digest: Option<[u8; 32]>,
+}
+
+impl MicroEvidence {
+    fn is_empty(&self) -> bool {
+        self.lc_digest.is_none() && self.sn_digest.is_none()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -342,6 +356,7 @@ impl Gate {
                 .and_then(digest32_to_array),
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            micro_evidence: micro_evidence_from_control_frame(&control_frame),
         };
 
         if let Err(result) =
@@ -1176,6 +1191,65 @@ fn digest32_to_array(d: &ucf::v1::Digest32) -> Option<[u8; 32]> {
     }
 }
 
+fn micro_evidence_from_control_frame(control_frame: &ucf::v1::ControlFrame) -> MicroEvidence {
+    let mut evidence = MicroEvidence::default();
+    for related in &control_frame.evidence_refs {
+        match related.id.as_str() {
+            "mc:lc" if evidence.lc_digest.is_none() => {
+                evidence.lc_digest = related.digest.as_ref().and_then(digest32_to_array);
+            }
+            "mc:sn" if evidence.sn_digest.is_none() => {
+                evidence.sn_digest = related.digest.as_ref().and_then(digest32_to_array);
+            }
+            _ => {}
+        }
+    }
+
+    if evidence.is_empty() {
+        if let Some(fallback) = test_only_micro_evidence_fallback() {
+            evidence = fallback;
+        }
+    }
+
+    evidence
+}
+
+fn test_only_micro_evidence_fallback() -> Option<MicroEvidence> {
+    #[cfg(test)]
+    {
+        micro_evidence_fallback::read_micro_evidence()
+    }
+    #[cfg(not(test))]
+    {
+        // TODO: prefer ControlFrame evidence_refs in production; add EngineSnapshot reader fallback.
+        None
+    }
+}
+
+fn push_related_ref(related_refs: &mut Vec<ucf::v1::RelatedRef>, related_ref: ucf::v1::RelatedRef) {
+    if related_refs.len() < MAX_RELATED_REFS {
+        related_refs.push(related_ref);
+    }
+}
+
+fn micro_related_ref(id: &str, digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: id.to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+    }
+}
+
+fn append_micro_evidence_refs(related_refs: &mut Vec<ucf::v1::RelatedRef>, micro: MicroEvidence) {
+    if let Some(digest) = micro.lc_digest {
+        push_related_ref(related_refs, micro_related_ref("mc:lc", digest));
+    }
+    if let Some(digest) = micro.sn_digest {
+        push_related_ref(related_refs, micro_related_ref("mc:sn", digest));
+    }
+}
+
 fn ensure_dlp_decision_digest(decision: &mut ucf::v1::DlpDecision) {
     if let Some(rc) = decision.reason_codes.as_mut() {
         rc.codes.sort();
@@ -1236,20 +1310,27 @@ fn build_decision_record(
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
 
     let mut related_refs = vec![policy_query_related_ref(decision_ctx.policy_query_digest)];
-    related_refs.push(ucf::v1::RelatedRef {
-        id: POLICY_DECISION_REF.to_string(),
-        digest: Some(ucf::v1::Digest32 {
-            value: decision_ctx.decision_digest.to_vec(),
-        }),
-    });
-    if let Some(ruleset_digest) = decision.ruleset_digest {
-        related_refs.push(ucf::v1::RelatedRef {
-            id: "ruleset".to_string(),
+    push_related_ref(
+        &mut related_refs,
+        ucf::v1::RelatedRef {
+            id: POLICY_DECISION_REF.to_string(),
             digest: Some(ucf::v1::Digest32 {
-                value: ruleset_digest.to_vec(),
+                value: decision_ctx.decision_digest.to_vec(),
             }),
-        });
+        },
+    );
+    if let Some(ruleset_digest) = decision.ruleset_digest {
+        push_related_ref(
+            &mut related_refs,
+            ucf::v1::RelatedRef {
+                id: "ruleset".to_string(),
+                digest: Some(ucf::v1::Digest32 {
+                    value: ruleset_digest.to_vec(),
+                }),
+            },
+        );
     }
+    append_micro_evidence_refs(&mut related_refs, decision_ctx.micro_evidence);
 
     ucf::v1::ExperienceRecord {
         record_type: ucf::v1::RecordType::Decision.into(),
@@ -1285,12 +1366,19 @@ fn build_action_exec_record(
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
     let mut related_refs = vec![policy_query_related_ref(decision_ctx.policy_query_digest)];
-    related_refs.push(decision_related_ref(decision_ctx.decision_digest));
+    push_related_ref(
+        &mut related_refs,
+        decision_related_ref(decision_ctx.decision_digest),
+    );
     if let Some(ruleset_digest) = decision_ctx.ruleset_digest {
-        related_refs.push(ruleset_related_ref(ruleset_digest));
+        push_related_ref(&mut related_refs, ruleset_related_ref(ruleset_digest));
     }
+    append_micro_evidence_refs(&mut related_refs, decision_ctx.micro_evidence);
     if let Some(receipt_digest) = decision_ctx.receipt_digest {
-        related_refs.push(decision_receipt_related_ref(receipt_digest));
+        push_related_ref(
+            &mut related_refs,
+            decision_receipt_related_ref(receipt_digest),
+        );
     }
 
     ucf::v1::ExperienceRecord {
@@ -1615,6 +1703,48 @@ fn is_side_effect_action(action_type: ucf::v1::ToolActionType) -> bool {
             | ucf::v1::ToolActionType::Execute
             | ucf::v1::ToolActionType::Export
     )
+}
+
+#[cfg(test)]
+mod micro_evidence_fallback {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone)]
+    pub struct EngineSnapshot {
+        pub lc_digest: Option<[u8; 32]>,
+        pub sn_digest: Option<[u8; 32]>,
+    }
+
+    pub trait Chip2Reader: Send + Sync {
+        fn get_engine_snapshot(&self) -> Option<EngineSnapshot>;
+    }
+
+    #[derive(Default)]
+    pub struct TestChip2Reader;
+
+    static SNAPSHOT: Mutex<Option<EngineSnapshot>> = Mutex::new(None);
+
+    impl TestChip2Reader {
+        pub fn set_snapshot(snapshot: Option<EngineSnapshot>) {
+            *SNAPSHOT.lock().expect("engine snapshot lock") = snapshot;
+        }
+    }
+
+    impl Chip2Reader for TestChip2Reader {
+        fn get_engine_snapshot(&self) -> Option<EngineSnapshot> {
+            SNAPSHOT.lock().expect("engine snapshot lock").clone()
+        }
+    }
+
+    pub fn read_micro_evidence() -> Option<MicroEvidence> {
+        let reader = TestChip2Reader::default();
+        let snapshot = reader.get_engine_snapshot()?;
+        Some(MicroEvidence {
+            lc_digest: snapshot.lc_digest,
+            sn_digest: snapshot.sn_digest,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2505,6 +2635,7 @@ mod tests {
             }),
             deescalation_lock: false,
             reason_codes: None,
+            evidence_refs: Vec::new(),
         }
     }
 
@@ -2537,6 +2668,7 @@ mod tests {
             }),
             deescalation_lock: true,
             reason_codes: None,
+            evidence_refs: Vec::new(),
         }
     }
 
@@ -2559,7 +2691,24 @@ mod tests {
             }),
             deescalation_lock: false,
             reason_codes: None,
+            evidence_refs: Vec::new(),
         }
+    }
+
+    fn control_frame_with_micro_evidence(
+        lc_digest: Option<[u8; 32]>,
+        sn_digest: Option<[u8; 32]>,
+    ) -> ucf::v1::ControlFrame {
+        let mut frame = control_frame_open();
+        let mut refs = Vec::new();
+        if let Some(digest) = lc_digest {
+            refs.push(micro_related_ref("mc:lc", digest));
+        }
+        if let Some(digest) = sn_digest {
+            refs.push(micro_related_ref("mc:sn", digest));
+        }
+        frame.evidence_refs = refs;
+        frame
     }
 
     fn base_action(tool: &str, action_id: &str) -> ucf::v1::ActionSpec {
@@ -2980,6 +3129,7 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: Some([4u8; 32]),
+            micro_evidence: MicroEvidence::default(),
         };
 
         let decision_record = build_decision_record(&decision, &decision_ctx);
@@ -3029,6 +3179,308 @@ mod tests {
                 "decision_record_receipt".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn decision_record_includes_micro_refs() {
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+        let policy_query_digest = policy_query_digest(&policy_query);
+        let decision_digest = [2u8; 32];
+        let ruleset_digest = Some([3u8; 32]);
+        let decision = PolicyDecisionRecord {
+            decision_id: "sid:step".to_string(),
+            form: DecisionForm::Allow,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            policy_query_digest,
+            decision_digest,
+            pev_digest: None,
+            ruleset_digest,
+            policy_version_digest: String::new(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let control_frame = control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]));
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest,
+            ruleset_digest,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: None,
+            micro_evidence: micro_evidence_from_control_frame(&control_frame),
+        };
+
+        let decision_record = build_decision_record(&decision, &decision_ctx);
+        let decision_ids: Vec<_> = decision_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(
+            decision_ids,
+            vec![
+                "policy_query",
+                POLICY_DECISION_REF,
+                "ruleset",
+                "mc:lc",
+                "mc:sn",
+            ]
+        );
+
+        let lc_ref = decision_record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "mc:lc")
+            .and_then(|r| r.digest.as_ref())
+            .expect("mc:lc related ref");
+        assert_eq!(lc_ref.value, vec![11u8; 32]);
+
+        let sn_ref = decision_record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "mc:sn")
+            .and_then(|r| r.digest.as_ref())
+            .expect("mc:sn related ref");
+        assert_eq!(sn_ref.value, vec![12u8; 32]);
+    }
+
+    #[test]
+    fn action_exec_record_includes_micro_refs() {
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+
+        let policy_query_digest = policy_query_digest(&policy_query);
+        let decision_digest = [2u8; 32];
+        let ruleset_digest = Some([3u8; 32]);
+        let decision = PolicyDecisionRecord {
+            decision_id: "sid:step".to_string(),
+            form: DecisionForm::Allow,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            policy_query_digest,
+            decision_digest,
+            pev_digest: None,
+            ruleset_digest,
+            policy_version_digest: String::new(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let control_frame = control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]));
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest,
+            ruleset_digest,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: Some([4u8; 32]),
+            micro_evidence: micro_evidence_from_control_frame(&control_frame),
+        };
+
+        let action_record = build_action_exec_record(
+            &base_action("mock.read", "get"),
+            [7u8; 32],
+            &decision,
+            &ucf::v1::OutcomePacket {
+                outcome_id: "oid".to_string(),
+                request_id: "sid:step".to_string(),
+                status: ucf::v1::OutcomeStatus::Success.into(),
+                payload: Vec::new(),
+                payload_digest: None,
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
+            },
+            &control_frame_open(),
+            &ok_ctx(),
+            &decision_ctx,
+        );
+
+        let action_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(
+            action_ids,
+            vec![
+                "policy_query",
+                "decision",
+                "ruleset",
+                "mc:lc",
+                "mc:sn",
+                "decision_record_receipt",
+            ]
+        );
+    }
+
+    #[test]
+    fn micro_refs_omitted_when_absent() {
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+
+        let policy_query_digest = policy_query_digest(&policy_query);
+        let decision = PolicyDecisionRecord {
+            decision_id: "sid:step".to_string(),
+            form: DecisionForm::Allow,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            policy_query_digest,
+            decision_digest: [2u8; 32],
+            pev_digest: None,
+            ruleset_digest: Some([3u8; 32]),
+            policy_version_digest: String::new(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest: decision.decision_digest,
+            ruleset_digest: decision.ruleset_digest,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: None,
+            micro_evidence: micro_evidence_from_control_frame(&control_frame_open()),
+        };
+
+        let decision_record = build_decision_record(&decision, &decision_ctx);
+        assert!(decision_record
+            .related_refs
+            .iter()
+            .all(|r| r.id != "mc:lc" && r.id != "mc:sn"));
+    }
+
+    #[test]
+    fn micro_refs_are_deterministic() {
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+
+        let policy_query_digest = policy_query_digest(&policy_query);
+        let decision = PolicyDecisionRecord {
+            decision_id: "sid:step".to_string(),
+            form: DecisionForm::Allow,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            policy_query_digest,
+            decision_digest: [2u8; 32],
+            pev_digest: None,
+            ruleset_digest: Some([3u8; 32]),
+            policy_version_digest: String::new(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let control_frame = control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]));
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest: decision.decision_digest,
+            ruleset_digest: decision.ruleset_digest,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: None,
+            micro_evidence: micro_evidence_from_control_frame(&control_frame),
+        };
+
+        let record_a = build_decision_record(&decision, &decision_ctx);
+        let record_b = build_decision_record(&decision, &decision_ctx);
+
+        assert_eq!(canonical_bytes(&record_a), canonical_bytes(&record_b));
+    }
+
+    #[test]
+    fn micro_refs_use_snapshot_fallback_in_tests() {
+        micro_evidence_fallback::TestChip2Reader::set_snapshot(Some(
+            micro_evidence_fallback::EngineSnapshot {
+                lc_digest: Some([21u8; 32]),
+                sn_digest: Some([22u8; 32]),
+            },
+        ));
+
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: ucf::v1::PolicyQuery {
+                principal: "chip3".to_string(),
+                action: Some(base_action("mock.read", "get")),
+                channel: ucf::v1::Channel::Unspecified.into(),
+                risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
+            },
+            policy_query_digest: [1u8; 32],
+            policy_decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            decision_digest: [2u8; 32],
+            ruleset_digest: None,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: None,
+            micro_evidence: micro_evidence_from_control_frame(&control_frame_open()),
+        };
+
+        assert_eq!(decision_ctx.micro_evidence.lc_digest, Some([21u8; 32]));
+        assert_eq!(decision_ctx.micro_evidence.sn_digest, Some([22u8; 32]));
+
+        micro_evidence_fallback::TestChip2Reader::set_snapshot(None);
     }
 
     #[test]
@@ -3120,6 +3572,7 @@ mod tests {
             tool_profile_digest,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            micro_evidence: MicroEvidence::default(),
         };
 
         let req_a = gate.build_execution_request(

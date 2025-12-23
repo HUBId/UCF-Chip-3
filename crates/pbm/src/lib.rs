@@ -431,6 +431,7 @@ mod tests {
             }),
             deescalation_lock: false,
             reason_codes: None,
+            evidence_refs: Vec::new(),
         }
     }
 

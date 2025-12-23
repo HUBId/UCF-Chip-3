@@ -67,6 +67,7 @@ impl ControlFrameStore {
             reason_codes: Some(ucf::v1::ReasonCodes {
                 codes: vec!["RC.RE.INTEGRITY.DEGRADED".to_string()],
             }),
+            evidence_refs: Vec::new(),
         }
     }
 }
@@ -95,6 +96,7 @@ mod tests {
             }),
             deescalation_lock: false,
             reason_codes: None,
+            evidence_refs: Vec::new(),
         }
     }
 

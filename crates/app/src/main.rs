@@ -329,6 +329,7 @@ fn control_frame_m0() -> ucf::v1::ControlFrame {
         }),
         deescalation_lock: false,
         reason_codes: None,
+        evidence_refs: Vec::new(),
     }
 }
 
@@ -351,5 +352,6 @@ fn control_frame_m1() -> ucf::v1::ControlFrame {
         }),
         deescalation_lock: true,
         reason_codes: None,
+        evidence_refs: Vec::new(),
     }
 }
