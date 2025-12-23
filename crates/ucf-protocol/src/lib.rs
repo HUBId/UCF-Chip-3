@@ -44,6 +44,41 @@ pub mod ucf {
             pub trigger_reason_codes: ::core::option::Option<ReasonCodes>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct MicrocircuitConfigEvidence {
+            #[prost(enumeration = "MicroModule", tag = "1")]
+            pub module: i32,
+            #[prost(uint64, tag = "2")]
+            pub version: u64,
+            #[prost(message, optional, tag = "3")]
+            pub config_digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum MicroModule {
+            Unspecified = 0,
+            Lc = 1,
+            Sn = 2,
+        }
+        impl MicroModule {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    MicroModule::Unspecified => "MICRO_MODULE_UNSPECIFIED",
+                    MicroModule::Lc => "MICRO_MODULE_LC",
+                    MicroModule::Sn => "MICRO_MODULE_SN",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "MICRO_MODULE_UNSPECIFIED" => Some(Self::Unspecified),
+                    "MICRO_MODULE_LC" => Some(Self::Lc),
+                    "MICRO_MODULE_SN" => Some(Self::Sn),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ReasonCodes {
             #[prost(string, repeated, tag = "1")]
             pub codes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
