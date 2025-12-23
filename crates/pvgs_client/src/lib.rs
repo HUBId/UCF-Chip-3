@@ -119,6 +119,11 @@ pub trait PvgsClient: Send + Sync {
         trc: ucf::v1::ToolRegistryContainer,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 
+    fn commit_tool_onboarding_event(
+        &mut self,
+        event: ucf::v1::ToolOnboardingEvent,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
+
     fn commit_micro_milestone(
         &mut self,
         micro: ucf::v1::MicroMilestone,
@@ -366,6 +371,15 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(self.pvgs.commit_tool_registry(trc))
     }
 
+    fn commit_tool_onboarding_event(
+        &mut self,
+        _event: ucf::v1::ToolOnboardingEvent,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        Err(PvgsClientError::CommitFailed(
+            "tool onboarding events not supported".to_string(),
+        ))
+    }
+
     fn commit_micro_milestone(
         &mut self,
         micro: ucf::v1::MicroMilestone,
@@ -511,6 +525,8 @@ pub struct LocalPvgsClient {
     pub committed_dlp_bytes: Vec<Vec<u8>>,
     pub committed_tool_registries: Vec<ucf::v1::ToolRegistryContainer>,
     pub committed_registry_bytes: Vec<Vec<u8>>,
+    pub committed_tool_onboarding_events: Vec<ucf::v1::ToolOnboardingEvent>,
+    pub committed_tool_onboarding_bytes: Vec<Vec<u8>>,
     pub committed_micro_milestones: Vec<ucf::v1::MicroMilestone>,
     pub committed_micro_bytes: Vec<Vec<u8>>,
     pub committed_consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
@@ -541,6 +557,8 @@ impl Default for LocalPvgsClient {
             committed_dlp_bytes: Vec::new(),
             committed_tool_registries: Vec::new(),
             committed_registry_bytes: Vec::new(),
+            committed_tool_onboarding_events: Vec::new(),
+            committed_tool_onboarding_bytes: Vec::new(),
             committed_micro_milestones: Vec::new(),
             committed_micro_bytes: Vec::new(),
             committed_consistency_feedback: Vec::new(),
@@ -749,6 +767,65 @@ impl PvgsClient for LocalPvgsClient {
                 if reject_reason_codes.is_empty() {
                     reject_reason_codes.push("RC.GV.TOOL_REGISTRY.REJECTED".to_string());
                 }
+                reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
+    fn commit_tool_onboarding_event(
+        &mut self,
+        mut event: ucf::v1::ToolOnboardingEvent,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        if event.event_digest.is_none() {
+            let digest = ucf_protocol::digest_proto(
+                "UCF:HASH:TOOL_ONBOARDING_EVENT",
+                &ucf_protocol::canonical_bytes(&event),
+            );
+            event.event_digest = Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            });
+        }
+
+        let bytes = ucf_protocol::canonical_bytes(&event);
+        let event_digest: [u8; 32] = event
+            .event_digest
+            .as_ref()
+            .and_then(|d| d.value.clone().try_into().ok())
+            .unwrap_or([0u8; 32]);
+
+        let status = self.default_status;
+        let mut reject_reason_codes = self.reject_reason_codes.clone();
+        if status == ucf::v1::ReceiptStatus::Rejected && reject_reason_codes.is_empty() {
+            reject_reason_codes.push("RC.RE.SCHEMA.INVALID".to_string());
+        }
+
+        self.committed_tool_onboarding_events.push(event.clone());
+        self.committed_tool_onboarding_bytes.push(bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!(
+                "pvgs-local-tool-onboarding-{}",
+                self.committed_tool_onboarding_events.len()
+            ),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: event_digest.to_vec(),
+            }),
+            status: status.into(),
+            action_digest: None,
+            decision_digest: event.event_digest.clone(),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
                 reject_reason_codes
             } else {
                 Vec::new()
@@ -1062,6 +1139,7 @@ fn build_micro_milestone(
 pub enum MockCommitStage {
     Micro,
     Meso,
+    ToolOnboarding,
     Consistency,
     MacroPropose,
     MacroFinalize,
@@ -1084,6 +1162,7 @@ pub struct MockPvgsClient {
     pub consumed_replay_ids: Vec<String>,
     pub pending_replay_plan_calls: u64,
     pub experience_commit_statuses: Vec<ucf::v1::ReceiptStatus>,
+    pub committed_tool_onboarding_events: Vec<ucf::v1::ToolOnboardingEvent>,
     pub committed_consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     pub macro_consistency_digests: Vec<Option<[u8; 32]>>,
     pub proposed_macros: VecDeque<ProposedMacroInfo>,
@@ -1332,6 +1411,25 @@ impl PvgsClient for MockPvgsClient {
         trc: ucf::v1::ToolRegistryContainer,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         self.local.commit_tool_registry(trc)
+    }
+
+    fn commit_tool_onboarding_event(
+        &mut self,
+        event: ucf::v1::ToolOnboardingEvent,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.last_call_order.push(MockCommitStage::ToolOnboarding);
+        if self.reject_stage == Some(MockCommitStage::ToolOnboarding) {
+            return Err(PvgsClientError::CommitFailed(
+                if self.reject_reason.is_empty() {
+                    "RC.RE.INTEGRITY.DEGRADED".to_string()
+                } else {
+                    self.reject_reason.clone()
+                },
+            ));
+        }
+
+        self.committed_tool_onboarding_events.push(event.clone());
+        self.local.commit_tool_onboarding_event(event)
     }
 
     fn commit_micro_milestone(

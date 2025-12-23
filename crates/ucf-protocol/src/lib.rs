@@ -402,6 +402,15 @@ pub mod ucf {
             pub attestation_sig: ::core::option::Option<Signature>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ToolOnboardingEvent {
+            #[prost(string, tag = "1")]
+            pub event_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub event_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "3")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ActionProgram {
             #[prost(message, repeated, tag = "1")]
             pub steps: ::prost::alloc::vec::Vec<ActionSpec>,
