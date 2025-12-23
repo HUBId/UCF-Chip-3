@@ -22,3 +22,4 @@ ckm_orchestrator = { path = "../ckm_orchestrator" }
 [dev-dependencies]
 chip4-pvgs = { path = "../../tests/chip4-pvgs" }
 ucf-test-utils = { path = "../test-utils" }
+walkdir = "2"
