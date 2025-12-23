@@ -209,6 +209,7 @@ pub struct DecisionContext {
     pub commit_disposition: DecisionCommitDisposition,
     pub receipt_digest: Option<[u8; 32]>,
     pub(crate) micro_evidence: MicroEvidence,
+    pub(crate) microcircuit_config_refs: MicrocircuitConfigRefs,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -221,6 +222,12 @@ impl MicroEvidence {
     fn is_empty(&self) -> bool {
         self.lc_digest.is_none() && self.sn_digest.is_none()
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MicrocircuitConfigRefs {
+    lc_digest: Option<[u8; 32]>,
+    sn_digest: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy)]
@@ -357,6 +364,7 @@ impl Gate {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
+            microcircuit_config_refs: microcircuit_config_refs_from_pvgs(&self.pvgs_client),
         };
 
         if let Err(result) =
@@ -1214,6 +1222,30 @@ fn micro_evidence_from_control_frame(control_frame: &ucf::v1::ControlFrame) -> M
     evidence
 }
 
+fn microcircuit_config_refs_from_pvgs(
+    pvgs_client: &Arc<Mutex<Box<dyn PvgsClientReader>>>,
+) -> MicrocircuitConfigRefs {
+    let Ok(pvgs) = pvgs_client.lock() else {
+        return MicrocircuitConfigRefs::default();
+    };
+
+    let lc = pvgs
+        .get_microcircuit_config(ucf::v1::MicroModule::Lc)
+        .ok()
+        .flatten()
+        .and_then(|config| config.config_digest.as_ref().and_then(digest32_to_array));
+    let sn = pvgs
+        .get_microcircuit_config(ucf::v1::MicroModule::Sn)
+        .ok()
+        .flatten()
+        .and_then(|config| config.config_digest.as_ref().and_then(digest32_to_array));
+
+    MicrocircuitConfigRefs {
+        lc_digest: lc,
+        sn_digest: sn,
+    }
+}
+
 fn test_only_micro_evidence_fallback() -> Option<MicroEvidence> {
     #[cfg(test)]
     {
@@ -1247,6 +1279,18 @@ fn append_micro_evidence_refs(related_refs: &mut Vec<ucf::v1::RelatedRef>, micro
     }
     if let Some(digest) = micro.sn_digest {
         push_related_ref(related_refs, micro_related_ref("mc:sn", digest));
+    }
+}
+
+fn append_microcircuit_config_refs(
+    related_refs: &mut Vec<ucf::v1::RelatedRef>,
+    micro_configs: MicrocircuitConfigRefs,
+) {
+    if let Some(digest) = micro_configs.lc_digest {
+        push_related_ref(related_refs, micro_related_ref("mc_cfg:lc", digest));
+    }
+    if let Some(digest) = micro_configs.sn_digest {
+        push_related_ref(related_refs, micro_related_ref("mc_cfg:sn", digest));
     }
 }
 
@@ -1331,6 +1375,7 @@ fn build_decision_record(
         );
     }
     append_micro_evidence_refs(&mut related_refs, decision_ctx.micro_evidence);
+    append_microcircuit_config_refs(&mut related_refs, decision_ctx.microcircuit_config_refs);
 
     ucf::v1::ExperienceRecord {
         record_type: ucf::v1::RecordType::Decision.into(),
@@ -1374,6 +1419,7 @@ fn build_action_exec_record(
         push_related_ref(&mut related_refs, ruleset_related_ref(ruleset_digest));
     }
     append_micro_evidence_refs(&mut related_refs, decision_ctx.micro_evidence);
+    append_microcircuit_config_refs(&mut related_refs, decision_ctx.microcircuit_config_refs);
     if let Some(receipt_digest) = decision_ctx.receipt_digest {
         push_related_ref(
             &mut related_refs,
@@ -3130,6 +3176,7 @@ mod tests {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: Some([4u8; 32]),
             micro_evidence: MicroEvidence::default(),
+            microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
 
         let decision_record = build_decision_record(&decision, &decision_ctx);
@@ -3224,6 +3271,7 @@ mod tests {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
+            microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
 
         let decision_record = build_decision_record(&decision, &decision_ctx);
@@ -3258,6 +3306,113 @@ mod tests {
             .and_then(|r| r.digest.as_ref())
             .expect("mc:sn related ref");
         assert_eq!(sn_ref.value, vec![12u8; 32]);
+    }
+
+    #[test]
+    fn decision_record_includes_microcircuit_config_refs_in_order() {
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+        let policy_query_digest = policy_query_digest(&policy_query);
+        let decision_digest = [2u8; 32];
+        let ruleset_digest = Some([3u8; 32]);
+        let decision = PolicyDecisionRecord {
+            decision_id: "sid:step".to_string(),
+            form: DecisionForm::Allow,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            policy_query_digest,
+            decision_digest,
+            pev_digest: None,
+            ruleset_digest,
+            policy_version_digest: String::new(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest,
+            ruleset_digest,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: None,
+            micro_evidence: MicroEvidence {
+                lc_digest: Some([11u8; 32]),
+                sn_digest: Some([12u8; 32]),
+            },
+            microcircuit_config_refs: MicrocircuitConfigRefs {
+                lc_digest: Some([21u8; 32]),
+                sn_digest: Some([22u8; 32]),
+            },
+        };
+
+        let decision_record = build_decision_record(&decision, &decision_ctx);
+        let decision_ids: Vec<_> = decision_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(
+            decision_ids,
+            vec![
+                "policy_query",
+                POLICY_DECISION_REF,
+                "ruleset",
+                "mc:lc",
+                "mc:sn",
+                "mc_cfg:lc",
+                "mc_cfg:sn",
+            ]
+        );
+
+        let action_record = build_action_exec_record(
+            &base_action("mock.read", "get"),
+            [7u8; 32],
+            &decision,
+            &ucf::v1::OutcomePacket {
+                outcome_id: "oid".to_string(),
+                request_id: "sid:step".to_string(),
+                status: ucf::v1::OutcomeStatus::Success.into(),
+                payload: Vec::new(),
+                payload_digest: None,
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
+            },
+            &control_frame_open(),
+            &ok_ctx(),
+            &decision_ctx,
+        );
+
+        let action_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(
+            action_ids,
+            vec![
+                "policy_query",
+                "decision",
+                "ruleset",
+                "mc:lc",
+                "mc:sn",
+                "mc_cfg:lc",
+                "mc_cfg:sn",
+            ]
+        );
     }
 
     #[test]
@@ -3304,6 +3459,7 @@ mod tests {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: Some([4u8; 32]),
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
+            microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
 
         let action_record = build_action_exec_record(
@@ -3383,6 +3539,7 @@ mod tests {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
             micro_evidence: micro_evidence_from_control_frame(&control_frame_open()),
+            microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
 
         let decision_record = build_decision_record(&decision, &decision_ctx);
@@ -3434,6 +3591,7 @@ mod tests {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
+            microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
 
         let record_a = build_decision_record(&decision, &decision_ctx);
@@ -3475,6 +3633,7 @@ mod tests {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
             micro_evidence: micro_evidence_from_control_frame(&control_frame_open()),
+            microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
 
         assert_eq!(decision_ctx.micro_evidence.lc_digest, Some([21u8; 32]));
@@ -3573,6 +3732,7 @@ mod tests {
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
             micro_evidence: MicroEvidence::default(),
+            microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
 
         let req_a = gate.build_execution_request(

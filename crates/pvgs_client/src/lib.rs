@@ -172,6 +172,18 @@ pub trait PvgsReader: Send + Sync {
     fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector>;
     fn get_latest_pev_digest(&self) -> Option<[u8; 32]>;
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]>;
+    fn get_microcircuit_config(
+        &self,
+        module: ucf::v1::MicroModule,
+    ) -> Result<Option<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        let _ = module;
+        Ok(None)
+    }
+    fn list_microcircuit_configs(
+        &self,
+    ) -> Result<Vec<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        Ok(Vec::new())
+    }
 
     fn get_recovery_state(&self, session_id: &str) -> Result<Option<String>, PvgsClientError> {
         let _ = session_id;
@@ -228,7 +240,7 @@ impl From<ucf::v1::ReplayPlan> for InspectorReplayPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InspectorDump {
     pub ruleset_digest: Option<[u8; 32]>,
     pub sealed: bool,
@@ -236,6 +248,7 @@ pub struct InspectorDump {
     pub recovery_state: Option<String>,
     pub cbv_digest: Option<CbvDigest>,
     pub pev_digest: Option<[u8; 32]>,
+    pub microcircuit_configs: Vec<ucf::v1::MicrocircuitConfigEvidence>,
     pub replay_plans: Vec<InspectorReplayPlan>,
 }
 
@@ -263,6 +276,29 @@ where
             .collect();
         replay_plans.sort_by(|a, b| a.replay_id.cmp(&b.replay_id));
 
+        let mut microcircuit_configs = self.pvgs.list_microcircuit_configs()?;
+        microcircuit_configs.sort_by(|a, b| {
+            let module_cmp = a.module.cmp(&b.module);
+            if module_cmp != std::cmp::Ordering::Equal {
+                return module_cmp;
+            }
+            let version_cmp = a.version.cmp(&b.version);
+            if version_cmp != std::cmp::Ordering::Equal {
+                return version_cmp;
+            }
+            let a_digest = a
+                .config_digest
+                .as_ref()
+                .map(|digest| digest.value.as_slice())
+                .unwrap_or_default();
+            let b_digest = b
+                .config_digest
+                .as_ref()
+                .map(|digest| digest.value.as_slice())
+                .unwrap_or_default();
+            a_digest.cmp(b_digest)
+        });
+
         Ok(InspectorDump {
             ruleset_digest: self.pvgs.get_current_ruleset_digest(),
             sealed: self.pvgs.is_session_sealed(session_id)?,
@@ -270,6 +306,7 @@ where
             recovery_state: self.pvgs.get_recovery_state(session_id)?,
             cbv_digest: self.pvgs.get_latest_cbv_digest(),
             pev_digest: self.pvgs.get_latest_pev_digest(),
+            microcircuit_configs,
             replay_plans,
         })
     }
@@ -296,8 +333,24 @@ where
             format!("recovery_state: {recovery_state}"),
             format!("cbv: epoch={cbv_epoch} digest={cbv_digest}"),
             format!("pev_digest: {pev_digest}"),
-            format!("pending_replay_plans: {}", dump.replay_plans.len()),
+            format!("microcircuit_configs: {}", dump.microcircuit_configs.len()),
         ];
+
+        for config in &dump.microcircuit_configs {
+            let module = match ucf::v1::MicroModule::try_from(config.module) {
+                Ok(ucf::v1::MicroModule::Lc) => "LC",
+                Ok(ucf::v1::MicroModule::Sn) => "SN",
+                _ => "UNSPECIFIED",
+            };
+            let digest = config.config_digest.as_ref().and_then(digest32_to_array);
+            let digest = format_optional_digest(digest);
+            lines.push(format!(
+                "- {module}: version={} digest={digest}",
+                config.version
+            ));
+        }
+
+        lines.push(format!("pending_replay_plans: {}", dump.replay_plans.len()));
 
         for plan in &dump.replay_plans {
             let replay_digest = format_optional_digest(plan.replay_digest);
@@ -483,6 +536,19 @@ impl PvgsReader for Chip4LocalPvgsClient {
         None
     }
 
+    fn get_microcircuit_config(
+        &self,
+        module: ucf::v1::MicroModule,
+    ) -> Result<Option<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        Ok(self.pvgs.get_microcircuit_config(module))
+    }
+
+    fn list_microcircuit_configs(
+        &self,
+    ) -> Result<Vec<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        Ok(self.pvgs.list_microcircuit_configs())
+    }
+
     fn get_recovery_state(&self, _session_id: &str) -> Result<Option<String>, PvgsClientError> {
         Ok(None)
     }
@@ -540,6 +606,7 @@ pub struct LocalPvgsClient {
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
     unlock_permits: HashMap<String, Option<[u8; 32]>>,
     recovery_states: HashMap<String, Option<String>>,
+    microcircuit_configs: Vec<ucf::v1::MicrocircuitConfigEvidence>,
 }
 
 impl Default for LocalPvgsClient {
@@ -572,6 +639,7 @@ impl Default for LocalPvgsClient {
             sealed_sessions: HashMap::new(),
             unlock_permits: HashMap::new(),
             recovery_states: HashMap::new(),
+            microcircuit_configs: Vec::new(),
         }
     }
 }
@@ -611,6 +679,12 @@ impl LocalPvgsClient {
 
     pub fn set_recovery_state(&mut self, session_id: impl Into<String>, state: Option<String>) {
         self.recovery_states.insert(session_id.into(), state);
+    }
+
+    pub fn set_microcircuit_config(&mut self, config: ucf::v1::MicrocircuitConfigEvidence) {
+        self.microcircuit_configs
+            .retain(|existing| existing.module != config.module);
+        self.microcircuit_configs.push(config);
     }
 }
 
@@ -1058,6 +1132,24 @@ impl PvgsReader for LocalPvgsClient {
         None
     }
 
+    fn get_microcircuit_config(
+        &self,
+        module: ucf::v1::MicroModule,
+    ) -> Result<Option<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        let module = module as i32;
+        Ok(self
+            .microcircuit_configs
+            .iter()
+            .find(|config| config.module == module)
+            .cloned())
+    }
+
+    fn list_microcircuit_configs(
+        &self,
+    ) -> Result<Vec<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        Ok(self.microcircuit_configs.clone())
+    }
+
     fn get_recovery_state(&self, session_id: &str) -> Result<Option<String>, PvgsClientError> {
         Ok(self.recovery_states.get(session_id).cloned().flatten())
     }
@@ -1175,6 +1267,7 @@ pub struct MockPvgsClient {
     pub unlock_permit: bool,
     pub unlock_permit_digest: Option<[u8; 32]>,
     pub recovery_state: Option<String>,
+    pub microcircuit_configs: Vec<ucf::v1::MicrocircuitConfigEvidence>,
 }
 
 impl MockPvgsClient {
@@ -1197,6 +1290,24 @@ impl PvgsReader for MockPvgsClient {
 
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
         self.ruleset_digest
+    }
+
+    fn get_microcircuit_config(
+        &self,
+        module: ucf::v1::MicroModule,
+    ) -> Result<Option<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        let module = module as i32;
+        Ok(self
+            .microcircuit_configs
+            .iter()
+            .find(|config| config.module == module)
+            .cloned())
+    }
+
+    fn list_microcircuit_configs(
+        &self,
+    ) -> Result<Vec<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        Ok(self.microcircuit_configs.clone())
     }
 
     fn get_recovery_state(&self, _session_id: &str) -> Result<Option<String>, PvgsClientError> {
@@ -1248,6 +1359,7 @@ pub struct MockPvgsReader {
     unlock_permit: bool,
     unlock_permit_digest: Option<[u8; 32]>,
     recovery_state: Option<String>,
+    microcircuit_configs: Vec<ucf::v1::MicrocircuitConfigEvidence>,
 }
 
 impl Default for MockPvgsReader {
@@ -1272,6 +1384,7 @@ impl Default for MockPvgsReader {
             unlock_permit: false,
             unlock_permit_digest: None,
             recovery_state: None,
+            microcircuit_configs: Vec::new(),
         }
     }
 }
@@ -1302,6 +1415,7 @@ impl MockPvgsReader {
             unlock_permit: false,
             unlock_permit_digest: None,
             recovery_state: None,
+            microcircuit_configs: Vec::new(),
         }
     }
 
@@ -1354,6 +1468,24 @@ impl PvgsReader for MockPvgsReader {
 
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
         self.ruleset_digest
+    }
+
+    fn get_microcircuit_config(
+        &self,
+        module: ucf::v1::MicroModule,
+    ) -> Result<Option<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        let module = module as i32;
+        Ok(self
+            .microcircuit_configs
+            .iter()
+            .find(|config| config.module == module)
+            .cloned())
+    }
+
+    fn list_microcircuit_configs(
+        &self,
+    ) -> Result<Vec<ucf::v1::MicrocircuitConfigEvidence>, PvgsClientError> {
+        Ok(self.microcircuit_configs.clone())
     }
 
     fn get_recovery_state(&self, _session_id: &str) -> Result<Option<String>, PvgsClientError> {
@@ -2058,6 +2190,22 @@ mod tests {
             }),
             session_sealed: true,
             recovery_state: Some("R1_STABILIZED".to_string()),
+            microcircuit_configs: vec![
+                ucf::v1::MicrocircuitConfigEvidence {
+                    module: ucf::v1::MicroModule::Sn.into(),
+                    version: 2,
+                    config_digest: Some(ucf::v1::Digest32 {
+                        value: vec![0x77; 32],
+                    }),
+                },
+                ucf::v1::MicrocircuitConfigEvidence {
+                    module: ucf::v1::MicroModule::Lc.into(),
+                    version: 1,
+                    config_digest: Some(ucf::v1::Digest32 {
+                        value: vec![0x66; 32],
+                    }),
+                },
+            ],
             pending_replay_plans: vec![
                 replay_plan_with_digest("b-replay", 0x44),
                 replay_plan_with_digest("a-replay", 0x55),
@@ -2072,12 +2220,17 @@ mod tests {
 
         let expected = format!(
             "ruleset_digest: {ruleset}\nsealed: true\nunlock_permit: false\nrecovery_state: R1_STABILIZED\ncbv: epoch=7 digest={cbv}\npev_digest: {pev}\n\
+microcircuit_configs: 2\n\
+- LC: version=1 digest={lc_cfg}\n\
+- SN: version=2 digest={sn_cfg}\n\
 pending_replay_plans: 2\n\
 - a-replay digest={a_digest}\n  last_signalframe_digest: NONE\n\
 - b-replay digest={b_digest}\n  last_signalframe_digest: NONE\n",
             ruleset = hex::encode([0x11; 32]),
             cbv = hex::encode([0x33; 32]),
             pev = hex::encode([0x22; 32]),
+            lc_cfg = hex::encode([0x66; 32]),
+            sn_cfg = hex::encode([0x77; 32]),
             a_digest = hex::encode([0x55; 32]),
             b_digest = hex::encode([0x44; 32]),
         );

@@ -36,6 +36,7 @@ struct LocalPvgsState {
     replay_plans: Vec<ucf::v1::ReplayPlan>,
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
     unlock_permits: HashMap<String, Option<[u8; 32]>>,
+    microcircuit_configs: Vec<ucf::v1::MicrocircuitConfigEvidence>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,7 @@ impl LocalPvgs {
                 replay_plans: Vec::new(),
                 sealed_sessions: HashMap::new(),
                 unlock_permits: HashMap::new(),
+                microcircuit_configs: Vec::new(),
             })),
         }
     }
@@ -98,6 +100,32 @@ impl LocalPvgs {
     pub fn get_pending_replay_plans(&self, _session_id: &str) -> Vec<ucf::v1::ReplayPlan> {
         let guard = self.inner.lock().expect("pvgs state lock");
         guard.replay_plans.clone()
+    }
+
+    pub fn set_microcircuit_config(&self, config: ucf::v1::MicrocircuitConfigEvidence) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard
+            .microcircuit_configs
+            .retain(|existing| existing.module != config.module);
+        guard.microcircuit_configs.push(config);
+    }
+
+    pub fn get_microcircuit_config(
+        &self,
+        module: ucf::v1::MicroModule,
+    ) -> Option<ucf::v1::MicrocircuitConfigEvidence> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        let module = module as i32;
+        guard
+            .microcircuit_configs
+            .iter()
+            .find(|config| config.module == module)
+            .cloned()
+    }
+
+    pub fn list_microcircuit_configs(&self) -> Vec<ucf::v1::MicrocircuitConfigEvidence> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard.microcircuit_configs.clone()
     }
 
     pub fn consume_replay_plan(&self, replay_id: &str) {
