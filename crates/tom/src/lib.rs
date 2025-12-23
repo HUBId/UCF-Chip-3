@@ -330,8 +330,10 @@ mod tests {
     fn suspension_triggers_registry_rebuild_and_commit() {
         let registry = Arc::new(Mutex::new(registry_fixture()));
         let signals = MockIntegritySignal::default();
-        let mut pvgs = MockPvgsClient::default();
-        pvgs.ruleset_digest = Some([9u8; 32]);
+        let pvgs = MockPvgsClient {
+            ruleset_digest: Some([9u8; 32]),
+            ..Default::default()
+        };
         let mut suspensions =
             ToolSuspensionManager::new(registry.clone(), pvgs, signals.clone(), "registry", "v1");
 
@@ -387,8 +389,10 @@ mod tests {
     fn ruleset_digest_refreshes_and_changes_policy_digest() {
         let registry = Arc::new(Mutex::new(registry_fixture()));
         let signals = MockIntegritySignal::default();
-        let mut pvgs = MockPvgsClient::default();
-        pvgs.ruleset_digest = Some([1u8; 32]);
+        let pvgs = MockPvgsClient {
+            ruleset_digest: Some([1u8; 32]),
+            ..Default::default()
+        };
         let mut suspensions =
             ToolSuspensionManager::new(registry, pvgs, signals.clone(), "registry", "v1");
 
