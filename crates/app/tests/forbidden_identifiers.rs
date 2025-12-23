@@ -30,10 +30,7 @@ fn forbid_local_protocol_standins_in_production_sources() {
 
     for entry in WalkDir::new(&root)
         .into_iter()
-        .filter_entry(|e| match e.file_name().to_str() {
-            Some(".git") | Some("target") => false,
-            _ => true,
-        })
+        .filter_entry(|e| !matches!(e.file_name().to_str(), Some(".git") | Some("target")))
     {
         let entry = match entry {
             Ok(e) => e,
@@ -44,7 +41,7 @@ fn forbid_local_protocol_standins_in_production_sources() {
             continue;
         }
 
-        if entry.path().extension().map_or(true, |ext| ext != "rs") {
+        if entry.path().extension().is_none_or(|ext| ext != "rs") {
             continue;
         }
 
