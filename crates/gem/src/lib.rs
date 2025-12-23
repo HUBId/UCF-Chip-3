@@ -2800,6 +2800,57 @@ mod tests {
     }
 
     #[test]
+    fn suspended_denials_surface_in_signal_frames() {
+        let counting = CountingAdapter::default();
+        let mut registry = trm::registry_fixture();
+        registry.suspend("mock.read", "get");
+        let aggregator = default_aggregator();
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            aggregator.clone(),
+            Arc::new(registry),
+            default_pvgs_client(),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![TOOL_SUSPENDED_REASON.to_string()]
+                );
+            }
+            other => panic!("unexpected gate result: {other:?}"),
+        }
+
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run for suspended tools"
+        );
+
+        let top_codes: Vec<_> = aggregator
+            .lock()
+            .expect("agg lock")
+            .force_flush()
+            .first()
+            .and_then(|f| f.policy_stats.as_ref())
+            .map(|stats| stats.top_reason_codes.clone())
+            .unwrap_or_default();
+
+        assert!(top_codes
+            .iter()
+            .any(|code| code.code == TOOL_SUSPENDED_REASON));
+    }
+
+    #[test]
     fn replay_mismatch_blocks_execution_and_degrades_integrity() {
         let counting = CountingAdapter::default();
         let gate = gate_with_adapter(Box::new(counting.clone()));
