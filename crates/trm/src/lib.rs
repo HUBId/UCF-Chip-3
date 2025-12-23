@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use thiserror::Error;
 use ucf_protocol::ucf;
@@ -22,15 +22,24 @@ pub enum TrmError {
     DuplicateEntry(String, String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToolLookup<'a> {
+    Profile(&'a ucf::v1::ToolActionProfile),
+    Suspended,
+    Missing,
+}
+
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
     entries: HashMap<(String, String), ucf::v1::ToolActionProfile>,
+    suspended: BTreeSet<(String, String)>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            suspended: BTreeSet::new(),
         }
     }
 
@@ -44,9 +53,41 @@ impl ToolRegistry {
         Ok(())
     }
 
+    pub fn suspend(&mut self, tool_id: &str, action_id: &str) {
+        self.suspended
+            .insert((tool_id.to_string(), action_id.to_string()));
+    }
+
+    pub fn suspend_many<I>(&mut self, pairs: I)
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        for (tool_id, action_id) in pairs {
+            self.suspended.insert((tool_id, action_id));
+        }
+    }
+
+    pub fn suspended_actions(&self) -> Vec<(String, String)> {
+        self.suspended.iter().cloned().collect()
+    }
+
+    pub fn lookup(&self, tool_id: &str, action_id: &str) -> ToolLookup<'_> {
+        let key = (tool_id.to_string(), action_id.to_string());
+        if self.suspended.contains(&key) {
+            return ToolLookup::Suspended;
+        }
+
+        match self.entries.get(&key) {
+            Some(tap) => ToolLookup::Profile(tap),
+            None => ToolLookup::Missing,
+        }
+    }
+
     pub fn get(&self, tool_id: &str, action_id: &str) -> Option<&ucf::v1::ToolActionProfile> {
-        self.entries
-            .get(&(tool_id.to_string(), action_id.to_string()))
+        match self.lookup(tool_id, action_id) {
+            ToolLookup::Profile(tap) => Some(tap),
+            _ => None,
+        }
     }
 
     pub fn tool_profile_digest(&self, tool_id: &str, action_id: &str) -> Option<ucf::v1::Digest32> {
@@ -217,6 +258,36 @@ mod tests {
         let tap = registry.get("mock.read", "get").expect("fixture available");
         assert_eq!(tap.action_id, "get");
         assert_eq!(tap.tool_id, "mock.read");
+    }
+
+    #[test]
+    fn suspensions_fail_closed() {
+        let mut registry = registry_fixture();
+        registry.suspend("mock.read", "get");
+
+        assert!(matches!(
+            registry.lookup("mock.read", "get"),
+            ToolLookup::Suspended
+        ));
+        assert!(registry.get("mock.read", "get").is_none());
+    }
+
+    #[test]
+    fn suspended_actions_are_sorted() {
+        let mut registry = ToolRegistry::new();
+        registry.suspend("tool-b", "action-c");
+        registry.suspend("tool-a", "action-b");
+        registry.suspend("tool-a", "action-a");
+
+        let suspended = registry.suspended_actions();
+        assert_eq!(
+            suspended,
+            vec![
+                ("tool-a".to_string(), "action-a".to_string()),
+                ("tool-a".to_string(), "action-b".to_string()),
+                ("tool-b".to_string(), "action-c".to_string())
+            ]
+        );
     }
 
     #[test]
