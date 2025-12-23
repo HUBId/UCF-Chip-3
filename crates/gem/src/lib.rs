@@ -1737,6 +1737,16 @@ mod tests {
                 .commit_tool_registry(trc)
         }
 
+        fn commit_tool_onboarding_event(
+            &mut self,
+            event: ucf::v1::ToolOnboardingEvent,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_tool_onboarding_event(event)
+        }
+
         fn commit_micro_milestone(
             &mut self,
             micro: ucf::v1::MicroMilestone,
@@ -1926,6 +1936,16 @@ mod tests {
                 .commit_tool_registry(trc)
         }
 
+        fn commit_tool_onboarding_event(
+            &mut self,
+            event: ucf::v1::ToolOnboardingEvent,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_tool_onboarding_event(event)
+        }
+
         fn commit_micro_milestone(
             &mut self,
             _micro: ucf::v1::MicroMilestone,
@@ -2081,6 +2101,15 @@ mod tests {
             ))
         }
 
+        fn commit_tool_onboarding_event(
+            &mut self,
+            _event: ucf::v1::ToolOnboardingEvent,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            Err(pvgs_client::PvgsClientError::CommitFailed(
+                "forced failure".to_string(),
+            ))
+        }
+
         fn commit_micro_milestone(
             &mut self,
             _micro: ucf::v1::MicroMilestone,
@@ -2217,6 +2246,16 @@ mod tests {
                 .lock()
                 .expect("pvgs client lock")
                 .commit_tool_registry(trc)
+        }
+
+        fn commit_tool_onboarding_event(
+            &mut self,
+            event: ucf::v1::ToolOnboardingEvent,
+        ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .commit_tool_onboarding_event(event)
         }
 
         fn commit_micro_milestone(
