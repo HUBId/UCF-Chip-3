@@ -105,6 +105,24 @@ impl SuspensionState {
             })
             .collect()
     }
+
+    pub fn apply_recommendations_with_hook<F>(
+        &mut self,
+        recs: Vec<SuspendRecommendation>,
+        now_ms: u64,
+        mut on_apply: F,
+    ) -> Vec<SuspensionResult>
+    where
+        F: FnMut(&SuspensionResult),
+    {
+        let results = self.apply_recommendations(recs, now_ms);
+        for result in &results {
+            if result.applied {
+                on_apply(result);
+            }
+        }
+        results
+    }
 }
 
 fn bound_reason_codes(codes: Vec<String>) -> Vec<String> {
@@ -121,6 +139,7 @@ fn bound_reason_codes(codes: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frames::{FramesConfig, WindowEngine};
 
     #[test]
     fn apply_single_recommendation() {
@@ -163,5 +182,33 @@ mod tests {
         assert!(!second[0].applied);
         assert_eq!(first[0].reason_codes, vec!["RC.TEST.THREE".to_string()]);
         assert_eq!(second[0].reason_codes, vec!["RC.TEST.THREE".to_string()]);
+    }
+
+    #[test]
+    fn frames_include_suspension_reason_codes() {
+        let mut engine = WindowEngine::new(FramesConfig::fallback()).expect("window engine");
+        let mut state = SuspensionState::new();
+        let reason = "RC.GV.TOOL.SUSPENDED".to_string();
+        let rec = SuspendRecommendation {
+            tool_id: "tool-123".into(),
+            action_id: "action-abc".into(),
+            severity: LevelClass::High,
+            reason_codes: vec![reason.clone()],
+        };
+
+        state.apply_recommendations_with_hook(vec![rec], 42, |result| {
+            engine.on_suspension(&result.reason_codes);
+        });
+
+        let frames = engine.force_flush();
+        assert!(!frames.is_empty());
+        for frame in frames {
+            let exec_stats = frame.exec_stats.as_ref().expect("exec stats present");
+            assert_eq!(exec_stats.tool_unavailable_count, 1);
+            assert!(exec_stats
+                .top_reason_codes
+                .iter()
+                .any(|code| code.code == reason));
+        }
     }
 }
