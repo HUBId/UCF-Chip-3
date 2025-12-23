@@ -1738,7 +1738,7 @@ mod micro_evidence_fallback {
     }
 
     pub fn read_micro_evidence() -> Option<MicroEvidence> {
-        let reader = TestChip2Reader::default();
+        let reader = TestChip2Reader;
         let snapshot = reader.get_engine_snapshot()?;
         Some(MicroEvidence {
             lc_digest: snapshot.lc_digest,
