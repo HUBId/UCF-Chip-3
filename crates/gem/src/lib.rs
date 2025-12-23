@@ -21,7 +21,7 @@ use pbm::{
 use pvgs_client::PvgsClientReader;
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore, VerifyError};
 use tam::ToolAdapter;
-use trm::ToolRegistry;
+use trm::{ToolLookup, ToolRegistry};
 use ucf_protocol::{canonical_bytes, digest32, digest_proto, ucf};
 
 const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
@@ -32,6 +32,7 @@ const FORENSIC_ACTION_REASON: &str = "RC.RX.ACTION.FORENSIC";
 const INTEGRITY_FAIL_REASON: &str = "RC.RE.INTEGRITY.FAIL";
 const RECOVERY_UNLOCK_GRANTED_REASON: &str = "RC.GV.RECOVERY.UNLOCK_GRANTED";
 const RECOVERY_READONLY_REASON: &str = "RC.GV.RECOVERY.READONLY_MODE";
+const TOOL_SUSPENDED_REASON: &str = "RC.GV.TOOL.SUSPENDED";
 const CORE_FRAME_DOMAIN: &str = "UCF:HASH:CORE_FRAME";
 const METABOLIC_FRAME_DOMAIN: &str = "UCF:HASH:METABOLIC_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
@@ -276,7 +277,11 @@ impl Gate {
         }
 
         let (tool_id, action_id) = parse_tool_and_action(&action);
-        let tool_profile = self.registry.get(&tool_id, &action_id);
+        let tool_lookup = self.registry.lookup(&tool_id, &action_id);
+        let tool_profile = match tool_lookup {
+            ToolLookup::Profile(profile) => Some(profile),
+            _ => None,
+        };
         let action_type = tool_profile
             .and_then(|tap| ucf::v1::ToolActionType::try_from(tap.action_type).ok())
             .unwrap_or(ucf::v1::ToolActionType::Unspecified);
@@ -345,7 +350,13 @@ impl Gate {
             return result;
         }
 
-        if tool_profile.is_none() {
+        if matches!(tool_lookup, ToolLookup::Suspended) {
+            self.deny_with_reasons(
+                &mut decision,
+                &mut decision_context,
+                &[TOOL_SUSPENDED_REASON.to_string()],
+            );
+        } else if tool_profile.is_none() {
             self.deny_with_reasons(
                 &mut decision,
                 &mut decision_context,
@@ -2710,6 +2721,43 @@ mod tests {
             other => panic!("unexpected gate result: {other:?}"),
         }
         assert_eq!(counting.count(), 0, "adapter must not run on deny");
+    }
+
+    #[test]
+    fn suspended_tools_are_denied_before_execution() {
+        let counting = CountingAdapter::default();
+        let mut registry = trm::registry_fixture();
+        registry.suspend("mock.read", "get");
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            Arc::new(PvgsKeyEpochStore::new()),
+            default_aggregator(),
+            Arc::new(registry),
+            default_pvgs_client(),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let result =
+            gate.handle_action_spec("s", "step", base_action("mock.read", "get"), ok_ctx());
+
+        match result {
+            GateResult::Denied { decision } => {
+                assert_eq!(
+                    decision.decision.reason_codes.unwrap().codes,
+                    vec![TOOL_SUSPENDED_REASON.to_string()]
+                );
+            }
+            other => panic!("unexpected gate result: {other:?}"),
+        }
+
+        assert_eq!(
+            counting.count(),
+            0,
+            "adapter must not run for suspended tools"
+        );
     }
 
     #[test]
