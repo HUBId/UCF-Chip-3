@@ -512,6 +512,14 @@ impl<C: Clock> WindowEngine<C> {
         });
     }
 
+    pub fn on_suspension(&mut self, reason_codes: &[String]) {
+        self.apply_to_windows(|state| {
+            state.exec_counts.tool_unavailable += 1;
+            state.exec_reasons.record(reason_codes.iter().cloned());
+            state.record_event();
+        });
+    }
+
     pub fn on_human_denied(&mut self, reason_codes: &[String]) {
         self.apply_to_windows(|state| {
             state.human_counts.approval_denied_count += 1;
@@ -848,6 +856,24 @@ windows:
         let receipt = frames[0].receipt_stats.as_ref().unwrap();
         assert_eq!(receipt.receipt_missing_count, 2);
         assert_eq!(receipt.receipt_invalid_count, 1);
+    }
+
+    #[test]
+    fn suspension_events_are_reflected_in_exec_stats() {
+        let mut engine = engine_with_config(FramesConfig::fallback());
+        let reason = "RC.GV.TOOL.SUSPENDED".to_string();
+
+        engine.on_suspension(std::slice::from_ref(&reason));
+
+        let frames = engine.force_flush();
+        for frame in frames {
+            let exec_stats = frame.exec_stats.as_ref().expect("exec stats present");
+            assert_eq!(exec_stats.tool_unavailable_count, 1);
+            assert!(exec_stats
+                .top_reason_codes
+                .iter()
+                .any(|code| code.code == reason));
+        }
     }
 
     #[test]

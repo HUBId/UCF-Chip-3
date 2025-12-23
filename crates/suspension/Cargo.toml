@@ -7,3 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 ucf-protocol = { workspace = true }
+
+[dev-dependencies]
+frames = { path = "../frames" }
