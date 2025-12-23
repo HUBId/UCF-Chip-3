@@ -1847,6 +1847,41 @@ mod tests {
     }
 
     #[test]
+    fn tool_onboarding_commit_is_idempotent_per_tool() {
+        use std::collections::HashSet;
+
+        let mut client = MockPvgsClient::default();
+        let mut seen = HashSet::new();
+
+        let event = ucf::v1::ToolOnboardingEvent {
+            event_id: "mock.read".to_string(),
+            event_digest: None,
+            reason_codes: None,
+        };
+
+        let mut commit_if_new = |ev: ucf::v1::ToolOnboardingEvent| {
+            if seen.insert(ev.event_id.clone()) {
+                client
+                    .commit_tool_onboarding_event(ev)
+                    .expect("commit accepted");
+            }
+        };
+
+        commit_if_new(event.clone());
+        commit_if_new(event);
+
+        assert_eq!(client.committed_tool_onboarding_events.len(), 1);
+        assert_eq!(
+            client
+                .committed_tool_onboarding_events
+                .first()
+                .expect("event recorded")
+                .event_id,
+            "mock.read"
+        );
+    }
+
+    #[test]
     fn rejecting_client_flags_rejected_status() {
         let mut client = LocalPvgsClient::rejecting(vec!["RC.RE.INTEGRITY.DEGRADED".to_string()]);
         let receipt = client

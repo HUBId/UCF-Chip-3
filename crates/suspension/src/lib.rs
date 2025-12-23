@@ -185,6 +185,27 @@ mod tests {
     }
 
     #[test]
+    fn applying_twice_only_updates_state_once() {
+        let mut state = SuspensionState::new();
+        let rec = SuspendRecommendation {
+            tool_id: "tool-xyz".into(),
+            action_id: "action-123".into(),
+            severity: LevelClass::Medium,
+            reason_codes: vec!["RC.TEST.SUSPEND".into()],
+        };
+
+        let first = state.apply_recommendations(vec![rec.clone()], 10);
+        let second = state.apply_recommendations(vec![rec], 11);
+
+        assert_eq!(state.suspended.len(), 1);
+        assert_eq!(state.suspended().len(), 1, "suspended set should only grow once");
+        assert!(first[0].applied);
+        assert!(!second[0].applied);
+        assert_eq!(first[0].suspended_at_ms, 10);
+        assert_eq!(second[0].suspended_at_ms, 11);
+    }
+
+    #[test]
     fn frames_include_suspension_reason_codes() {
         let mut engine = WindowEngine::new(FramesConfig::fallback()).expect("window engine");
         let mut state = SuspensionState::new();
