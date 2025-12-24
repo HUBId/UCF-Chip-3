@@ -291,13 +291,11 @@ mod tests {
         let mut frames = test_frames_engine();
 
         for _ in 0..10 {
-            let before = pvgs.scorecard_global_calls
-                + pvgs.scorecard_session_calls
-                + pvgs.spotcheck_calls;
+            let before =
+                pvgs.scorecard_global_calls + pvgs.scorecard_session_calls + pvgs.spotcheck_calls;
             scheduler.tick(Some("session"), &mut pvgs, &mut frames);
-            let after = pvgs.scorecard_global_calls
-                + pvgs.scorecard_session_calls
-                + pvgs.spotcheck_calls;
+            let after =
+                pvgs.scorecard_global_calls + pvgs.scorecard_session_calls + pvgs.spotcheck_calls;
             assert!(after - before <= 2);
         }
     }

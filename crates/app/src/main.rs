@@ -13,11 +13,11 @@ use frames::{FramesConfig, WindowEngine};
 use gem::{DecisionLogStore, Gate, GateContext, GateResult};
 use pbm::{DecisionForm, PolicyEngine};
 use pvgs_client::{InspectorClient, KeyEpochSync, LocalPvgsClient};
-use scheduler::ScheduleState;
 use pvgs_verify::{
     pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
     verify_pvgs_receipt, PvgsKeyEpochStore,
 };
+use scheduler::ScheduleState;
 use tam::MockAdapter;
 use trm::registry_fixture;
 use ucf_protocol::ucf;
@@ -55,9 +55,7 @@ fn main() {
                         session_id = args.next();
                     }
                     "--ticks" => {
-                        ticks = args
-                            .next()
-                            .and_then(|value| value.parse::<u64>().ok());
+                        ticks = args.next().and_then(|value| value.parse::<u64>().ok());
                     }
                     _ => {
                         eprintln!("usage: app run-scheduler --session <id> --ticks <n>");
