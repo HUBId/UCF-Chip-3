@@ -512,6 +512,13 @@ impl<C: Clock> WindowEngine<C> {
         });
     }
 
+    pub fn on_integrity_signal(&mut self, reason_codes: &[String]) {
+        self.apply_to_windows(|state| {
+            state.integrity_reasons.record(reason_codes.iter().cloned());
+            state.record_event();
+        });
+    }
+
     pub fn on_suspension(&mut self, reason_codes: &[String]) {
         self.apply_to_windows(|state| {
             state.exec_counts.tool_unavailable += 1;

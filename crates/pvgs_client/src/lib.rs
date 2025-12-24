@@ -96,6 +96,16 @@ pub struct CbvDigest {
     pub digest: [u8; 32],
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Scorecard {
+    pub replay_mismatch_count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpotCheckReport {
+    pub mismatch: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposedMacroInfo {
     pub macro_id: String,
@@ -166,6 +176,24 @@ pub trait PvgsClient: Send + Sync {
     }
 
     fn get_pvgs_head(&self) -> PvgsHead;
+
+    fn get_scorecard_global(&mut self) -> Result<Scorecard, PvgsClientError> {
+        Err(PvgsClientError::CommitFailed(
+            "scorecard not implemented".to_string(),
+        ))
+    }
+
+    fn get_scorecard_session(&mut self, _session_id: &str) -> Result<Scorecard, PvgsClientError> {
+        Err(PvgsClientError::CommitFailed(
+            "scorecard not implemented".to_string(),
+        ))
+    }
+
+    fn run_spotcheck(&mut self, _session_id: &str) -> Result<SpotCheckReport, PvgsClientError> {
+        Err(PvgsClientError::CommitFailed(
+            "spotcheck not implemented".to_string(),
+        ))
+    }
 }
 
 pub trait PvgsReader: Send + Sync {
@@ -520,6 +548,18 @@ impl PvgsClient for Chip4LocalPvgsClient {
             head_record_digest,
         }
     }
+
+    fn get_scorecard_global(&mut self) -> Result<Scorecard, PvgsClientError> {
+        Ok(Scorecard::default())
+    }
+
+    fn get_scorecard_session(&mut self, _session_id: &str) -> Result<Scorecard, PvgsClientError> {
+        Ok(Scorecard::default())
+    }
+
+    fn run_spotcheck(&mut self, _session_id: &str) -> Result<SpotCheckReport, PvgsClientError> {
+        Ok(SpotCheckReport::default())
+    }
 }
 
 #[cfg(any(test, feature = "local-e2e"))]
@@ -603,6 +643,9 @@ pub struct LocalPvgsClient {
     pub try_commit_macro_outcome: Option<bool>,
     pub proposed_macros: VecDeque<ProposedMacroInfo>,
     pub finalized_macros: Vec<(String, [u8; 32])>,
+    pub scorecard_global: Scorecard,
+    pub scorecard_session: Scorecard,
+    pub spotcheck_report: SpotCheckReport,
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
     unlock_permits: HashMap<String, Option<[u8; 32]>>,
     recovery_states: HashMap<String, Option<String>>,
@@ -636,6 +679,9 @@ impl Default for LocalPvgsClient {
             try_commit_macro_outcome: None,
             proposed_macros: VecDeque::new(),
             finalized_macros: Vec::new(),
+            scorecard_global: Scorecard::default(),
+            scorecard_session: Scorecard::default(),
+            spotcheck_report: SpotCheckReport::default(),
             sealed_sessions: HashMap::new(),
             unlock_permits: HashMap::new(),
             recovery_states: HashMap::new(),
@@ -1117,6 +1163,18 @@ impl PvgsClient for LocalPvgsClient {
             head_record_digest: self.head_record_digest,
         }
     }
+
+    fn get_scorecard_global(&mut self) -> Result<Scorecard, PvgsClientError> {
+        Ok(self.scorecard_global.clone())
+    }
+
+    fn get_scorecard_session(&mut self, _session_id: &str) -> Result<Scorecard, PvgsClientError> {
+        Ok(self.scorecard_session.clone())
+    }
+
+    fn run_spotcheck(&mut self, _session_id: &str) -> Result<SpotCheckReport, PvgsClientError> {
+        Ok(self.spotcheck_report.clone())
+    }
 }
 
 impl PvgsReader for LocalPvgsClient {
@@ -1268,6 +1326,12 @@ pub struct MockPvgsClient {
     pub unlock_permit_digest: Option<[u8; 32]>,
     pub recovery_state: Option<String>,
     pub microcircuit_configs: Vec<ucf::v1::MicrocircuitConfigEvidence>,
+    pub scorecard_global: Scorecard,
+    pub scorecard_session: Scorecard,
+    pub spotcheck_report: SpotCheckReport,
+    pub scorecard_global_calls: u64,
+    pub scorecard_session_calls: u64,
+    pub spotcheck_calls: u64,
 }
 
 impl MockPvgsClient {
@@ -1706,6 +1770,21 @@ impl PvgsClient for MockPvgsClient {
 
     fn get_pvgs_head(&self) -> PvgsHead {
         self.local.get_pvgs_head()
+    }
+
+    fn get_scorecard_global(&mut self) -> Result<Scorecard, PvgsClientError> {
+        self.scorecard_global_calls = self.scorecard_global_calls.saturating_add(1);
+        Ok(self.scorecard_global.clone())
+    }
+
+    fn get_scorecard_session(&mut self, _session_id: &str) -> Result<Scorecard, PvgsClientError> {
+        self.scorecard_session_calls = self.scorecard_session_calls.saturating_add(1);
+        Ok(self.scorecard_session.clone())
+    }
+
+    fn run_spotcheck(&mut self, _session_id: &str) -> Result<SpotCheckReport, PvgsClientError> {
+        self.spotcheck_calls = self.spotcheck_calls.saturating_add(1);
+        Ok(self.spotcheck_report.clone())
     }
 }
 

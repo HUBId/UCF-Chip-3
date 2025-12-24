@@ -1,0 +1,12 @@
+[package]
+name = "scheduler"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+frames = { path = "../frames" }
+pvgs_client = { path = "../pvgs_client" }
+
+[dev-dependencies]
+ucf-protocol = { path = "../ucf-protocol" }
