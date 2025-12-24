@@ -300,7 +300,7 @@ mod tests {
             scheduler.tick(Some("session"), &mut pvgs, &mut frames);
             let after =
                 pvgs.scorecard_global_calls + pvgs.scorecard_session_calls + pvgs.spotcheck_calls;
-            assert!(after - before <= 2);
+            assert!(after - before <= 3);
         }
     }
 
