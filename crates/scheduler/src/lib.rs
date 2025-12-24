@@ -29,7 +29,9 @@ impl ScheduleState {
         pvgs: &mut dyn PvgsClient,
         frames: &mut WindowEngine,
     ) {
-        if self.scorecard_every_ticks > 0 && self.tick_counter % self.scorecard_every_ticks == 0 {
+        if self.scorecard_every_ticks > 0
+            && self.tick_counter.is_multiple_of(self.scorecard_every_ticks)
+        {
             let mut scorecards = Vec::new();
             if let Ok(scorecard) = pvgs.get_scorecard_global() {
                 scorecards.push(scorecard);
@@ -52,7 +54,9 @@ impl ScheduleState {
             }
         }
 
-        if self.spotcheck_every_ticks > 0 && self.tick_counter % self.spotcheck_every_ticks == 0 {
+        if self.spotcheck_every_ticks > 0
+            && self.tick_counter.is_multiple_of(self.spotcheck_every_ticks)
+        {
             if let Some(session_id) = session_id {
                 if let Ok(report) = pvgs.run_spotcheck(session_id) {
                     if report.mismatch {
