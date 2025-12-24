@@ -15,6 +15,7 @@ control = { path = "../control" }
 hex = "0.4"
 pvgs_verify = { path = "../pvgs_verify" }
 pvgs_client = { path = "../pvgs_client" }
+scheduler = { path = "../scheduler" }
 ed25519-dalek = "2"
 trm = { path = "../trm" }
 ckm_orchestrator = { path = "../ckm_orchestrator" }

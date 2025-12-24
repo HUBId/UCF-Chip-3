@@ -17,6 +17,7 @@ use pvgs_verify::{
     pvgs_key_epoch_digest, pvgs_key_epoch_signing_preimage, pvgs_receipt_signing_preimage,
     verify_pvgs_receipt, PvgsKeyEpochStore,
 };
+use scheduler::ScheduleState;
 use tam::MockAdapter;
 use trm::registry_fixture;
 use ucf_protocol::ucf;
@@ -40,6 +41,35 @@ fn main() {
             }
 
             run_inspect_dump(&session_id);
+            return;
+        }
+
+        if subcommand == "run-scheduler" {
+            args.next();
+            let mut session_id: Option<String> = None;
+            let mut ticks: Option<u64> = None;
+
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--session" => {
+                        session_id = args.next();
+                    }
+                    "--ticks" => {
+                        ticks = args.next().and_then(|value| value.parse::<u64>().ok());
+                    }
+                    _ => {
+                        eprintln!("usage: app run-scheduler --session <id> --ticks <n>");
+                        process::exit(1);
+                    }
+                }
+            }
+
+            let (Some(session_id), Some(ticks)) = (session_id, ticks) else {
+                eprintln!("usage: app run-scheduler --session <id> --ticks <n>");
+                process::exit(1);
+            };
+
+            run_scheduler(&session_id, ticks);
             return;
         }
     }
@@ -141,6 +171,25 @@ fn run_demo() {
 
     let frames = aggregator.lock().expect("aggregator lock").force_flush();
 
+    for frame in frames {
+        print_frame_summary(&frame);
+    }
+}
+
+fn run_scheduler(session_id: &str, ticks: u64) {
+    let frames_config = FramesConfig::load_from_dir(".").unwrap_or_else(|err| {
+        eprintln!("using fallback frames config: {err}");
+        FramesConfig::fallback()
+    });
+    let mut frames = WindowEngine::new(frames_config).expect("window engine from config");
+    let mut pvgs = LocalPvgsClient::default();
+    let mut scheduler = ScheduleState::new(100, 250);
+
+    for _ in 0..ticks {
+        scheduler.tick(Some(session_id), &mut pvgs, &mut frames);
+    }
+
+    let frames = frames.force_flush();
     for frame in frames {
         print_frame_summary(&frame);
     }
