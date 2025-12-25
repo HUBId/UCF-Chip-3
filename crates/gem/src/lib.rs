@@ -216,11 +216,12 @@ pub struct DecisionContext {
 pub(crate) struct MicroEvidence {
     lc_digest: Option<[u8; 32]>,
     sn_digest: Option<[u8; 32]>,
+    plasticity_digest: Option<[u8; 32]>,
 }
 
 impl MicroEvidence {
     fn is_empty(&self) -> bool {
-        self.lc_digest.is_none() && self.sn_digest.is_none()
+        self.lc_digest.is_none() && self.sn_digest.is_none() && self.plasticity_digest.is_none()
     }
 }
 
@@ -1209,6 +1210,9 @@ fn micro_evidence_from_control_frame(control_frame: &ucf::v1::ControlFrame) -> M
             "mc:sn" if evidence.sn_digest.is_none() => {
                 evidence.sn_digest = related.digest.as_ref().and_then(digest32_to_array);
             }
+            "mc_snap:plasticity" if evidence.plasticity_digest.is_none() => {
+                evidence.plasticity_digest = related.digest.as_ref().and_then(digest32_to_array);
+            }
             _ => {}
         }
     }
@@ -1279,6 +1283,12 @@ fn append_micro_evidence_refs(related_refs: &mut Vec<ucf::v1::RelatedRef>, micro
     }
     if let Some(digest) = micro.sn_digest {
         push_related_ref(related_refs, micro_related_ref("mc:sn", digest));
+    }
+    if let Some(digest) = micro.plasticity_digest {
+        push_related_ref(
+            related_refs,
+            micro_related_ref("mc_snap:plasticity", digest),
+        );
     }
 }
 
@@ -1760,6 +1770,7 @@ mod micro_evidence_fallback {
     pub struct EngineSnapshot {
         pub lc_digest: Option<[u8; 32]>,
         pub sn_digest: Option<[u8; 32]>,
+        pub plasticity_digest: Option<[u8; 32]>,
     }
 
     pub trait Chip2Reader: Send + Sync {
@@ -1789,6 +1800,7 @@ mod micro_evidence_fallback {
         Some(MicroEvidence {
             lc_digest: snapshot.lc_digest,
             sn_digest: snapshot.sn_digest,
+            plasticity_digest: snapshot.plasticity_digest,
         })
     }
 }
@@ -2744,6 +2756,7 @@ mod tests {
     fn control_frame_with_micro_evidence(
         lc_digest: Option<[u8; 32]>,
         sn_digest: Option<[u8; 32]>,
+        plasticity_digest: Option<[u8; 32]>,
     ) -> ucf::v1::ControlFrame {
         let mut frame = control_frame_open();
         let mut refs = Vec::new();
@@ -2752,6 +2765,9 @@ mod tests {
         }
         if let Some(digest) = sn_digest {
             refs.push(micro_related_ref("mc:sn", digest));
+        }
+        if let Some(digest) = plasticity_digest {
+            refs.push(micro_related_ref("mc_snap:plasticity", digest));
         }
         frame.evidence_refs = refs;
         frame
@@ -3257,7 +3273,8 @@ mod tests {
             metadata: std::collections::HashMap::new(),
         };
 
-        let control_frame = control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]));
+        let control_frame =
+            control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]), Some([13u8; 32]));
         let decision_ctx = DecisionContext {
             session_id: "sid".to_string(),
             step_id: "step".to_string(),
@@ -3288,6 +3305,7 @@ mod tests {
                 "ruleset",
                 "mc:lc",
                 "mc:sn",
+                "mc_snap:plasticity",
             ]
         );
 
@@ -3306,6 +3324,14 @@ mod tests {
             .and_then(|r| r.digest.as_ref())
             .expect("mc:sn related ref");
         assert_eq!(sn_ref.value, vec![12u8; 32]);
+
+        let plasticity_ref = decision_record
+            .related_refs
+            .iter()
+            .find(|r| r.id == "mc_snap:plasticity")
+            .and_then(|r| r.digest.as_ref())
+            .expect("mc_snap:plasticity related ref");
+        assert_eq!(plasticity_ref.value, vec![13u8; 32]);
     }
 
     #[test]
@@ -3352,6 +3378,7 @@ mod tests {
             micro_evidence: MicroEvidence {
                 lc_digest: Some([11u8; 32]),
                 sn_digest: Some([12u8; 32]),
+                plasticity_digest: Some([13u8; 32]),
             },
             microcircuit_config_refs: MicrocircuitConfigRefs {
                 lc_digest: Some([21u8; 32]),
@@ -3373,6 +3400,7 @@ mod tests {
                 "ruleset",
                 "mc:lc",
                 "mc:sn",
+                "mc_snap:plasticity",
                 "mc_cfg:lc",
                 "mc_cfg:sn",
             ]
@@ -3409,6 +3437,7 @@ mod tests {
                 "ruleset",
                 "mc:lc",
                 "mc:sn",
+                "mc_snap:plasticity",
                 "mc_cfg:lc",
                 "mc_cfg:sn",
             ]
@@ -3445,7 +3474,8 @@ mod tests {
             metadata: std::collections::HashMap::new(),
         };
 
-        let control_frame = control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]));
+        let control_frame =
+            control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]), Some([13u8; 32]));
         let decision_ctx = DecisionContext {
             session_id: "sid".to_string(),
             step_id: "step".to_string(),
@@ -3493,7 +3523,101 @@ mod tests {
                 "ruleset",
                 "mc:lc",
                 "mc:sn",
+                "mc_snap:plasticity",
                 "decision_record_receipt",
+            ]
+        );
+    }
+
+    #[test]
+    fn action_exec_record_caps_related_refs_after_micro_config() {
+        let policy_query = ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(base_action("mock.read", "get")),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        };
+
+        let policy_query_digest = policy_query_digest(&policy_query);
+        let decision_digest = [2u8; 32];
+        let ruleset_digest = Some([3u8; 32]);
+        let decision = PolicyDecisionRecord {
+            decision_id: "sid:step".to_string(),
+            form: DecisionForm::Allow,
+            decision: ucf::v1::PolicyDecision {
+                decision: ucf::v1::DecisionForm::Allow.into(),
+                reason_codes: None,
+                constraints: None,
+            },
+            policy_query_digest,
+            decision_digest,
+            pev_digest: None,
+            ruleset_digest,
+            policy_version_digest: String::new(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let decision_ctx = DecisionContext {
+            session_id: "sid".to_string(),
+            step_id: "step".to_string(),
+            policy_query: policy_query.clone(),
+            policy_query_digest,
+            policy_decision: decision.decision.clone(),
+            decision_digest,
+            ruleset_digest,
+            control_frame_digest: [9u8; 32],
+            tool_profile_digest: None,
+            commit_disposition: DecisionCommitDisposition::CommitRequired,
+            receipt_digest: Some([4u8; 32]),
+            micro_evidence: MicroEvidence {
+                lc_digest: Some([11u8; 32]),
+                sn_digest: Some([12u8; 32]),
+                plasticity_digest: Some([13u8; 32]),
+            },
+            microcircuit_config_refs: MicrocircuitConfigRefs {
+                lc_digest: Some([21u8; 32]),
+                sn_digest: Some([22u8; 32]),
+            },
+        };
+
+        let action_record = build_action_exec_record(
+            &base_action("mock.read", "get"),
+            [7u8; 32],
+            &decision,
+            &ucf::v1::OutcomePacket {
+                outcome_id: "oid".to_string(),
+                request_id: "sid:step".to_string(),
+                status: ucf::v1::OutcomeStatus::Success.into(),
+                payload: Vec::new(),
+                payload_digest: None,
+                data_class: ucf::v1::DataClass::Unspecified.into(),
+                reason_codes: None,
+            },
+            &control_frame_open(),
+            &ok_ctx(),
+            &decision_ctx,
+        );
+
+        let action_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+
+        assert_eq!(action_record.related_refs.len(), MAX_RELATED_REFS);
+        assert_eq!(
+            action_ids,
+            vec![
+                "policy_query",
+                "decision",
+                "ruleset",
+                "mc:lc",
+                "mc:sn",
+                "mc_snap:plasticity",
+                "mc_cfg:lc",
+                "mc_cfg:sn",
             ]
         );
     }
@@ -3546,7 +3670,7 @@ mod tests {
         assert!(decision_record
             .related_refs
             .iter()
-            .all(|r| r.id != "mc:lc" && r.id != "mc:sn"));
+            .all(|r| r.id != "mc:lc" && r.id != "mc:sn" && r.id != "mc_snap:plasticity"));
     }
 
     #[test]
@@ -3577,7 +3701,8 @@ mod tests {
             metadata: std::collections::HashMap::new(),
         };
 
-        let control_frame = control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]));
+        let control_frame =
+            control_frame_with_micro_evidence(Some([11u8; 32]), Some([12u8; 32]), Some([13u8; 32]));
         let decision_ctx = DecisionContext {
             session_id: "sid".to_string(),
             step_id: "step".to_string(),
@@ -3606,6 +3731,7 @@ mod tests {
             micro_evidence_fallback::EngineSnapshot {
                 lc_digest: Some([21u8; 32]),
                 sn_digest: Some([22u8; 32]),
+                plasticity_digest: Some([23u8; 32]),
             },
         ));
 
@@ -3638,6 +3764,10 @@ mod tests {
 
         assert_eq!(decision_ctx.micro_evidence.lc_digest, Some([21u8; 32]));
         assert_eq!(decision_ctx.micro_evidence.sn_digest, Some([22u8; 32]));
+        assert_eq!(
+            decision_ctx.micro_evidence.plasticity_digest,
+            Some([23u8; 32])
+        );
 
         micro_evidence_fallback::TestChip2Reader::set_snapshot(None);
     }

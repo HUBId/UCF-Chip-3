@@ -9,6 +9,7 @@ use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
 const MAX_REPLAY_PLANS_PER_TICK: usize = 3;
+const MAX_RELATED_REFS: usize = 8;
 const MAX_REASON_CODES: usize = 16;
 const CORE_FRAME_DOMAIN: &str = "UCF:HASH:CORE_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
@@ -83,7 +84,14 @@ impl ReplayOrchestrator {
             }
 
             let step_id = replay_step_id(session_id, &plan.replay_id);
-            let record = build_replay_record(session_id, &step_id, &plan, None);
+            let record = build_replay_record(
+                session_id,
+                &step_id,
+                &plan,
+                None,
+                MicroEvidence::default(),
+                MicrocircuitConfigRefs::default(),
+            );
 
             let accepted = match commit.commit_experience_record(record) {
                 Ok(receipt) => {
@@ -121,11 +129,68 @@ impl ReplayOrchestrator {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MicroEvidence {
+    lc_digest: Option<[u8; 32]>,
+    sn_digest: Option<[u8; 32]>,
+    plasticity_digest: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MicrocircuitConfigRefs {
+    lc_digest: Option<[u8; 32]>,
+    sn_digest: Option<[u8; 32]>,
+}
+
+fn push_related_ref(related_refs: &mut Vec<ucf::v1::RelatedRef>, related_ref: ucf::v1::RelatedRef) {
+    if related_refs.len() < MAX_RELATED_REFS {
+        related_refs.push(related_ref);
+    }
+}
+
+fn micro_related_ref(id: &str, digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: id.to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+    }
+}
+
+fn append_micro_evidence_refs(related_refs: &mut Vec<ucf::v1::RelatedRef>, micro: MicroEvidence) {
+    if let Some(digest) = micro.lc_digest {
+        push_related_ref(related_refs, micro_related_ref("mc:lc", digest));
+    }
+    if let Some(digest) = micro.sn_digest {
+        push_related_ref(related_refs, micro_related_ref("mc:sn", digest));
+    }
+    if let Some(digest) = micro.plasticity_digest {
+        push_related_ref(
+            related_refs,
+            micro_related_ref("mc_snap:plasticity", digest),
+        );
+    }
+}
+
+fn append_microcircuit_config_refs(
+    related_refs: &mut Vec<ucf::v1::RelatedRef>,
+    micro_configs: MicrocircuitConfigRefs,
+) {
+    if let Some(digest) = micro_configs.lc_digest {
+        push_related_ref(related_refs, micro_related_ref("mc_cfg:lc", digest));
+    }
+    if let Some(digest) = micro_configs.sn_digest {
+        push_related_ref(related_refs, micro_related_ref("mc_cfg:sn", digest));
+    }
+}
+
 fn build_replay_record(
     session_id: &str,
     step_id: &str,
     plan: &ucf::v1::ReplayPlan,
     ruleset_digest: Option<[u8; 32]>,
+    micro_evidence: MicroEvidence,
+    microcircuit_config_refs: MicrocircuitConfigRefs,
 ) -> ucf::v1::ExperienceRecord {
     let reason_codes = replay_reason_codes(plan);
 
@@ -153,19 +218,26 @@ fn build_replay_record(
     let governance_frame_ref =
         digest_proto(GOVERNANCE_FRAME_DOMAIN, &canonical_bytes(&governance_frame));
 
-    let mut related_refs = vec![ucf::v1::RelatedRef {
+    let mut related_refs = Vec::new();
+    related_refs.push(ucf::v1::RelatedRef {
         id: "replay_plan".to_string(),
         digest: plan.replay_digest.clone(),
-    }];
+    });
 
     if let Some(digest) = ruleset_digest {
-        related_refs.push(ucf::v1::RelatedRef {
-            id: "ruleset".to_string(),
-            digest: Some(ucf::v1::Digest32 {
-                value: digest.to_vec(),
-            }),
-        });
+        push_related_ref(
+            &mut related_refs,
+            ucf::v1::RelatedRef {
+                id: "ruleset".to_string(),
+                digest: Some(ucf::v1::Digest32 {
+                    value: digest.to_vec(),
+                }),
+            },
+        );
     }
+
+    append_micro_evidence_refs(&mut related_refs, micro_evidence);
+    append_microcircuit_config_refs(&mut related_refs, microcircuit_config_refs);
 
     ucf::v1::ExperienceRecord {
         record_type: ucf::v1::RecordType::Replay.into(),
@@ -369,7 +441,14 @@ mod tests {
         );
         let step_id = replay_step_id("sess", &plan.replay_id);
 
-        let record = build_replay_record("sess", &step_id, &plan, None);
+        let record = build_replay_record(
+            "sess",
+            &step_id,
+            &plan,
+            None,
+            MicroEvidence::default(),
+            MicrocircuitConfigRefs::default(),
+        );
 
         let codes = record
             .governance_frame
@@ -389,12 +468,62 @@ mod tests {
     }
 
     #[test]
+    fn replay_record_includes_micro_refs_in_order() {
+        let plan = replay_plan("plan-micro");
+        let step_id = replay_step_id("sess", &plan.replay_id);
+
+        let record = build_replay_record(
+            "sess",
+            &step_id,
+            &plan,
+            Some([9u8; 32]),
+            MicroEvidence {
+                lc_digest: Some([1u8; 32]),
+                sn_digest: Some([2u8; 32]),
+                plasticity_digest: Some([3u8; 32]),
+            },
+            MicrocircuitConfigRefs {
+                lc_digest: Some([4u8; 32]),
+                sn_digest: Some([5u8; 32]),
+            },
+        );
+
+        let ids: Vec<_> = record.related_refs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "replay_plan",
+                "ruleset",
+                "mc:lc",
+                "mc:sn",
+                "mc_snap:plasticity",
+                "mc_cfg:lc",
+                "mc_cfg:sn",
+            ]
+        );
+    }
+
+    #[test]
     fn replay_record_is_deterministic() {
         let plan = replay_plan_with_reason_codes("plan-det", Some(vec!["RC.TH.POLICY_PROBING"]));
         let step_id = replay_step_id("sess", &plan.replay_id);
 
-        let record_a = build_replay_record("sess", &step_id, &plan, None);
-        let record_b = build_replay_record("sess", &step_id, &plan, None);
+        let record_a = build_replay_record(
+            "sess",
+            &step_id,
+            &plan,
+            None,
+            MicroEvidence::default(),
+            MicrocircuitConfigRefs::default(),
+        );
+        let record_b = build_replay_record(
+            "sess",
+            &step_id,
+            &plan,
+            None,
+            MicroEvidence::default(),
+            MicrocircuitConfigRefs::default(),
+        );
 
         assert_eq!(canonical_bytes(&record_a), canonical_bytes(&record_b));
     }
