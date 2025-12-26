@@ -20,6 +20,22 @@ pub struct SepEvent {
     pub status: ucf::v1::ReceiptStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceRunStatus {
+    Pass,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceRunSummary {
+    pub trace_id: String,
+    pub trace_run_digest: [u8; 32],
+    pub status: TraceRunStatus,
+    pub created_at_ms: u64,
+    pub asset_manifest_digest: Option<[u8; 32]>,
+    pub circuit_config_digest: Option<[u8; 32]>,
+}
+
 #[derive(Debug)]
 struct LocalPvgsState {
     signing_key: SigningKey,
@@ -34,6 +50,7 @@ struct LocalPvgsState {
     micro_milestones: Vec<ucf::v1::MicroMilestone>,
     consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     replay_plans: Vec<ucf::v1::ReplayPlan>,
+    latest_trace_run: Option<TraceRunSummary>,
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
     unlock_permits: HashMap<String, Option<[u8; 32]>>,
     microcircuit_configs: Vec<ucf::v1::MicrocircuitConfigEvidence>,
@@ -72,6 +89,7 @@ impl LocalPvgs {
                 micro_milestones: Vec::new(),
                 consistency_feedback: Vec::new(),
                 replay_plans: Vec::new(),
+                latest_trace_run: None,
                 sealed_sessions: HashMap::new(),
                 unlock_permits: HashMap::new(),
                 microcircuit_configs: Vec::new(),
@@ -133,6 +151,16 @@ impl LocalPvgs {
         guard
             .replay_plans
             .retain(|plan| plan.replay_id != replay_id);
+    }
+
+    pub fn set_latest_trace_run(&self, summary: TraceRunSummary) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard.latest_trace_run = Some(summary);
+    }
+
+    pub fn get_latest_trace_run(&self) -> Option<TraceRunSummary> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard.latest_trace_run.clone()
     }
 
     pub fn seal_session(&self, session_id: &str, seal_digest: Option<[u8; 32]>) {
