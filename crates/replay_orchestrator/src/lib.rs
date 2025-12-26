@@ -89,6 +89,7 @@ impl ReplayOrchestrator {
                 &step_id,
                 &plan,
                 None,
+                None,
                 MicroEvidence::default(),
                 MicrocircuitConfigRefs::default(),
             );
@@ -148,6 +149,19 @@ fn push_related_ref(related_refs: &mut Vec<ucf::v1::RelatedRef>, related_ref: uc
     }
 }
 
+fn push_related_ref_kept(
+    related_refs: &mut Vec<ucf::v1::RelatedRef>,
+    related_ref: ucf::v1::RelatedRef,
+) {
+    if related_refs.len() >= MAX_RELATED_REFS {
+        if related_refs.len() == 1 {
+            return;
+        }
+        related_refs.pop();
+    }
+    related_refs.push(related_ref);
+}
+
 fn micro_related_ref(id: &str, digest: [u8; 32]) -> ucf::v1::RelatedRef {
     ucf::v1::RelatedRef {
         id: id.to_string(),
@@ -189,6 +203,7 @@ fn build_replay_record(
     step_id: &str,
     plan: &ucf::v1::ReplayPlan,
     ruleset_digest: Option<[u8; 32]>,
+    replay_run_digest: Option<[u8; 32]>,
     micro_evidence: MicroEvidence,
     microcircuit_config_refs: MicrocircuitConfigRefs,
 ) -> ucf::v1::ExperienceRecord {
@@ -229,6 +244,18 @@ fn build_replay_record(
             &mut related_refs,
             ucf::v1::RelatedRef {
                 id: "ruleset".to_string(),
+                digest: Some(ucf::v1::Digest32 {
+                    value: digest.to_vec(),
+                }),
+            },
+        );
+    }
+
+    if let Some(digest) = replay_run_digest {
+        push_related_ref_kept(
+            &mut related_refs,
+            ucf::v1::RelatedRef {
+                id: "replay_run".to_string(),
                 digest: Some(ucf::v1::Digest32 {
                     value: digest.to_vec(),
                 }),
@@ -446,6 +473,7 @@ mod tests {
             &step_id,
             &plan,
             None,
+            None,
             MicroEvidence::default(),
             MicrocircuitConfigRefs::default(),
         );
@@ -477,6 +505,7 @@ mod tests {
             &step_id,
             &plan,
             Some([9u8; 32]),
+            Some([8u8; 32]),
             MicroEvidence {
                 lc_digest: Some([1u8; 32]),
                 sn_digest: Some([2u8; 32]),
@@ -494,6 +523,7 @@ mod tests {
             vec![
                 "replay_plan",
                 "ruleset",
+                "replay_run",
                 "mc:lc",
                 "mc:sn",
                 "mc_snap:plasticity",
@@ -513,6 +543,7 @@ mod tests {
             &step_id,
             &plan,
             None,
+            Some([8u8; 32]),
             MicroEvidence::default(),
             MicrocircuitConfigRefs::default(),
         );
@@ -521,10 +552,38 @@ mod tests {
             &step_id,
             &plan,
             None,
+            Some([8u8; 32]),
             MicroEvidence::default(),
             MicrocircuitConfigRefs::default(),
         );
 
         assert_eq!(canonical_bytes(&record_a), canonical_bytes(&record_b));
+    }
+
+    #[test]
+    fn replay_record_keeps_replay_run_when_crowded() {
+        let plan = replay_plan("plan-crowd");
+        let step_id = replay_step_id("sess", &plan.replay_id);
+
+        let record = build_replay_record(
+            "sess",
+            &step_id,
+            &plan,
+            Some([9u8; 32]),
+            Some([8u8; 32]),
+            MicroEvidence {
+                lc_digest: Some([1u8; 32]),
+                sn_digest: Some([2u8; 32]),
+                plasticity_digest: Some([3u8; 32]),
+            },
+            MicrocircuitConfigRefs {
+                lc_digest: Some([4u8; 32]),
+                sn_digest: Some([5u8; 32]),
+            },
+        );
+
+        let ids: Vec<_> = record.related_refs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(record.related_refs.len(), MAX_RELATED_REFS);
+        assert!(ids.contains(&"replay_run"));
     }
 }
