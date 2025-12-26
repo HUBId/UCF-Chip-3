@@ -96,6 +96,22 @@ pub struct CbvDigest {
     pub digest: [u8; 32],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceRunStatus {
+    Pass,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceRunSummary {
+    pub trace_id: String,
+    pub trace_run_digest: [u8; 32],
+    pub status: TraceRunStatus,
+    pub created_at_ms: u64,
+    pub asset_manifest_digest: Option<[u8; 32]>,
+    pub circuit_config_digest: Option<[u8; 32]>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Scorecard {
     pub replay_mismatch_count: u64,
@@ -237,6 +253,10 @@ pub trait PvgsReader: Send + Sync {
 
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
         None
+    }
+
+    fn get_latest_trace_run(&mut self) -> Result<Option<TraceRunSummary>, PvgsClientError> {
+        Ok(None)
     }
 
     fn get_pending_replay_plans(
@@ -595,6 +615,23 @@ impl PvgsReader for Chip4LocalPvgsClient {
 
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
         None
+    }
+
+    fn get_latest_trace_run(&mut self) -> Result<Option<TraceRunSummary>, PvgsClientError> {
+        Ok(self
+            .pvgs
+            .get_latest_trace_run()
+            .map(|trace| TraceRunSummary {
+                trace_id: trace.trace_id,
+                trace_run_digest: trace.trace_run_digest,
+                status: match trace.status {
+                    chip4_pvgs::TraceRunStatus::Pass => TraceRunStatus::Pass,
+                    chip4_pvgs::TraceRunStatus::Fail => TraceRunStatus::Fail,
+                },
+                created_at_ms: trace.created_at_ms,
+                asset_manifest_digest: trace.asset_manifest_digest,
+                circuit_config_digest: trace.circuit_config_digest,
+            }))
     }
 
     fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError> {
@@ -1216,6 +1253,10 @@ impl PvgsReader for LocalPvgsClient {
         None
     }
 
+    fn get_latest_trace_run(&mut self) -> Result<Option<TraceRunSummary>, PvgsClientError> {
+        Ok(None)
+    }
+
     fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError> {
         Ok(self.sealed_sessions.contains_key(session_id))
     }
@@ -1332,6 +1373,7 @@ pub struct MockPvgsClient {
     pub scorecard_global_calls: u64,
     pub scorecard_session_calls: u64,
     pub spotcheck_calls: u64,
+    pub trace_run_summary: Option<TraceRunSummary>,
 }
 
 impl MockPvgsClient {
@@ -1380,6 +1422,10 @@ impl PvgsReader for MockPvgsClient {
 
     fn get_latest_cbv_digest(&self) -> Option<CbvDigest> {
         self.latest_cbv_digest
+    }
+
+    fn get_latest_trace_run(&mut self) -> Result<Option<TraceRunSummary>, PvgsClientError> {
+        Ok(self.trace_run_summary.clone())
     }
 
     fn is_session_sealed(&self, _session_id: &str) -> Result<bool, PvgsClientError> {

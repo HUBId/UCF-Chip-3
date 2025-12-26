@@ -325,6 +325,12 @@ pub enum DlpDecision {
     ClassifyUpgrade,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum TraceHealthStatus {
+    Pass,
+    Fail,
+}
+
 #[derive(Debug, Clone)]
 struct WindowState<C: Clock> {
     window_index: u64,
@@ -552,6 +558,18 @@ impl<C: Clock> WindowEngine<C> {
         for window in self.windows.values_mut() {
             window.integrity_state = state;
         }
+    }
+
+    pub fn on_trace_health(&mut self, status: TraceHealthStatus, reason_codes: &[String]) {
+        self.apply_to_windows(|state| {
+            state.exec_reasons.record(reason_codes.iter().cloned());
+            state.record_event();
+            if matches!(status, TraceHealthStatus::Fail) {
+                state.integrity_state = ucf::v1::IntegrityState::Degraded;
+                state.integrity_counts.issues += 1;
+                state.integrity_reasons.record(reason_codes.iter().cloned());
+            }
+        });
     }
 
     pub fn force_flush(&mut self) -> Vec<ucf::v1::SignalFrame> {

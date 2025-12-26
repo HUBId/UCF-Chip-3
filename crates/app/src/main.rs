@@ -183,7 +183,7 @@ fn run_scheduler(session_id: &str, ticks: u64) {
     });
     let mut frames = WindowEngine::new(frames_config).expect("window engine from config");
     let mut pvgs = LocalPvgsClient::default();
-    let mut scheduler = ScheduleState::new(100, 250);
+    let mut scheduler = ScheduleState::new(100, 250, 200);
 
     for _ in 0..ticks {
         scheduler.tick(Some(session_id), &mut pvgs, &mut frames);
