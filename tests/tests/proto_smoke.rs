@@ -65,9 +65,9 @@ fn proto_roundtrip_is_deterministic() {
             control_frame_ref: Some(ucf::v1::Digest32 {
                 value: vec![7u8; 32],
             }),
-            hormone_classes: vec![ucf::v1::HormoneClass::Baseline.into()],
+            hormone_classes: vec![ucf::v1::HormoneClass::Low.into()],
             noise_class: ucf::v1::NoiseClass::Low.into(),
-            priority_class: ucf::v1::PriorityClass::PriorityNormal.into(),
+            priority_class: ucf::v1::PriorityClass::Medium.into(),
         }),
         governance_frame: Some(ucf::v1::GovernanceFrame {
             policy_decision_refs: vec![ucf::v1::Digest32 {

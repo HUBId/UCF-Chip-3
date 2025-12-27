@@ -4,16 +4,17 @@ use std::sync::{Arc, Mutex};
 
 use ckm_orchestrator::CkmOrchestrator;
 use control::ControlFrameStore;
+use ed25519_dalek::SigningKey;
 use frames::{FramesConfig, WindowEngine};
 use gem::{DecisionLogStore, Gate, GateContext, GateResult, QueryDecisionMap};
-use pbm::PolicyEngine;
+use pbm::{PolicyContext, PolicyEngine, PolicyEvaluationRequest};
 use pvgs_client::{
     MockPvgsClient, PvgsClient, PvgsClientError, PvgsHead, PvgsReader, Scorecard, SpotCheckReport,
 };
 use tam::ToolAdapter;
 use trm::ToolRegistry;
-use ucf_protocol::ucf;
-use ucf_test_utils::make_control_frame;
+use ucf_protocol::{canonical_bytes, digest32, ucf};
+use ucf_test_utils::{make_control_frame, make_pvgs_key_epoch, make_pvgs_receipt_accepted};
 
 #[derive(Clone)]
 struct SharedMockPvgsClient {
@@ -238,18 +239,12 @@ impl ToolAdapter for NoopAdapter {
     }
 }
 
-fn build_gate(pvgs_client: Arc<Mutex<MockPvgsClient>>, registry: Arc<ToolRegistry>) -> Gate {
-    let (control_frame, _) = make_control_frame(
-        ucf::v1::ControlFrameProfile::M0Baseline,
-        None,
-        ucf::v1::ToolClassMask {
-            enable_read: true,
-            enable_transform: true,
-            enable_export: true,
-            enable_write: true,
-            enable_execute: true,
-        },
-    );
+fn build_gate(
+    pvgs_client: Arc<Mutex<MockPvgsClient>>,
+    registry: Arc<ToolRegistry>,
+    control_frame: ucf::v1::ControlFrame,
+    receipt_store: pvgs_verify::PvgsKeyEpochStore,
+) -> Gate {
     let mut control_store = ControlFrameStore::new();
     control_store
         .update(control_frame)
@@ -267,7 +262,7 @@ fn build_gate(pvgs_client: Arc<Mutex<MockPvgsClient>>, registry: Arc<ToolRegistr
             aggregator,
         ))),
         control_store: Arc::new(Mutex::new(control_store)),
-        receipt_store: Arc::new(pvgs_verify::PvgsKeyEpochStore::new()),
+        receipt_store: Arc::new(receipt_store),
         registry,
         pvgs_client: Arc::new(Mutex::new(Box::new(SharedMockPvgsClient::new(
             pvgs_client,
@@ -282,7 +277,30 @@ fn build_gate(pvgs_client: Arc<Mutex<MockPvgsClient>>, registry: Arc<ToolRegistr
 fn pvgs_smoke_builds_decision_and_action_records() {
     let pvgs_inner = Arc::new(Mutex::new(MockPvgsClient::default()));
     let registry = Arc::new(trm::registry_fixture());
-    let gate = build_gate(pvgs_inner.clone(), registry.clone());
+    let (control_frame, control_digest) = make_control_frame(
+        ucf::v1::ControlFrameProfile::M0Baseline,
+        None,
+        ucf::v1::ToolClassMask {
+            enable_read: true,
+            enable_transform: true,
+            enable_export: true,
+            enable_write: true,
+            enable_execute: true,
+        },
+    );
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let key_epoch = make_pvgs_key_epoch(1, &signing_key);
+    let mut receipt_store = pvgs_verify::PvgsKeyEpochStore::new();
+    receipt_store
+        .ingest_key_epoch(key_epoch.clone())
+        .expect("ingest key epoch");
+
+    let gate = build_gate(
+        pvgs_inner.clone(),
+        registry.clone(),
+        control_frame.clone(),
+        receipt_store,
+    );
 
     let mut client = pvgs_inner.lock().expect("pvgs lock");
     client
@@ -319,12 +337,87 @@ fn pvgs_smoke_builds_decision_and_action_records() {
         resources: vec!["dataset".to_string()],
     };
 
+    let action_digest = digest32(
+        "UCF:HASH:ACTION_SPEC",
+        "ActionSpec",
+        "v1",
+        &canonical_bytes(&action),
+    );
+    let tool_profile_digest = registry
+        .tool_profile_digest("mock.export", "render")
+        .expect("tool profile digest");
+
+    let policy_context = PolicyContext {
+        integrity_state: ctx.integrity_state.clone(),
+        charter_version_digest: ctx.charter_version_digest.clone(),
+        allowed_tools: ctx.allowed_tools.clone(),
+        control_frame: control_frame.clone(),
+        tool_action_type: ucf::v1::ToolActionType::Export,
+        pev: None,
+        pev_digest: None,
+        ruleset_digest: None,
+        session_sealed: false,
+        unlock_present: false,
+    };
+
+    let decision_record = gate.policy.decide_with_context(PolicyEvaluationRequest {
+        decision_id: "s1:step-1".to_string(),
+        query: ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(action.clone()),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        },
+        context: policy_context.clone(),
+    });
+    let receipt = make_pvgs_receipt_accepted(
+        action_digest,
+        decision_record.decision_digest,
+        control_digest.clone(),
+        tool_profile_digest.clone(),
+        &signing_key,
+        &key_epoch,
+        None,
+    );
+    let ctx_with_receipt = GateContext {
+        pvgs_receipt: Some(receipt),
+        ..ctx.clone()
+    };
+
+    let decision_record_b = gate.policy.decide_with_context(PolicyEvaluationRequest {
+        decision_id: "s1:step-2".to_string(),
+        query: ucf::v1::PolicyQuery {
+            principal: "chip3".to_string(),
+            action: Some(action.clone()),
+            channel: ucf::v1::Channel::Unspecified.into(),
+            risk_level: ucf::v1::RiskLevel::Unspecified.into(),
+            data_class: ucf::v1::DataClass::Unspecified.into(),
+            reason_codes: None,
+        },
+        context: policy_context,
+    });
+    let receipt_b = make_pvgs_receipt_accepted(
+        action_digest,
+        decision_record_b.decision_digest,
+        control_digest,
+        tool_profile_digest,
+        &signing_key,
+        &key_epoch,
+        None,
+    );
+    let ctx_with_receipt_b = GateContext {
+        pvgs_receipt: Some(receipt_b),
+        ..ctx
+    };
+
     assert!(matches!(
-        gate.handle_action_spec("s1", "step-1", action.clone(), ctx.clone()),
+        gate.handle_action_spec("s1", "step-1", action.clone(), ctx_with_receipt),
         GateResult::Executed { .. }
     ));
     assert!(matches!(
-        gate.handle_action_spec("s1", "step-2", action.clone(), ctx),
+        gate.handle_action_spec("s1", "step-2", action.clone(), ctx_with_receipt_b),
         GateResult::Executed { .. }
     ));
 
@@ -356,6 +449,13 @@ fn pvgs_smoke_builds_decision_and_action_records() {
         .collect();
     assert_eq!(decision_ids, vec!["policy_query", "policy_decision"]);
 
+    let decision_ids_b: Vec<_> = decision_b
+        .related_refs
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(decision_ids_b, decision_ids);
+
     let action_ids: Vec<_> = action_a
         .related_refs
         .iter()
@@ -363,6 +463,10 @@ fn pvgs_smoke_builds_decision_and_action_records() {
         .collect();
     assert_eq!(action_ids, vec!["policy_query", "decision"]);
 
-    assert_eq!(decision_a.related_refs, decision_b.related_refs);
-    assert_eq!(action_a.related_refs, action_b.related_refs);
+    let action_ids_b: Vec<_> = action_b
+        .related_refs
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(action_ids_b, action_ids);
 }
