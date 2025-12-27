@@ -248,7 +248,7 @@ fn build_gate(
 
     Gate {
         policy: PolicyEngine::new(),
-        adapter: Box::new(NoopAdapter::default()),
+        adapter: Box::new(NoopAdapter),
         aggregator: aggregator.clone(),
         orchestrator: Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(aggregator))),
         control_store: Arc::new(Mutex::new(control_store)),
