@@ -6,6 +6,7 @@ use std::{
     collections::HashMap,
     convert::TryFrom,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use cdm::{dlp_check_output, dlp_decision_digest, output_artifact_digest};
@@ -18,8 +19,9 @@ use pbm::{
     compute_decision_digest, policy_query_digest, DecisionForm, PolicyContext,
     PolicyDecisionRecord, PolicyEngine, PolicyEvaluationRequest,
 };
-use pvgs_client::PvgsClientReader;
+use pvgs_client::{PvgsClientReader, RppHeadMeta};
 use pvgs_verify::{verify_pvgs_receipt, PvgsKeyEpochStore, VerifyError};
+use rpp_checker::{verify_accumulator, RppCheckInputs};
 use tam::ToolAdapter;
 use trm::{ToolLookup, ToolRegistry};
 use ucf_protocol::{canonical_bytes, digest32, digest_proto, ucf};
@@ -27,6 +29,7 @@ use ucf_protocol::{canonical_bytes, digest32, digest_proto, ucf};
 const RECEIPT_BLOCKED_REASON: &str = "RC.GE.EXEC.DISPATCH_BLOCKED";
 const RECEIPT_UNKNOWN_KEY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
 const PVGS_INTEGRITY_REASON: &str = "RC.RE.INTEGRITY.DEGRADED";
+const RPP_VERIFY_FAIL_REASON: &str = "RC.GV.RPP.VERIFY_FAIL";
 const REPLAY_MISMATCH_REASON: &str = "RC.RE.REPLAY.MISMATCH";
 const FORENSIC_ACTION_REASON: &str = "RC.RX.ACTION.FORENSIC";
 const INTEGRITY_FAIL_REASON: &str = "RC.RE.INTEGRITY.FAIL";
@@ -38,6 +41,7 @@ const METABOLIC_FRAME_DOMAIN: &str = "UCF:HASH:METABOLIC_FRAME";
 const GOVERNANCE_FRAME_DOMAIN: &str = "UCF:HASH:GOVERNANCE_FRAME";
 const BUDGET_SNAPSHOT_DOMAIN: &str = "UCF:HASH:BUDGET_SNAPSHOT";
 const GRANT_REF_DOMAIN: &str = "UCF:HASH:GRANT_REF";
+const RPP_META_CACHE_TTL: Duration = Duration::from_millis(250);
 const POLICY_DECISION_REF: &str = "policy_decision";
 const MAX_RELATED_REFS: usize = 8;
 
@@ -178,6 +182,7 @@ pub struct Gate {
     pub integrity_issues: Arc<Mutex<u64>>,
     pub decision_log: Arc<Mutex<DecisionLogStore>>,
     pub query_decisions: Arc<Mutex<QueryDecisionMap>>,
+    pub rpp_cache: Arc<Mutex<RppMetaCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +213,8 @@ pub struct DecisionContext {
     pub tool_profile_digest: Option<[u8; 32]>,
     pub commit_disposition: DecisionCommitDisposition,
     pub receipt_digest: Option<[u8; 32]>,
+    pub(crate) rpp_head_meta: Option<RppHeadMeta>,
+    pub(crate) rpp_refs: RppEvidenceRefs,
     pub(crate) micro_evidence: MicroEvidence,
     pub(crate) microcircuit_config_refs: MicrocircuitConfigRefs,
 }
@@ -229,6 +236,33 @@ impl MicroEvidence {
 pub(crate) struct MicrocircuitConfigRefs {
     lc_digest: Option<[u8; 32]>,
     sn_digest: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RppEvidenceRefs {
+    prev_acc_digest: Option<[u8; 32]>,
+    acc_digest: Option<[u8; 32]>,
+    new_root_digest: Option<[u8; 32]>,
+}
+
+impl RppEvidenceRefs {
+    fn from_meta(meta: Option<RppHeadMeta>) -> Self {
+        if let Some(meta) = meta {
+            Self {
+                prev_acc_digest: Some(meta.prev_acc_digest),
+                acc_digest: Some(meta.acc_digest),
+                new_root_digest: Some(meta.state_root),
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RppMetaCache {
+    fetched_at: Option<Instant>,
+    meta: Option<RppHeadMeta>,
 }
 
 #[derive(Clone, Copy)]
@@ -348,6 +382,7 @@ impl Gate {
         });
 
         decision.policy_query_digest = policy_query_digest;
+        let rpp_head_meta = self.load_rpp_head_meta();
 
         let mut decision_context = DecisionContext {
             session_id: session_id.to_string(),
@@ -364,6 +399,8 @@ impl Gate {
                 .and_then(digest32_to_array),
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            rpp_head_meta,
+            rpp_refs: RppEvidenceRefs::from_meta(rpp_head_meta),
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
             microcircuit_config_refs: microcircuit_config_refs_from_pvgs(&self.pvgs_client),
         };
@@ -426,6 +463,14 @@ impl Gate {
                         &action,
                         &mut decision,
                         &ctx,
+                        &mut decision_context,
+                    ) {
+                        return result;
+                    }
+
+                    if let Err(result) = self.enforce_rpp_second_check(
+                        action_type,
+                        &mut decision,
                         &mut decision_context,
                     ) {
                         return result;
@@ -1115,6 +1160,82 @@ impl Gate {
         Ok(())
     }
 
+    fn load_rpp_head_meta(&self) -> Option<RppHeadMeta> {
+        let now = Instant::now();
+        if let Ok(cache) = self.rpp_cache.lock() {
+            if let Some(fetched_at) = cache.fetched_at {
+                if now.duration_since(fetched_at) <= RPP_META_CACHE_TTL {
+                    return cache.meta;
+                }
+            }
+        }
+
+        let meta = self
+            .pvgs_client
+            .lock()
+            .ok()
+            .and_then(|mut client| client.get_latest_rpp_head_meta().ok().flatten());
+
+        if let Ok(mut cache) = self.rpp_cache.lock() {
+            cache.fetched_at = Some(now);
+            cache.meta = meta;
+        }
+
+        meta
+    }
+
+    fn enforce_rpp_second_check(
+        &self,
+        action_type: ucf::v1::ToolActionType,
+        decision: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
+    ) -> Result<(), GateResult> {
+        if !is_side_effect_action(action_type) {
+            return Ok(());
+        }
+
+        let Some(meta) = decision_ctx.rpp_head_meta else {
+            return Err(self.rpp_verification_denied(decision, decision_ctx));
+        };
+
+        let Some(payload_digest) = meta.payload_digest else {
+            return Err(self.rpp_verification_denied(decision, decision_ctx));
+        };
+
+        let inputs = RppCheckInputs {
+            prev_acc: meta.prev_acc_digest,
+            prev_root: meta.prev_state_root,
+            new_root: meta.state_root,
+            payload_digest,
+            ruleset_digest: meta.ruleset_digest,
+            asset_manifest_digest: meta.asset_manifest_digest,
+        };
+
+        let result = verify_accumulator(meta.acc_digest, &inputs);
+        if result.ok {
+            return Ok(());
+        }
+
+        self.note_integrity_issue(&result.reason_codes);
+        self.deny_with_reasons(decision, decision_ctx, &result.reason_codes);
+        Err(GateResult::Denied {
+            decision: decision.clone(),
+        })
+    }
+
+    fn rpp_verification_denied(
+        &self,
+        decision: &mut PolicyDecisionRecord,
+        decision_ctx: &mut DecisionContext,
+    ) -> GateResult {
+        let reason_codes = rpp_verification_reason_codes();
+        self.note_integrity_issue(&reason_codes);
+        self.deny_with_reasons(decision, decision_ctx, &reason_codes);
+        GateResult::Denied {
+            decision: decision.clone(),
+        }
+    }
+
     fn note_receipt_issue(&self, issue: ReceiptIssue, reason_codes: &[String]) {
         if let Ok(mut agg) = self.aggregator.lock() {
             agg.on_receipt_issue(issue, reason_codes);
@@ -1304,6 +1425,27 @@ fn append_microcircuit_config_refs(
     }
 }
 
+fn append_rpp_refs(related_refs: &mut Vec<ucf::v1::RelatedRef>, rpp_refs: RppEvidenceRefs) {
+    if let Some(digest) = rpp_refs.prev_acc_digest {
+        push_related_ref(related_refs, rpp_related_ref("rpp:prev_acc", digest));
+    }
+    if let Some(digest) = rpp_refs.acc_digest {
+        push_related_ref(related_refs, rpp_related_ref("rpp:acc", digest));
+    }
+    if let Some(digest) = rpp_refs.new_root_digest {
+        push_related_ref(related_refs, rpp_related_ref("rpp:new_root", digest));
+    }
+}
+
+fn rpp_related_ref(id: &str, digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: id.to_string(),
+        digest: Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+    }
+}
+
 fn ensure_dlp_decision_digest(decision: &mut ucf::v1::DlpDecision) {
     if let Some(rc) = decision.reason_codes.as_mut() {
         rc.codes.sort();
@@ -1384,6 +1526,7 @@ fn build_decision_record(
             },
         );
     }
+    append_rpp_refs(&mut related_refs, decision_ctx.rpp_refs);
     append_micro_evidence_refs(&mut related_refs, decision_ctx.micro_evidence);
     append_microcircuit_config_refs(&mut related_refs, decision_ctx.microcircuit_config_refs);
 
@@ -1428,6 +1571,7 @@ fn build_action_exec_record(
     if let Some(ruleset_digest) = decision_ctx.ruleset_digest {
         push_related_ref(&mut related_refs, ruleset_related_ref(ruleset_digest));
     }
+    append_rpp_refs(&mut related_refs, decision_ctx.rpp_refs);
     append_micro_evidence_refs(&mut related_refs, decision_ctx.micro_evidence);
     append_microcircuit_config_refs(&mut related_refs, decision_ctx.microcircuit_config_refs);
     if let Some(receipt_digest) = decision_ctx.receipt_digest {
@@ -1761,6 +1905,15 @@ fn is_side_effect_action(action_type: ucf::v1::ToolActionType) -> bool {
     )
 }
 
+fn rpp_verification_reason_codes() -> Vec<String> {
+    let mut codes = vec![
+        PVGS_INTEGRITY_REASON.to_string(),
+        RPP_VERIFY_FAIL_REASON.to_string(),
+    ];
+    codes.sort();
+    codes
+}
+
 #[cfg(test)]
 mod micro_evidence_fallback {
     use super::*;
@@ -1840,6 +1993,7 @@ mod tests {
         inner: Arc<Mutex<pvgs_client::LocalPvgsClient>>,
         decision_counts: Arc<Mutex<HashMap<[u8; 32], usize>>>,
         call_order: Arc<Mutex<Vec<&'static str>>>,
+        rpp_head_calls: Arc<Mutex<u64>>,
     }
 
     impl CountingPvgsClient {
@@ -1848,6 +2002,7 @@ mod tests {
                 inner: Arc::new(Mutex::new(inner)),
                 decision_counts: Arc::new(Mutex::new(HashMap::new())),
                 call_order: Arc::new(Mutex::new(Vec::new())),
+                rpp_head_calls: Arc::new(Mutex::new(0)),
             }
         }
 
@@ -1867,6 +2022,10 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect()
+        }
+
+        fn rpp_head_query_count(&self) -> u64 {
+            *self.rpp_head_calls.lock().expect("rpp head count lock")
         }
     }
 
@@ -2032,6 +2191,27 @@ mod tests {
                 .lock()
                 .expect("pvgs client lock")
                 .get_latest_cbv_digest()
+        }
+
+        fn get_latest_rpp_head_meta(
+            &mut self,
+        ) -> Result<Option<pvgs_client::RppHeadMeta>, pvgs_client::PvgsClientError> {
+            let mut guard = self.rpp_head_calls.lock().expect("rpp head count lock");
+            *guard += 1;
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_latest_rpp_head_meta()
+        }
+
+        fn get_rpp_head_meta(
+            &mut self,
+            head_id: u64,
+        ) -> Result<Option<pvgs_client::RppHeadMeta>, pvgs_client::PvgsClientError> {
+            self.inner
+                .lock()
+                .expect("pvgs client lock")
+                .get_rpp_head_meta(head_id)
         }
 
         fn is_session_sealed(
@@ -2675,6 +2855,7 @@ mod tests {
             integrity_issues,
             decision_log,
             query_decisions,
+            rpp_cache: Arc::new(Mutex::new(RppMetaCache::default())),
         }
     }
 
@@ -2953,6 +3134,57 @@ mod tests {
         digest32("UCF:HASH:ACTION_SPEC", "ActionSpec", "v1", &canonical)
     }
 
+    fn rpp_meta_fixture() -> pvgs_client::RppHeadMeta {
+        let inputs = RppCheckInputs {
+            prev_acc: [1u8; 32],
+            prev_root: [2u8; 32],
+            new_root: [3u8; 32],
+            payload_digest: [4u8; 32],
+            ruleset_digest: [5u8; 32],
+            asset_manifest_digest: None,
+        };
+        let acc_digest = rpp_checker::compute_accumulator_digest(&inputs);
+        pvgs_client::RppHeadMeta {
+            head_id: 7,
+            head_record_digest: [9u8; 32],
+            prev_state_root: inputs.prev_root,
+            state_root: inputs.new_root,
+            prev_acc_digest: inputs.prev_acc,
+            acc_digest,
+            ruleset_digest: inputs.ruleset_digest,
+            asset_manifest_digest: inputs.asset_manifest_digest,
+            payload_digest: Some(inputs.payload_digest),
+        }
+    }
+
+    fn signed_receipt_for_action(
+        gate: &Gate,
+        action: &ucf::v1::ActionSpec,
+        ctx: &GateContext,
+        session_id: &str,
+        step_id: &str,
+        signer: &SigningKey,
+        key_id: &str,
+    ) -> ucf::v1::PvgsReceipt {
+        let decision = policy_decision_for(gate, action, ctx, session_id, step_id);
+        let action_digest = compute_action_digest(action);
+        let (tool_id, action_id) = parse_tool_and_action(action);
+        let tool_profile_digest = gate
+            .registry
+            .get(&tool_id, &action_id)
+            .and_then(|tap| tap.profile_digest.as_ref())
+            .expect("tool profile digest");
+
+        signed_receipt_for(
+            action_digest,
+            decision.decision_digest,
+            signer,
+            key_id,
+            &open_control_frame_digest(),
+            tool_profile_digest,
+        )
+    }
+
     #[test]
     fn denies_without_invoking_adapter() {
         let counting = CountingAdapter::default();
@@ -3125,10 +3357,17 @@ mod tests {
             Ok(ucf::v1::RecordType::Decision)
         );
         let related_ids: Vec<_> = record.related_refs.iter().map(|r| r.id.clone()).collect();
-        assert_eq!(
-            related_ids,
-            vec!["policy_query".to_string(), POLICY_DECISION_REF.to_string()]
-        );
+        assert_eq!(related_ids[0], "policy_query");
+        assert_eq!(related_ids[1], POLICY_DECISION_REF);
+        let rpp_ids: Vec<_> = record
+            .related_refs
+            .iter()
+            .filter(|r| r.id.starts_with("rpp:"))
+            .map(|r| r.id.as_str())
+            .collect();
+        if !rpp_ids.is_empty() {
+            assert_eq!(rpp_ids, vec!["rpp:prev_acc", "rpp:acc", "rpp:new_root"]);
+        }
 
         let policy_query = ucf::v1::PolicyQuery {
             principal: "chip3".to_string(),
@@ -3191,6 +3430,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: Some([4u8; 32]),
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: MicroEvidence::default(),
             microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
@@ -3287,6 +3528,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
             microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
@@ -3375,6 +3618,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: MicroEvidence {
                 lc_digest: Some([11u8; 32]),
                 sn_digest: Some([12u8; 32]),
@@ -3488,6 +3733,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: Some([4u8; 32]),
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
             microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
@@ -3571,6 +3818,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: Some([4u8; 32]),
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: MicroEvidence {
                 lc_digest: Some([11u8; 32]),
                 sn_digest: Some([12u8; 32]),
@@ -3662,6 +3911,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: micro_evidence_from_control_frame(&control_frame_open()),
             microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
@@ -3715,6 +3966,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: micro_evidence_from_control_frame(&control_frame),
             microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
@@ -3758,6 +4011,8 @@ mod tests {
             tool_profile_digest: None,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: micro_evidence_from_control_frame(&control_frame_open()),
             microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
@@ -3861,6 +4116,8 @@ mod tests {
             tool_profile_digest,
             commit_disposition: DecisionCommitDisposition::CommitRequired,
             receipt_digest: None,
+            rpp_head_meta: None,
+            rpp_refs: RppEvidenceRefs::default(),
             micro_evidence: MicroEvidence::default(),
             microcircuit_config_refs: MicrocircuitConfigRefs::default(),
         };
@@ -3943,14 +4200,22 @@ mod tests {
             Some(expected_digest.to_vec())
         );
 
-        assert_eq!(
-            decision_record
-                .related_refs
-                .iter()
-                .map(|r| r.id.clone())
-                .collect::<Vec<_>>(),
-            vec!["policy_query".to_string(), POLICY_DECISION_REF.to_string(),]
-        );
+        let related_ids: Vec<_> = decision_record
+            .related_refs
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        assert_eq!(related_ids[0], "policy_query");
+        assert_eq!(related_ids[1], POLICY_DECISION_REF);
+        let rpp_ids: Vec<_> = decision_record
+            .related_refs
+            .iter()
+            .filter(|r| r.id.starts_with("rpp:"))
+            .map(|r| r.id.as_str())
+            .collect();
+        if !rpp_ids.is_empty() {
+            assert_eq!(rpp_ids, vec!["rpp:prev_acc", "rpp:acc", "rpp:new_root"]);
+        }
     }
 
     #[test]
@@ -3996,6 +4261,117 @@ mod tests {
 
         assert_eq!(decision_ref.value, decision_digest);
         assert_eq!(counting.count(), 1, "adapter executes once for success");
+    }
+
+    #[test]
+    fn rpp_verification_allows_side_effect_action() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, signer, key_id) = receipt_store_with_key();
+        let mut local = pvgs_client::LocalPvgsClient::default();
+        local.set_latest_rpp_head_meta(rpp_meta_fixture());
+        let pvgs = CountingPvgsClient::new(local);
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store,
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            boxed_client(pvgs),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let action = base_action("mock.export", "render");
+        let base_ctx = ok_ctx();
+        let mut ctx = base_ctx.clone();
+        ctx.pvgs_receipt = Some(signed_receipt_for_action(
+            &gate, &action, &base_ctx, "s", "step", &signer, &key_id,
+        ));
+
+        let result = gate.handle_action_spec("s", "step", action, ctx);
+        assert!(matches!(result, GateResult::Executed { .. }));
+        assert_eq!(counting.count(), 1);
+    }
+
+    #[test]
+    fn rpp_verification_blocks_side_effect_on_mismatch() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, signer, key_id) = receipt_store_with_key();
+        let mut meta = rpp_meta_fixture();
+        meta.acc_digest = [0u8; 32];
+        let mut local = pvgs_client::LocalPvgsClient::default();
+        local.set_latest_rpp_head_meta(meta);
+        let pvgs = CountingPvgsClient::new(local);
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store,
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            boxed_client(pvgs),
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let action = base_action("mock.export", "render");
+        let base_ctx = ok_ctx();
+        let mut ctx = base_ctx.clone();
+        ctx.pvgs_receipt = Some(signed_receipt_for_action(
+            &gate, &action, &base_ctx, "s", "step", &signer, &key_id,
+        ));
+
+        let result = gate.handle_action_spec("s", "step", action, ctx);
+        match result {
+            GateResult::Denied { decision } => {
+                let reason_codes = decision.decision.reason_codes.expect("reason codes").codes;
+                assert!(reason_codes.contains(&RPP_VERIFY_FAIL_REASON.to_string()));
+            }
+            other => panic!("expected denial, got {other:?}"),
+        }
+        assert_eq!(counting.count(), 0);
+        assert_eq!(
+            *gate.integrity_issues.lock().expect("integrity count lock"),
+            1
+        );
+    }
+
+    #[test]
+    fn rpp_meta_cache_reuses_latest_head() {
+        let counting = CountingAdapter::default();
+        let (receipt_store, signer, key_id) = receipt_store_with_key();
+        let mut local = pvgs_client::LocalPvgsClient::default();
+        local.set_latest_rpp_head_meta(rpp_meta_fixture());
+        let pvgs = CountingPvgsClient::new(local);
+        let pvgs_handle = boxed_client(pvgs.clone());
+        let gate = gate_with_components(
+            Box::new(counting.clone()),
+            open_control_store(),
+            receipt_store,
+            default_aggregator(),
+            Arc::new(trm::registry_fixture()),
+            pvgs_handle,
+            integrity_counter(),
+            default_decision_log(),
+            default_query_map(),
+        );
+
+        let action = base_action("mock.export", "render");
+        let base_ctx = ok_ctx();
+        let mut ctx = base_ctx.clone();
+        ctx.pvgs_receipt = Some(signed_receipt_for_action(
+            &gate, &action, &base_ctx, "s", "step1", &signer, &key_id,
+        ));
+        let _ = gate.handle_action_spec("s", "step1", action.clone(), ctx);
+
+        let mut ctx = base_ctx.clone();
+        ctx.pvgs_receipt = Some(signed_receipt_for_action(
+            &gate, &action, &base_ctx, "s", "step2", &signer, &key_id,
+        ));
+        let _ = gate.handle_action_spec("s", "step2", action, ctx);
+
+        assert_eq!(pvgs.rpp_head_query_count(), 1);
     }
 
     #[test]
@@ -4092,7 +4468,16 @@ mod tests {
             .iter()
             .map(|r| r.id.as_str())
             .collect();
-        assert_eq!(related_ids, vec!["policy_query", "decision", "ruleset"]);
+        assert_eq!(related_ids[0..3], ["policy_query", "decision", "ruleset"]);
+        let rpp_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .filter(|r| r.id.starts_with("rpp:"))
+            .map(|r| r.id.as_str())
+            .collect();
+        if !rpp_ids.is_empty() {
+            assert_eq!(rpp_ids, vec!["rpp:prev_acc", "rpp:acc", "rpp:new_root"]);
+        }
 
         let decision_digest = action_record
             .governance_frame
@@ -4149,9 +4534,22 @@ mod tests {
                 ucf::v1::RecordType::try_from(r.record_type) == Ok(ucf::v1::RecordType::ActionExec)
             })
             .expect("action record present");
-        assert_eq!(action_record.related_refs.len(), 2);
+        assert!(
+            action_record.related_refs.len() == 2 || action_record.related_refs.len() == 5,
+            "unexpected related refs length: {}",
+            action_record.related_refs.len()
+        );
         assert_eq!(action_record.related_refs[0].id, "policy_query");
         assert_eq!(action_record.related_refs[1].id, "decision");
+        let rpp_ids: Vec<_> = action_record
+            .related_refs
+            .iter()
+            .filter(|r| r.id.starts_with("rpp:"))
+            .map(|r| r.id.as_str())
+            .collect();
+        if !rpp_ids.is_empty() {
+            assert_eq!(rpp_ids, vec!["rpp:prev_acc", "rpp:acc", "rpp:new_root"]);
+        }
 
         let decision_digest = action_record
             .governance_frame
@@ -5121,6 +5519,7 @@ mod tests {
             integrity_issues: integrity_counter(),
             decision_log: default_decision_log(),
             query_decisions: Arc::new(Mutex::new(QueryDecisionMap::default())),
+            rpp_cache: Arc::new(Mutex::new(RppMetaCache::default())),
         };
 
         let mut ctx = ok_ctx();

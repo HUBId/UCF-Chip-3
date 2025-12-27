@@ -124,6 +124,7 @@ dependencies = [
  "ed25519-dalek",
  "pvgs_verify",
  "rand",
+ "rpp_checker",
  "ucf-protocol",
  "ucf-test-utils",
 ]
@@ -337,6 +338,7 @@ dependencies = [
  "pvgs_client",
  "pvgs_verify",
  "rand",
+ "rpp_checker",
  "tam",
  "thiserror",
  "trm",
@@ -513,6 +515,7 @@ dependencies = [
  "hex",
  "pvgs_verify",
  "rand",
+ "rpp_checker",
  "thiserror",
  "trm",
  "ucf-protocol",
@@ -583,6 +586,13 @@ dependencies = [
  "thiserror",
  "tracing",
  "ucf-protocol",
+]
+
+[[package]]
+name = "rpp_checker"
+version = "0.1.0"
+dependencies = [
+ "blake3",
 ]
 
 [[package]]

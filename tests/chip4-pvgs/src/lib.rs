@@ -9,6 +9,7 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use pvgs_verify::{pvgs_receipt_signing_preimage, PvgsKeyEpochStore};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rpp_checker::{compute_accumulator_digest, RppCheckInputs};
 use ucf_protocol::{canonical_bytes, digest32, digest_proto, ucf};
 use ucf_test_utils::{make_pvgs_key_epoch, make_pvgs_receipt_accepted};
 
@@ -36,6 +37,19 @@ pub struct TraceRunSummary {
     pub circuit_config_digest: Option<[u8; 32]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RppHeadMeta {
+    pub head_id: u64,
+    pub head_record_digest: [u8; 32],
+    pub prev_state_root: [u8; 32],
+    pub state_root: [u8; 32],
+    pub prev_acc_digest: [u8; 32],
+    pub acc_digest: [u8; 32],
+    pub ruleset_digest: [u8; 32],
+    pub asset_manifest_digest: Option<[u8; 32]>,
+    pub payload_digest: Option<[u8; 32]>,
+}
+
 #[derive(Debug)]
 struct LocalPvgsState {
     signing_key: SigningKey,
@@ -45,6 +59,8 @@ struct LocalPvgsState {
     registry_commit_count: usize,
     head_id: u64,
     head_record_digest: Option<[u8; 32]>,
+    latest_rpp_head_id: Option<u64>,
+    rpp_heads: HashMap<u64, RppHeadMeta>,
     sep_events: Vec<SepEvent>,
     proof_receipts: Vec<ucf::v1::ProofReceipt>,
     micro_milestones: Vec<ucf::v1::MicroMilestone>,
@@ -75,6 +91,7 @@ impl LocalPvgs {
         let signing_key = SigningKey::from_bytes(&seed);
         let attestation_key_id = "pvgs-key-test".to_string();
 
+        let default_rpp_head = default_rpp_head_meta();
         Self {
             inner: Arc::new(Mutex::new(LocalPvgsState {
                 signing_key,
@@ -84,6 +101,8 @@ impl LocalPvgs {
                 registry_commit_count: 0,
                 head_id: 0,
                 head_record_digest: None,
+                latest_rpp_head_id: Some(default_rpp_head.head_id),
+                rpp_heads: HashMap::from([(default_rpp_head.head_id, default_rpp_head)]),
                 sep_events: Vec::new(),
                 proof_receipts: Vec::new(),
                 micro_milestones: Vec::new(),
@@ -126,6 +145,24 @@ impl LocalPvgs {
             .microcircuit_configs
             .retain(|existing| existing.module != config.module);
         guard.microcircuit_configs.push(config);
+    }
+
+    pub fn set_rpp_head_meta(&self, meta: RppHeadMeta) {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        guard.latest_rpp_head_id = Some(meta.head_id);
+        guard.rpp_heads.insert(meta.head_id, meta);
+    }
+
+    pub fn get_latest_rpp_head_meta(&self) -> Option<RppHeadMeta> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard
+            .latest_rpp_head_id
+            .and_then(|head_id| guard.rpp_heads.get(&head_id).copied())
+    }
+
+    pub fn get_rpp_head_meta(&self, head_id: u64) -> Option<RppHeadMeta> {
+        let guard = self.inner.lock().expect("pvgs state lock");
+        guard.rpp_heads.get(&head_id).copied()
     }
 
     pub fn get_microcircuit_config(
@@ -610,6 +647,29 @@ pub fn ingest_published_epochs(
         store.ingest_key_epoch(epoch)?;
     }
     Ok(())
+}
+
+fn default_rpp_head_meta() -> RppHeadMeta {
+    let inputs = RppCheckInputs {
+        prev_acc: [1u8; 32],
+        prev_root: [2u8; 32],
+        new_root: [3u8; 32],
+        payload_digest: [4u8; 32],
+        ruleset_digest: [5u8; 32],
+        asset_manifest_digest: None,
+    };
+    let acc_digest = compute_accumulator_digest(&inputs);
+    RppHeadMeta {
+        head_id: 1,
+        head_record_digest: [9u8; 32],
+        prev_state_root: inputs.prev_root,
+        state_root: inputs.new_root,
+        prev_acc_digest: inputs.prev_acc,
+        acc_digest,
+        ruleset_digest: inputs.ruleset_digest,
+        asset_manifest_digest: inputs.asset_manifest_digest,
+        payload_digest: Some(inputs.payload_digest),
+    }
 }
 
 pub fn receipt_digest(receipt: &ucf::v1::PvgsReceipt) -> [u8; 32] {
