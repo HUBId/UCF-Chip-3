@@ -16,4 +16,4 @@ pvgs_verify = { path = "../crates/pvgs_verify" }
 tam = { path = "../crates/tam" }
 trm = { path = "../crates/trm" }
 ucf-protocol = { path = "../crates/ucf-protocol" }
-ucf_test_utils = { path = "../crates/test-utils" }
+ucf-test-utils = { path = "../crates/test-utils" }
