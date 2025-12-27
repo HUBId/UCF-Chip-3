@@ -1184,6 +1184,7 @@ impl Gate {
         meta
     }
 
+    #[allow(clippy::result_large_err)]
     fn enforce_rpp_second_check(
         &self,
         action_type: ucf::v1::ToolActionType,
