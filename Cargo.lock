@@ -720,6 +720,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "smoke-tests"
+version = "0.1.0"
+dependencies = [
+ "ckm_orchestrator",
+ "control",
+ "ed25519-dalek",
+ "frames",
+ "gem",
+ "pbm",
+ "prost",
+ "pvgs_client",
+ "pvgs_verify",
+ "tam",
+ "trm",
+ "ucf-protocol",
+ "ucf-test-utils",
+]
+
+[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

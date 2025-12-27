@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  default:
     runs-on: ubuntu-latest
     env:
       toolchain: stable
@@ -23,6 +23,24 @@ jobs:
       - name: Install cargo tools
         run: rustup component add clippy rustfmt
 
+      - name: Protocol pin gate
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import re
+          import sys
+          toml = open("Cargo.toml", "r", encoding="utf-8").read()
+          if re.search(r"ucf-protocol\\s*=\\s*\\{[^}]*\\bbranch\\s*=", toml):
+              print("ucf-protocol must not use branch= in Cargo.toml")
+              sys.exit(1)
+          lock = open("Cargo.lock", "r", encoding="utf-8").read()
+          for block in lock.split("[[package]]"):
+              if re.search(r'^name = "ucf-protocol"$', block, re.M):
+                  if "branch=" in block:
+                      print("ucf-protocol must not use branch= in Cargo.lock")
+                      sys.exit(1)
+          PY
+
       - name: Cargo fmt
         run: cargo fmt --all -- --check
 
@@ -31,3 +49,35 @@ jobs:
 
       - name: Cargo test
         run: cargo test --all --all-features --locked
+
+  proto-smoke:
+    runs-on: ubuntu-latest
+    env:
+      toolchain: stable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Proto smoke test
+        run: cargo test -p smoke-tests --test proto_smoke --locked
+
+  pvgs-smoke:
+    runs-on: ubuntu-latest
+    env:
+      toolchain: stable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: PVGS smoke test
+        run: cargo test -p smoke-tests --test pvgs_smoke --locked

@@ -1,0 +1,20 @@
+[package]
+name = "smoke-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+ckm_orchestrator = { path = "../crates/ckm_orchestrator" }
+control = { path = "../crates/control" }
+ed25519-dalek = "2"
+frames = { path = "../crates/frames" }
+gem = { path = "../crates/gem" }
+pbm = { path = "../crates/pbm" }
+prost = "0.12"
+pvgs_client = { path = "../crates/pvgs_client" }
+pvgs_verify = { path = "../crates/pvgs_verify" }
+tam = { path = "../crates/tam" }
+trm = { path = "../crates/trm" }
+ucf-protocol = { path = "../crates/ucf-protocol" }
+ucf-test-utils = { path = "../crates/test-utils" }
