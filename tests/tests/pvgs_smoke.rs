@@ -205,6 +205,25 @@ impl PvgsReader for SharedMockPvgsClient {
         self.inner.lock().expect("pvgs lock").get_latest_trace_run()
     }
 
+    fn get_latest_rpp_head_meta(
+        &mut self,
+    ) -> Result<Option<pvgs_client::RppHeadMeta>, PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_latest_rpp_head_meta()
+    }
+
+    fn get_rpp_head_meta(
+        &mut self,
+        head_id: u64,
+    ) -> Result<Option<pvgs_client::RppHeadMeta>, PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_rpp_head_meta(head_id)
+    }
+
     fn get_pending_replay_plans(
         &self,
         session_id: &str,
@@ -434,7 +453,19 @@ fn pvgs_smoke_builds_decision_and_action_records() {
         .iter()
         .map(|r| r.id.as_str())
         .collect();
-    assert_eq!(decision_ids, vec!["policy_query", "policy_decision"]);
+    assert_eq!(decision_ids[0..2], ["policy_query", "policy_decision"]);
+    let decision_rpp_ids: Vec<_> = decision_a
+        .related_refs
+        .iter()
+        .filter(|r| r.id.starts_with("rpp:"))
+        .map(|r| r.id.as_str())
+        .collect();
+    if !decision_rpp_ids.is_empty() {
+        assert_eq!(
+            decision_rpp_ids,
+            vec!["rpp:prev_acc", "rpp:acc", "rpp:new_root"]
+        );
+    }
 
     let decision_ids_b: Vec<_> = decision_b
         .related_refs
@@ -448,7 +479,19 @@ fn pvgs_smoke_builds_decision_and_action_records() {
         .iter()
         .map(|r| r.id.as_str())
         .collect();
-    assert_eq!(action_ids, vec!["policy_query", "decision"]);
+    assert_eq!(action_ids[0..2], ["policy_query", "decision"]);
+    let action_rpp_ids: Vec<_> = action_a
+        .related_refs
+        .iter()
+        .filter(|r| r.id.starts_with("rpp:"))
+        .map(|r| r.id.as_str())
+        .collect();
+    if !action_rpp_ids.is_empty() {
+        assert_eq!(
+            action_rpp_ids,
+            vec!["rpp:prev_acc", "rpp:acc", "rpp:new_root"]
+        );
+    }
 
     let action_ids_b: Vec<_> = action_b
         .related_refs
