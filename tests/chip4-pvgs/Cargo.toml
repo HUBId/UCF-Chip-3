@@ -10,3 +10,4 @@ pvgs_verify = { path = "../../crates/pvgs_verify" }
 ucf-test-utils = { path = "../../crates/test-utils" }
 ed25519-dalek = "2"
 rand = { version = "0.8", features = ["std"] }
+rpp_checker = { path = "../../crates/rpp_checker" }

@@ -326,6 +326,7 @@ fn gate_with_components(
         integrity_issues: Arc::new(Mutex::new(0)),
         decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
         query_decisions: Arc::new(Mutex::new(gem::QueryDecisionMap::default())),
+        rpp_cache: Arc::new(Mutex::new(gem::RppMetaCache::default())),
     }
 }
 

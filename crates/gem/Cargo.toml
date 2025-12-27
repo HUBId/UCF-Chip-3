@@ -14,6 +14,7 @@ frames = { path = "../frames" }
 control = { path = "../control" }
 pvgs_verify = { path = "../pvgs_verify" }
 pvgs_client = { path = "../pvgs_client" }
+rpp_checker = { path = "../rpp_checker" }
 ckm_orchestrator = { path = "../ckm_orchestrator" }
 trm = { path = "../trm" }
 cdm = { path = "../cdm" }

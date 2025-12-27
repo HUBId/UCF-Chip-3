@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use pvgs_verify::{IngestError, PvgsKeyEpochStore};
+use rpp_checker::{compute_accumulator_digest, RppCheckInputs};
 use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
@@ -88,6 +89,19 @@ pub enum PvgsClientError {
 pub struct PvgsHead {
     pub head_experience_id: u64,
     pub head_record_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RppHeadMeta {
+    pub head_id: u64,
+    pub head_record_digest: [u8; 32],
+    pub prev_state_root: [u8; 32],
+    pub state_root: [u8; 32],
+    pub prev_acc_digest: [u8; 32],
+    pub acc_digest: [u8; 32],
+    pub ruleset_digest: [u8; 32],
+    pub asset_manifest_digest: Option<[u8; 32]>,
+    pub payload_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +270,14 @@ pub trait PvgsReader: Send + Sync {
     }
 
     fn get_latest_trace_run(&mut self) -> Result<Option<TraceRunSummary>, PvgsClientError> {
+        Ok(None)
+    }
+
+    fn get_latest_rpp_head_meta(&mut self) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        Ok(None)
+    }
+
+    fn get_rpp_head_meta(&mut self, _head_id: u64) -> Result<Option<RppHeadMeta>, PvgsClientError> {
         Ok(None)
     }
 
@@ -652,6 +674,58 @@ impl PvgsReader for Chip4LocalPvgsClient {
     ) -> Result<Option<[u8; 32]>, PvgsClientError> {
         Ok(self.pvgs.get_unlock_permit_digest(session_id))
     }
+
+    fn get_latest_rpp_head_meta(&mut self) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        Ok(self
+            .pvgs
+            .get_latest_rpp_head_meta()
+            .map(rpp_head_meta_from_chip4))
+    }
+
+    fn get_rpp_head_meta(&mut self, head_id: u64) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        Ok(self
+            .pvgs
+            .get_rpp_head_meta(head_id)
+            .map(rpp_head_meta_from_chip4))
+    }
+}
+
+fn default_rpp_head_meta() -> RppHeadMeta {
+    let inputs = RppCheckInputs {
+        prev_acc: [1u8; 32],
+        prev_root: [2u8; 32],
+        new_root: [3u8; 32],
+        payload_digest: [4u8; 32],
+        ruleset_digest: [5u8; 32],
+        asset_manifest_digest: None,
+    };
+    let acc_digest = compute_accumulator_digest(&inputs);
+    RppHeadMeta {
+        head_id: 1,
+        head_record_digest: [9u8; 32],
+        prev_state_root: inputs.prev_root,
+        state_root: inputs.new_root,
+        prev_acc_digest: inputs.prev_acc,
+        acc_digest,
+        ruleset_digest: inputs.ruleset_digest,
+        asset_manifest_digest: inputs.asset_manifest_digest,
+        payload_digest: Some(inputs.payload_digest),
+    }
+}
+
+#[cfg(any(test, feature = "local-e2e"))]
+fn rpp_head_meta_from_chip4(meta: chip4_pvgs::RppHeadMeta) -> RppHeadMeta {
+    RppHeadMeta {
+        head_id: meta.head_id,
+        head_record_digest: meta.head_record_digest,
+        prev_state_root: meta.prev_state_root,
+        state_root: meta.state_root,
+        prev_acc_digest: meta.prev_acc_digest,
+        acc_digest: meta.acc_digest,
+        ruleset_digest: meta.ruleset_digest,
+        asset_manifest_digest: meta.asset_manifest_digest,
+        payload_digest: meta.payload_digest,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -662,6 +736,8 @@ pub struct LocalPvgsClient {
     reject_reason_codes: Vec<String>,
     head_experience_id: u64,
     head_record_digest: [u8; 32],
+    rpp_head_meta: Option<RppHeadMeta>,
+    rpp_heads: HashMap<u64, RppHeadMeta>,
     pub committed_records: Vec<ucf::v1::ExperienceRecord>,
     pub committed_bytes: Vec<Vec<u8>>,
     pub committed_dlp_decisions: Vec<ucf::v1::DlpDecision>,
@@ -691,6 +767,7 @@ pub struct LocalPvgsClient {
 
 impl Default for LocalPvgsClient {
     fn default() -> Self {
+        let default_rpp_head = default_rpp_head_meta();
         Self {
             receipt_epoch: "local-epoch".to_string(),
             grant_id: "local-grant".to_string(),
@@ -698,6 +775,8 @@ impl Default for LocalPvgsClient {
             reject_reason_codes: Vec::new(),
             head_experience_id: 0,
             head_record_digest: [0u8; 32],
+            rpp_head_meta: Some(default_rpp_head),
+            rpp_heads: HashMap::from([(default_rpp_head.head_id, default_rpp_head)]),
             committed_records: Vec::new(),
             committed_bytes: Vec::new(),
             committed_dlp_decisions: Vec::new(),
@@ -768,6 +847,15 @@ impl LocalPvgsClient {
         self.microcircuit_configs
             .retain(|existing| existing.module != config.module);
         self.microcircuit_configs.push(config);
+    }
+
+    pub fn set_latest_rpp_head_meta(&mut self, meta: RppHeadMeta) {
+        self.rpp_heads.insert(meta.head_id, meta);
+        self.rpp_head_meta = Some(meta);
+    }
+
+    pub fn set_rpp_head_meta(&mut self, meta: RppHeadMeta) {
+        self.rpp_heads.insert(meta.head_id, meta);
     }
 }
 
@@ -1257,6 +1345,14 @@ impl PvgsReader for LocalPvgsClient {
         Ok(None)
     }
 
+    fn get_latest_rpp_head_meta(&mut self) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        Ok(self.rpp_head_meta)
+    }
+
+    fn get_rpp_head_meta(&mut self, head_id: u64) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        Ok(self.rpp_heads.get(&head_id).copied())
+    }
+
     fn is_session_sealed(&self, session_id: &str) -> Result<bool, PvgsClientError> {
         Ok(self.sealed_sessions.contains_key(session_id))
     }
@@ -1428,6 +1524,14 @@ impl PvgsReader for MockPvgsClient {
         Ok(self.trace_run_summary.clone())
     }
 
+    fn get_latest_rpp_head_meta(&mut self) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        self.local.get_latest_rpp_head_meta()
+    }
+
+    fn get_rpp_head_meta(&mut self, head_id: u64) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        self.local.get_rpp_head_meta(head_id)
+    }
+
     fn is_session_sealed(&self, _session_id: &str) -> Result<bool, PvgsClientError> {
         Ok(self.session_sealed)
     }
@@ -1464,6 +1568,8 @@ pub struct MockPvgsReader {
     pev: Option<ucf::v1::PolicyEcologyVector>,
     pev_digest: Option<[u8; 32]>,
     ruleset_digest: Option<[u8; 32]>,
+    rpp_head_meta: Option<RppHeadMeta>,
+    rpp_heads: HashMap<u64, RppHeadMeta>,
     session_sealed: bool,
     session_seal_digest: Option<[u8; 32]>,
     unlock_permit: bool,
@@ -1485,10 +1591,13 @@ impl Default for MockPvgsReader {
             value: digest.to_vec(),
         });
 
+        let default_rpp_head = default_rpp_head_meta();
         Self {
             pev: Some(pev),
             pev_digest: Some(digest),
             ruleset_digest: None,
+            rpp_head_meta: Some(default_rpp_head),
+            rpp_heads: HashMap::from([(default_rpp_head.head_id, default_rpp_head)]),
             session_sealed: false,
             session_seal_digest: None,
             unlock_permit: false,
@@ -1516,10 +1625,13 @@ impl MockPvgsReader {
             }
         }
 
+        let default_rpp_head = default_rpp_head_meta();
         Self {
             pev: pev_with_digest,
             pev_digest,
             ruleset_digest: None,
+            rpp_head_meta: Some(default_rpp_head),
+            rpp_heads: HashMap::from([(default_rpp_head.head_id, default_rpp_head)]),
             session_sealed: false,
             session_seal_digest: None,
             unlock_permit: false,
@@ -1600,6 +1712,14 @@ impl PvgsReader for MockPvgsReader {
 
     fn get_recovery_state(&self, _session_id: &str) -> Result<Option<String>, PvgsClientError> {
         Ok(self.recovery_state.clone())
+    }
+
+    fn get_latest_rpp_head_meta(&mut self) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        Ok(self.rpp_head_meta)
+    }
+
+    fn get_rpp_head_meta(&mut self, head_id: u64) -> Result<Option<RppHeadMeta>, PvgsClientError> {
+        Ok(self.rpp_heads.get(&head_id).copied())
     }
 
     fn is_session_sealed(&self, _session_id: &str) -> Result<bool, PvgsClientError> {
