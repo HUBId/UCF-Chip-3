@@ -96,10 +96,7 @@ impl PvgsClient for SharedMockPvgsClient {
     }
 
     fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError> {
-        self.inner
-            .lock()
-            .expect("pvgs lock")
-            .try_commit_next_meso()
+        self.inner.lock().expect("pvgs lock").try_commit_next_meso()
     }
 
     fn try_commit_next_macro(
@@ -127,10 +124,7 @@ impl PvgsClient for SharedMockPvgsClient {
     }
 
     fn get_scorecard_global(&mut self) -> Result<Scorecard, PvgsClientError> {
-        self.inner
-            .lock()
-            .expect("pvgs lock")
-            .get_scorecard_global()
+        self.inner.lock().expect("pvgs lock").get_scorecard_global()
     }
 
     fn get_scorecard_session(&mut self, session_id: &str) -> Result<Scorecard, PvgsClientError> {
@@ -199,16 +193,16 @@ impl PvgsReader for SharedMockPvgsClient {
     }
 
     fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
-        self.inner.lock().expect("pvgs lock").get_latest_cbv_digest()
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_latest_cbv_digest()
     }
 
     fn get_latest_trace_run(
         &mut self,
     ) -> Result<Option<pvgs_client::TraceRunSummary>, PvgsClientError> {
-        self.inner
-            .lock()
-            .expect("pvgs lock")
-            .get_latest_trace_run()
+        self.inner.lock().expect("pvgs lock").get_latest_trace_run()
     }
 
     fn get_pending_replay_plans(
@@ -246,9 +240,7 @@ fn build_gate(
     receipt_store: pvgs_verify::PvgsKeyEpochStore,
 ) -> Gate {
     let mut control_store = ControlFrameStore::new();
-    control_store
-        .update(control_frame)
-        .expect("control frame");
+    control_store.update(control_frame).expect("control frame");
 
     let aggregator = Arc::new(Mutex::new(
         WindowEngine::new(FramesConfig::fallback()).expect("window engine"),
@@ -258,15 +250,11 @@ fn build_gate(
         policy: PolicyEngine::new(),
         adapter: Box::new(NoopAdapter::default()),
         aggregator: aggregator.clone(),
-        orchestrator: Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(
-            aggregator,
-        ))),
+        orchestrator: Arc::new(Mutex::new(CkmOrchestrator::with_aggregator(aggregator))),
         control_store: Arc::new(Mutex::new(control_store)),
         receipt_store: Arc::new(receipt_store),
         registry,
-        pvgs_client: Arc::new(Mutex::new(Box::new(SharedMockPvgsClient::new(
-            pvgs_client,
-        )))),
+        pvgs_client: Arc::new(Mutex::new(Box::new(SharedMockPvgsClient::new(pvgs_client)))),
         integrity_issues: Arc::new(Mutex::new(0)),
         decision_log: Arc::new(Mutex::new(DecisionLogStore::default())),
         query_decisions: Arc::new(Mutex::new(QueryDecisionMap::default())),
@@ -313,9 +301,7 @@ fn pvgs_smoke_builds_decision_and_action_records() {
         })
         .expect("tool onboarding");
     let trc = registry.build_registry_container("registry", "v1", 123);
-    client
-        .commit_tool_registry(trc)
-        .expect("tool registry");
+    client.commit_tool_registry(trc).expect("tool registry");
     drop(client);
 
     let ctx = GateContext {
