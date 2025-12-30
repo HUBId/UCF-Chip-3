@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-lnss-burn = ["burn"]
+lnss-burn = []
 lnss-candle = []
 lnss-liquid-ode = ["lnss-burn"]
 
@@ -17,7 +17,9 @@ lnss_hooks = { path = "../lnss_hooks" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-burn = { version = "0.12", default-features = false, optional = true }
+
+[target.'cfg(feature = "lnss-burn")'.dependencies]
+burn = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 lnss_hooks = { path = "../lnss_hooks" }

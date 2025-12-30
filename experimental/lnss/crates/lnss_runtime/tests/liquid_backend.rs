@@ -6,7 +6,7 @@ mod liquid_backend_tests {
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
     use lnss_runtime::{
-        LiquidOdeBackend, LiquidOdeConfig, Limits, LnssRuntime, LlmBackend, HookProvider,
+        HookProvider, Limits, LiquidOdeBackend, LiquidOdeConfig, LlmBackend, LnssRuntime,
     };
     use lnss_sae::StubSaeBackend;
 
@@ -130,7 +130,12 @@ mod liquid_backend_tests {
         let mut backend_b = LiquidOdeBackend::new(cfg);
         let hooks_a = backend_a.tap_provider();
         let hooks_b = backend_b.tap_provider();
-        let tap_specs = vec![TapSpec::new("liquid-state", TapKind::LiquidState, 0, "state")];
+        let tap_specs = vec![TapSpec::new(
+            "liquid-state",
+            TapKind::LiquidState,
+            0,
+            "state",
+        )];
 
         let tmp_path_a = std::env::temp_dir().join("lnss_liquid_mechint_a.jsonl");
         let tmp_path_b = std::env::temp_dir().join("lnss_liquid_mechint_b.jsonl");

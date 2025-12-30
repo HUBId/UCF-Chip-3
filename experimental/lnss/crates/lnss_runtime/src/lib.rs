@@ -3,12 +3,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "lnss-liquid-ode")]
+use lnss_core::TapKind;
 use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
 };
-#[cfg(feature = "lnss-liquid-ode")]
-use lnss_core::TapKind;
 use lnss_hooks::TapRegistry;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4096;
@@ -660,7 +660,11 @@ fn modulation_gain_q(mods: &EmotionFieldSnapshot, base_gain: u16) -> i32 {
 fn tanh_approx_q(x_q: i32) -> i32 {
     let abs = x_q.abs();
     if abs >= 3 * LIQUID_Q_ONE {
-        return if x_q >= 0 { LIQUID_Q_ONE } else { -LIQUID_Q_ONE };
+        return if x_q >= 0 {
+            LIQUID_Q_ONE
+        } else {
+            -LIQUID_Q_ONE
+        };
     }
     if abs <= LIQUID_Q_ONE {
         return x_q;
@@ -668,7 +672,11 @@ fn tanh_approx_q(x_q: i32) -> i32 {
     let base = LIQUID_Q_ONE * 4 / 5;
     let extra = (abs - LIQUID_Q_ONE) / 10;
     let value = base + extra;
-    if x_q >= 0 { value } else { -value }
+    if x_q >= 0 {
+        value
+    } else {
+        -value
+    }
 }
 
 #[cfg(feature = "lnss-liquid-ode")]
