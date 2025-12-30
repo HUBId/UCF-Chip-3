@@ -30,7 +30,11 @@ lnss = [
     "lnss_bluebridge",
     "lnss_evolve",
 ]
-lnss-candle = ["lnss_sae/lnss-candle"]
+lnss-candle = [
+    "lnss_runtime/lnss-candle",
+    "lnss_hooks/lnss-candle",
+    "lnss_sae/lnss-candle",
+]
 lnss-burn = ["lnss_runtime/lnss-burn"]
 lnss-arrow = ["lnss_mechint/lnss-arrow"]
 lnss-pyo3 = ["lnss_bluebridge/lnss-pyo3"]

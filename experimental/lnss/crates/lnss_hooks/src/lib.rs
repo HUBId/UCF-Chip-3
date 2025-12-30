@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use lnss_core::{TapKind, TapSpec, MAX_TAP_SPECS};
+use lnss_core::{TapFrame, TapKind, TapSpec, MAX_STRING_LEN, MAX_TAP_SPECS};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -29,6 +29,71 @@ impl TapPlan {
         });
         specs.truncate(MAX_TAP_SPECS);
         Self { specs }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredTap {
+    pub hook_id: String,
+    pub tensor_name: String,
+    pub layer_index: u16,
+}
+
+impl RegisteredTap {
+    pub fn new(hook_id: &str, tensor_name: &str, layer_index: u16) -> Self {
+        Self {
+            hook_id: bound_string(hook_id),
+            tensor_name: bound_string(tensor_name),
+            layer_index,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TapRegistry {
+    registered: Vec<RegisteredTap>,
+    frames: Vec<TapFrame>,
+}
+
+impl TapRegistry {
+    pub fn new() -> Self {
+        Self {
+            registered: Vec::new(),
+            frames: Vec::new(),
+        }
+    }
+
+    pub fn register_tap(&mut self, hook_id: &str, tensor_name: &str, layer_index: u16) {
+        let candidate = RegisteredTap::new(hook_id, tensor_name, layer_index);
+        if self.registered.contains(&candidate) {
+            return;
+        }
+        if self.registered.len() >= MAX_TAP_SPECS {
+            return;
+        }
+        self.registered.push(candidate);
+        self.registered.sort_by(|a, b| {
+            a.hook_id
+                .cmp(&b.hook_id)
+                .then_with(|| a.layer_index.cmp(&b.layer_index))
+        });
+    }
+
+    pub fn registered(&self) -> Vec<RegisteredTap> {
+        self.registered.clone()
+    }
+
+    pub fn record_frame(&mut self, frame: TapFrame) {
+        if self.frames.len() >= MAX_TAP_SPECS {
+            return;
+        }
+        self.frames.push(frame);
+    }
+
+    pub fn collect(&mut self) -> Vec<TapFrame> {
+        let mut frames = std::mem::take(&mut self.frames);
+        frames.truncate(MAX_TAP_SPECS);
+        frames
     }
 }
 
@@ -64,4 +129,10 @@ impl TransformerLensPlanImport {
         }
         Ok(TapPlan::new(tap_specs))
     }
+}
+
+fn bound_string(value: &str) -> String {
+    let mut out = value.to_string();
+    out.truncate(MAX_STRING_LEN);
+    out
 }

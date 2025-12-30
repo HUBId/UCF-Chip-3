@@ -7,11 +7,13 @@ use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
 };
+use lnss_hooks::TapRegistry;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4096;
 pub const DEFAULT_MAX_SPIKES: usize = 2048;
 pub const DEFAULT_MAX_TAPS: usize = 128;
 pub const DEFAULT_MAX_MECHINT_BYTES: usize = 8192;
+pub const MAX_TAP_SAMPLE_BYTES: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -94,9 +96,27 @@ pub struct MechIntRecord {
     pub step_id: String,
     pub token_digest: [u8; 32],
     pub tap_digests: Vec<[u8; 32]>,
+    pub tap_summaries: Vec<TapSummary>,
     pub feature_event_digests: Vec<[u8; 32]>,
     pub mapping_digest: [u8; 32],
     pub record_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapSummary {
+    pub hook_id: String,
+    pub activation_digest: [u8; 32],
+    pub sample_len: u32,
+}
+
+impl TapSummary {
+    pub fn from_tap(tap: &TapFrame) -> Self {
+        Self {
+            hook_id: tap.hook_id.clone(),
+            activation_digest: tap.activation_digest,
+            sample_len: tap.activation_bytes.len() as u32,
+        }
+    }
 }
 
 impl MechIntRecord {
@@ -104,17 +124,26 @@ impl MechIntRecord {
         session_id: &str,
         step_id: &str,
         token_digest: [u8; 32],
-        mut tap_digests: Vec<[u8; 32]>,
+        mut tap_summaries: Vec<TapSummary>,
         mut feature_event_digests: Vec<[u8; 32]>,
         mapping_digest: [u8; 32],
     ) -> Self {
+        tap_summaries.sort_by(|a, b| {
+            a.hook_id
+                .cmp(&b.hook_id)
+                .then_with(|| a.activation_digest.cmp(&b.activation_digest))
+        });
+        let mut tap_digests: Vec<[u8; 32]> = tap_summaries
+            .iter()
+            .map(|summary| summary.activation_digest)
+            .collect();
         tap_digests.sort();
         feature_event_digests.sort();
         let record_digest = record_digest(
             session_id,
             step_id,
             token_digest,
-            &tap_digests,
+            &tap_summaries,
             &feature_event_digests,
             mapping_digest,
         );
@@ -123,6 +152,7 @@ impl MechIntRecord {
             step_id: step_id.to_string(),
             token_digest,
             tap_digests,
+            tap_summaries,
             feature_event_digests,
             mapping_digest,
             record_digest,
@@ -134,7 +164,7 @@ fn record_digest(
     session_id: &str,
     step_id: &str,
     token_digest: [u8; 32],
-    tap_digests: &[[u8; 32]],
+    tap_summaries: &[TapSummary],
     feature_event_digests: &[[u8; 32]],
     mapping_digest: [u8; 32],
 ) -> [u8; 32] {
@@ -145,9 +175,11 @@ fn record_digest(
     buf.push(0);
     buf.extend_from_slice(&token_digest);
     buf.extend_from_slice(&mapping_digest);
-    buf.extend_from_slice(&(tap_digests.len() as u32).to_le_bytes());
-    for digest_bytes in tap_digests {
-        buf.extend_from_slice(digest_bytes);
+    buf.extend_from_slice(&(tap_summaries.len() as u32).to_le_bytes());
+    for summary in tap_summaries {
+        write_string(&mut buf, &summary.hook_id);
+        buf.extend_from_slice(&summary.activation_digest);
+        buf.extend_from_slice(&summary.sample_len.to_le_bytes());
     }
     buf.extend_from_slice(&(feature_event_digests.len() as u32).to_le_bytes());
     for digest_bytes in feature_event_digests {
@@ -196,7 +228,7 @@ impl LnssRuntime {
         spikes.truncate(self.limits.max_spikes);
         self.rig.send_spikes(&spikes)?;
 
-        let tap_digests = taps.iter().map(|tap| tap.activation_digest).collect();
+        let tap_summaries = taps.iter().map(TapSummary::from_tap).collect();
         let feature_event_digests = feature_events
             .iter()
             .map(|event| event.event_digest)
@@ -205,7 +237,7 @@ impl LnssRuntime {
             session_id,
             step_id,
             token_digest,
-            tap_digests,
+            tap_summaries,
             feature_event_digests,
             self.mapper.map_digest,
         );
@@ -296,4 +328,228 @@ impl RigClient for StubRigClient {
 
 pub fn ensure_bounded_bytes(bytes: &mut Vec<u8>, limit: usize) {
     bytes.truncate(limit.min(MAX_ACTIVATION_BYTES));
+}
+
+fn write_string(buf: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    let len = bytes.len() as u32;
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+pub struct TapRegistryProvider {
+    registry: std::sync::Arc<std::sync::Mutex<TapRegistry>>,
+    enabled: bool,
+}
+
+impl TapRegistryProvider {
+    pub fn new(registry: std::sync::Arc<std::sync::Mutex<TapRegistry>>, enabled: bool) -> Self {
+        Self { registry, enabled }
+    }
+}
+
+impl HookProvider for TapRegistryProvider {
+    fn collect_taps(&mut self, specs: &[TapSpec]) -> Vec<TapFrame> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut registry = match self.registry.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let frames = registry.collect();
+        if specs.is_empty() {
+            return frames;
+        }
+        let allowed: std::collections::HashSet<&str> =
+            specs.iter().map(|spec| spec.hook_id.as_str()).collect();
+        frames
+            .into_iter()
+            .filter(|frame| allowed.contains(frame.hook_id.as_str()))
+            .collect()
+    }
+}
+
+#[cfg(feature = "lnss-candle")]
+#[derive(Debug, Clone)]
+pub struct CandleConfig {
+    pub model_dir: String,
+    pub max_new_tokens: u32,
+    pub seed: u64,
+    pub device: String,
+    pub hooks_enabled: bool,
+}
+
+#[cfg(feature = "lnss-candle")]
+impl Default for CandleConfig {
+    fn default() -> Self {
+        Self {
+            model_dir: ".".to_string(),
+            max_new_tokens: 1,
+            seed: 0,
+            device: "cpu".to_string(),
+            hooks_enabled: false,
+        }
+    }
+}
+
+#[cfg(feature = "lnss-candle")]
+#[derive(Debug)]
+pub struct CandleLlmBackend {
+    cfg: CandleConfig,
+    loaded: bool,
+    registry: Option<std::sync::Arc<std::sync::Mutex<TapRegistry>>>,
+}
+
+#[cfg(feature = "lnss-candle")]
+#[derive(Debug, Error)]
+pub enum CandleLoadError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[cfg(feature = "lnss-candle")]
+impl CandleLlmBackend {
+    pub fn new(cfg: CandleConfig) -> Self {
+        Self {
+            cfg,
+            loaded: false,
+            registry: None,
+        }
+    }
+
+    pub fn with_registry(
+        cfg: CandleConfig,
+        registry: std::sync::Arc<std::sync::Mutex<TapRegistry>>,
+    ) -> Self {
+        Self {
+            cfg,
+            loaded: false,
+            registry: Some(registry),
+        }
+    }
+
+    pub fn set_registry(&mut self, registry: std::sync::Arc<std::sync::Mutex<TapRegistry>>) {
+        self.registry = Some(registry);
+    }
+
+    pub fn try_load(&mut self) -> Result<(), CandleLoadError> {
+        let readme_path = std::path::Path::new(&self.cfg.model_dir).join("README");
+        self.loaded = readme_path.exists();
+        Ok(())
+    }
+
+    fn record_taps(&self, input: &[u8], mods: &EmotionFieldSnapshot) {
+        let registry = match &self.registry {
+            Some(registry) => registry,
+            None => return,
+        };
+        let registered = match registry.lock() {
+            Ok(guard) => guard.registered(),
+            Err(poisoned) => poisoned.into_inner().registered(),
+        };
+        if registered.is_empty() {
+            return;
+        }
+        let seed_bytes = candle_seed_bytes(input, mods, self.cfg.seed);
+        let mut frames = Vec::new();
+        for tap in registered {
+            let sample = candle_sample_bytes(&seed_bytes, &tap, self.cfg.max_new_tokens);
+            let activation_digest = candle_activation_digest(&tap, &sample);
+            let frame = TapFrame {
+                hook_id: tap.hook_id.clone(),
+                activation_digest,
+                activation_bytes: sample,
+            };
+            frames.push(frame);
+        }
+        let mut registry = match registry.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for frame in frames {
+            registry.record_frame(frame);
+        }
+    }
+}
+
+#[cfg(feature = "lnss-candle")]
+impl LlmBackend for CandleLlmBackend {
+    fn infer_step(&mut self, input: &[u8], mods: &EmotionFieldSnapshot) -> Vec<u8> {
+        let mut seed_bytes = candle_seed_bytes(input, mods, self.cfg.seed);
+        seed_bytes.extend_from_slice(self.cfg.device.as_bytes());
+        let output = if self.loaded {
+            digest("lnss.candle.infer.v1", &seed_bytes).to_vec()
+        } else {
+            digest("lnss.candle.fallback.v1", &seed_bytes).to_vec()
+        };
+        if self.loaded && self.cfg.hooks_enabled {
+            self.record_taps(input, mods);
+        }
+        output
+    }
+
+    fn supports_hooks(&self) -> bool {
+        self.loaded && self.cfg.hooks_enabled
+    }
+}
+
+#[cfg(feature = "lnss-candle")]
+fn candle_seed_bytes(input: &[u8], mods: &EmotionFieldSnapshot, seed: u64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(input);
+    buf.extend_from_slice(&seed.to_le_bytes());
+    buf.extend_from_slice(mods.noise.as_bytes());
+    buf.extend_from_slice(mods.priority.as_bytes());
+    buf.extend_from_slice(mods.recursion_depth.as_bytes());
+    buf.extend_from_slice(mods.dwm.as_bytes());
+    buf.extend_from_slice(mods.profile.as_bytes());
+    for overlay in &mods.overlays {
+        buf.extend_from_slice(overlay.as_bytes());
+    }
+    for code in &mods.top_reason_codes {
+        buf.extend_from_slice(code.as_bytes());
+    }
+    buf
+}
+
+#[cfg(feature = "lnss-candle")]
+fn candle_sample_bytes(
+    seed_bytes: &[u8],
+    tap: &lnss_hooks::RegisteredTap,
+    max_new_tokens: u32,
+) -> Vec<u8> {
+    let mut sample = Vec::new();
+    let mut base = Vec::new();
+    base.extend_from_slice(seed_bytes);
+    base.extend_from_slice(tap.hook_id.as_bytes());
+    base.extend_from_slice(tap.tensor_name.as_bytes());
+    base.extend_from_slice(&tap.layer_index.to_le_bytes());
+    base.extend_from_slice(&max_new_tokens.to_le_bytes());
+    let values = 128;
+    for idx in 0..values {
+        let mut chunk_seed = base.clone();
+        chunk_seed.extend_from_slice(&(idx as u32).to_le_bytes());
+        let chunk = digest("lnss.candle.tap.sample.v1", &chunk_seed);
+        let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
+        let f = (raw as f32 / u16::MAX as f32) * 2.0 - 1.0;
+        let q = (f * 32767.0)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        sample.extend_from_slice(&q.to_le_bytes());
+    }
+    sample.truncate(MAX_TAP_SAMPLE_BYTES);
+    sample
+}
+
+#[cfg(feature = "lnss-candle")]
+fn candle_activation_digest(tap: &lnss_hooks::RegisteredTap, sample: &[u8]) -> [u8; 32] {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(tap.hook_id.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(tap.tensor_name.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(&tap.layer_index.to_le_bytes());
+    buf.extend_from_slice(sample);
+    digest("lnss.tap.summary.v1", &buf)
 }
