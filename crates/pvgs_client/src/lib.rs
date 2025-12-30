@@ -534,44 +534,6 @@ impl PvgsClient for Chip4LocalPvgsClient {
         &mut self,
         payload_bytes: Vec<u8>,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
-        let digest = ucf_protocol::digest_proto("UCF:HASH:PROPOSAL_EVIDENCE", &payload_bytes);
-        self.committed_proposal_evidence_bytes.push(payload_bytes);
-
-        let receipt = ucf::v1::PvgsReceipt {
-            receipt_epoch: self.receipt_epoch.clone(),
-            receipt_id: format!(
-                "pvgs-local-proposal-evidence-{}",
-                self.committed_proposal_evidence_bytes.len()
-            ),
-            receipt_digest: Some(ucf::v1::Digest32 {
-                value: digest.to_vec(),
-            }),
-            status: self.default_status.into(),
-            action_digest: None,
-            decision_digest: Some(ucf::v1::Digest32 {
-                value: digest.to_vec(),
-            }),
-            grant_id: self.grant_id.clone(),
-            charter_version_digest: None,
-            policy_version_digest: None,
-            prev_record_digest: None,
-            profile_digest: None,
-            tool_profile_digest: None,
-            reject_reason_codes: if self.default_status == ucf::v1::ReceiptStatus::Rejected {
-                self.reject_reason_codes.clone()
-            } else {
-                Vec::new()
-            },
-            signer: None,
-        };
-
-        Ok(receipt)
-    }
-
-    fn commit_proposal_evidence(
-        &mut self,
-        payload_bytes: Vec<u8>,
-    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         Ok(self.pvgs.append_proposal_evidence(payload_bytes))
     }
 
@@ -1242,6 +1204,44 @@ impl PvgsClient for LocalPvgsClient {
             tool_profile_digest: None,
             reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
                 reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
+    fn commit_proposal_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let digest = ucf_protocol::digest_proto("UCF:HASH:PROPOSAL_EVIDENCE", &payload_bytes);
+        self.committed_proposal_evidence_bytes.push(payload_bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!(
+                "pvgs-local-proposal-evidence-{}",
+                self.committed_proposal_evidence_bytes.len()
+            ),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            status: self.default_status.into(),
+            action_digest: None,
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if self.default_status == ucf::v1::ReceiptStatus::Rejected {
+                self.reject_reason_codes.clone()
             } else {
                 Vec::new()
             },
