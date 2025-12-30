@@ -35,6 +35,7 @@ lnss-candle = [
     "lnss_hooks/lnss-candle",
     "lnss_sae/lnss-candle",
 ]
+lnss-sae-real = ["lnss_sae/lnss-sae-real", "lnss-candle"]
 lnss-burn = ["lnss_runtime/lnss-burn"]
 lnss-liquid-ode = ["lnss-burn", "lnss_runtime/lnss-liquid-ode"]
 lnss-arrow = ["lnss_mechint/lnss-arrow"]

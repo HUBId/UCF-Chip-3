@@ -79,6 +79,7 @@ fn main() {
             let mut steps: Option<u64> = None;
             let mut tap_plan: Option<String> = None;
             let mut map_path: Option<String> = None;
+            let mut sae_pack: Option<String> = None;
 
             while let Some(flag) = args.next() {
                 match flag.as_str() {
@@ -86,9 +87,10 @@ fn main() {
                     "--steps" => steps = args.next().and_then(|value| value.parse::<u64>().ok()),
                     "--tap-plan" => tap_plan = args.next(),
                     "--map" => map_path = args.next(),
+                    "--sae-pack" => sae_pack = args.next(),
                     _ => {
                         eprintln!(
-                            "usage: app lnss-run --session <id> --steps <n> --tap-plan <file> --map <file>"
+                            "usage: app lnss-run --session <id> --steps <n> --tap-plan <file> --map <file> [--sae-pack <dir>]"
                         );
                         process::exit(1);
                     }
@@ -99,14 +101,14 @@ fn main() {
                 (session_id, steps, tap_plan, map_path)
             else {
                 eprintln!(
-                    "usage: app lnss-run --session <id> --steps <n> --tap-plan <file> --map <file>"
+                    "usage: app lnss-run --session <id> --steps <n> --tap-plan <file> --map <file> [--sae-pack <dir>]"
                 );
                 process::exit(1);
             };
 
             #[cfg(feature = "lnss")]
             {
-                lnss_cli::run_lnss(&session_id, steps, &tap_plan, &map_path);
+                lnss_cli::run_lnss(&session_id, steps, &tap_plan, &map_path, sae_pack.as_deref());
                 return;
             }
 
@@ -129,7 +131,7 @@ mod lnss_cli {
     use lnss_hooks::TransformerLensPlanImport;
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::LoggingRigClient;
-    use lnss_runtime::{Limits, LnssRuntime, StubHookProvider, StubLlmBackend};
+    use lnss_runtime::{Limits, LnssRuntime, SaeBackend, StubHookProvider, StubLlmBackend};
     use lnss_sae::StubSaeBackend;
     use serde::Deserialize;
 
@@ -145,7 +147,13 @@ mod lnss_cli {
         entries: Vec<MapEntry>,
     }
 
-    pub fn run_lnss(session_id: &str, steps: u64, tap_plan: &str, map_path: &str) {
+    pub fn run_lnss(
+        session_id: &str,
+        steps: u64,
+        tap_plan: &str,
+        map_path: &str,
+        sae_pack: Option<&str>,
+    ) {
         let plan = TransformerLensPlanImport::from_path(tap_plan)
             .unwrap_or_else(|err| panic!("tap plan load failed: {err}"));
 
@@ -165,10 +173,29 @@ mod lnss_cli {
         let rig =
             LoggingRigClient::new("experimental/lnss/out/rig.jsonl", 8192).expect("rig writer");
 
+        let sae: Box<dyn SaeBackend> = match sae_pack {
+            Some(path) => {
+                #[cfg(feature = "lnss-sae-real")]
+                {
+                    use lnss_sae::{RealSaeBackend, SaeNonlinearity};
+
+                    Box::new(RealSaeBackend::new(
+                        path.into(),
+                        SaeNonlinearity::Relu,
+                    ))
+                }
+                #[cfg(not(feature = "lnss-sae-real"))]
+                {
+                    panic!("lnss-sae-real feature not enabled");
+                }
+            }
+            None => Box::new(StubSaeBackend::new(8)),
+        };
+
         let mut runtime = LnssRuntime {
             llm: Box::new(StubLlmBackend),
             hooks: Box::new(StubHookProvider { taps: Vec::new() }),
-            sae: Box::new(StubSaeBackend::new(8)),
+            sae,
             mechint: Box::new(mechint),
             rig: Box::new(rig),
             mapper,

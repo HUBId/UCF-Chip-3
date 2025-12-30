@@ -45,3 +45,9 @@ lnss = [
     "serde",
     "serde_json",
 ]
+lnss-candle = [
+    "lnss_runtime/lnss-candle",
+    "lnss_hooks/lnss-candle",
+    "lnss_sae/lnss-candle",
+]
+lnss-sae-real = ["lnss_sae/lnss-sae-real", "lnss-candle"]

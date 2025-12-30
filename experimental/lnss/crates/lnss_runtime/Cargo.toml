@@ -22,6 +22,6 @@ bincode = { version = "=2.0.0-rc.3", features = ["serde"], optional = true }
 
 [dev-dependencies]
 lnss_hooks = { path = "../lnss_hooks" }
-lnss_sae = { path = "../lnss_sae" }
+lnss_sae = { path = "../lnss_sae", features = ["lnss-sae-real"] }
 lnss_mechint = { path = "../lnss_mechint" }
 lnss_rig = { path = "../lnss_rig" }
