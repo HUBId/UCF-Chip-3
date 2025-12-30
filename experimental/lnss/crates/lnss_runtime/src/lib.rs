@@ -97,11 +97,7 @@ impl ProposalInbox {
         }
     }
 
-    pub fn with_limits(
-        dir: impl AsRef<Path>,
-        ticks_per_scan: u64,
-        max_per_tick: usize,
-    ) -> Self {
+    pub fn with_limits(dir: impl AsRef<Path>, ticks_per_scan: u64, max_per_tick: usize) -> Self {
         Self {
             dir: dir.as_ref().to_path_buf(),
             ticks_per_scan: ticks_per_scan.max(1),

@@ -126,7 +126,15 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 2)),
     };
 
-    let mods = EmotionFieldSnapshot::new("calm", "low", "shallow", "baseline", "stable", vec![], vec![]);
+    let mods = EmotionFieldSnapshot::new(
+        "calm",
+        "low",
+        "shallow",
+        "baseline",
+        "stable",
+        vec![],
+        vec![],
+    );
 
     runtime
         .run_step(

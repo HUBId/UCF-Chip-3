@@ -215,7 +215,13 @@ fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError>
     let payload = normalize_payload(input.payload)?;
     let proposal_id = match input.proposal_id {
         Some(id) if !id.trim().is_empty() => bound_string(&id, MAX_STRING_LEN),
-        _ => generate_proposal_id(&input.kind, input.created_at_ms, input.base_evidence_digest, &payload, &reason_codes),
+        _ => generate_proposal_id(
+            &input.kind,
+            input.created_at_ms,
+            input.base_evidence_digest,
+            &payload,
+            &reason_codes,
+        ),
     };
 
     let canonical = ProposalCanonical {
@@ -280,7 +286,9 @@ fn normalize_payload(payload: ProposalPayload) -> Result<ProposalPayload, LnssEv
                     )
                 })
                 .collect::<Vec<_>>();
-            params.sort_by(|(a_key, a_val), (b_key, b_val)| a_key.cmp(b_key).then_with(|| a_val.cmp(b_val)));
+            params.sort_by(|(a_key, a_val), (b_key, b_val)| {
+                a_key.cmp(b_key).then_with(|| a_val.cmp(b_val))
+            });
             params.dedup();
             params.truncate(MAX_PARAM_ENTRIES);
             Ok(ProposalPayload::LiquidParamsUpdate {
@@ -377,7 +385,9 @@ fn write_canonical_json(value: &Value, buf: &mut Vec<u8>) {
             }
         }
         Value::Number(num) => buf.extend_from_slice(num.to_string().as_bytes()),
-        Value::String(s) => buf.extend_from_slice(serde_json::to_string(s).expect("json string").as_bytes()),
+        Value::String(s) => {
+            buf.extend_from_slice(serde_json::to_string(s).expect("json string").as_bytes())
+        }
         Value::Array(values) => {
             buf.push(b'[');
             for (idx, value) in values.iter().enumerate() {
