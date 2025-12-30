@@ -45,6 +45,40 @@ impl SaeBackend for StubSaeBackend {
 }
 
 #[cfg(feature = "lnss-candle")]
+pub struct CandleSaeBackend {
+    pub top_k: usize,
+}
+
+#[cfg(feature = "lnss-candle")]
+impl CandleSaeBackend {
+    pub fn new(top_k: usize) -> Self {
+        Self { top_k }
+    }
+}
+
+#[cfg(feature = "lnss-candle")]
+impl SaeBackend for CandleSaeBackend {
+    fn infer_features(&mut self, tap: &TapFrame) -> FeatureEvent {
+        let digest = lnss_core::digest("lnss.sae.candle.v1", &tap.activation_bytes);
+        let mut features = Vec::new();
+        let base = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1024;
+        for idx in 0..self.top_k.min(MAX_TOP_FEATURES) {
+            let feature_id = base.wrapping_add(idx as u32) % 1024;
+            let strength = (digest[(idx * 2) % digest.len()] as u16) % 1001;
+            features.push((feature_id, strength));
+        }
+        FeatureEvent::new(
+            "session-stub",
+            "step-stub",
+            &tap.hook_id,
+            features,
+            0,
+            vec!["stub".to_string()],
+        )
+    }
+}
+
+#[cfg(feature = "lnss-candle")]
 pub struct CandleSaeLoader;
 
 #[cfg(feature = "lnss-candle")]

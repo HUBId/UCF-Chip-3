@@ -8,12 +8,16 @@ publish = false
 [features]
 default = []
 lnss-burn = []
+lnss-candle = ["dep:candle-core", "dep:candle-nn"]
 
 [dependencies]
 lnss_core = { path = "../lnss_core" }
+lnss_hooks = { path = "../lnss_hooks" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+candle-core = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
 
 [dev-dependencies]
 lnss_hooks = { path = "../lnss_hooks" }

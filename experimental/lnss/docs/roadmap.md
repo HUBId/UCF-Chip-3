@@ -8,6 +8,7 @@
 ## Phase 2 (inference backends)
 * `lnss-candle`: local-only SAE inference with Candle.
 * `lnss-burn`: optional Burn ODE backend wiring.
+* Candle hooks/taps (local-only model loading, no downloads).
 
 ## Phase 3 (data & logging)
 * `lnss-arrow`: Arrow writer (optional, feature-gated).
