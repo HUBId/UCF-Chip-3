@@ -6,7 +6,8 @@ mod liquid_backend_tests {
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
     use lnss_runtime::{
-        HookProvider, Limits, LiquidOdeBackend, LiquidOdeConfig, LlmBackend, LnssRuntime,
+        FeedbackConsumer, HookProvider, Limits, LiquidOdeBackend, LiquidOdeConfig, LlmBackend,
+        LnssRuntime, MappingAdaptationConfig,
     };
     use lnss_sae::StubSaeBackend;
 
@@ -158,6 +159,8 @@ mod liquid_backend_tests {
             rig: Box::new(rig_a),
             mapper: mapper.clone(),
             limits: Limits::default(),
+            feedback: FeedbackConsumer::default(),
+            adaptation: MappingAdaptationConfig::default(),
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -167,6 +170,8 @@ mod liquid_backend_tests {
             rig: Box::new(rig_b),
             mapper,
             limits: Limits::default(),
+            feedback: FeedbackConsumer::default(),
+            adaptation: MappingAdaptationConfig::default(),
         };
 
         let mods = base_mods();

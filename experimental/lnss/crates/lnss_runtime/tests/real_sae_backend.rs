@@ -10,7 +10,10 @@ mod real_sae_backend_tests {
     use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapKind, TapSpec};
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
-    use lnss_runtime::{Limits, LiquidOdeBackend, LiquidOdeConfig, LnssRuntime};
+    use lnss_runtime::{
+        FeedbackConsumer, Limits, LiquidOdeBackend, LiquidOdeConfig, LnssRuntime,
+        MappingAdaptationConfig,
+    };
     use lnss_sae::{RealSaeBackend, SaeNonlinearity};
 
     fn write_pack(dir: &Path) -> PathBuf {
@@ -113,6 +116,8 @@ mod real_sae_backend_tests {
             rig: Box::new(rig_a),
             mapper: mapper.clone(),
             limits: Limits::default(),
+            feedback: FeedbackConsumer::default(),
+            adaptation: MappingAdaptationConfig::default(),
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -125,6 +130,8 @@ mod real_sae_backend_tests {
             rig: Box::new(rig_b),
             mapper,
             limits: Limits::default(),
+            feedback: FeedbackConsumer::default(),
+            adaptation: MappingAdaptationConfig::default(),
         };
 
         let mods = base_mods();

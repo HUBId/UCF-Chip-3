@@ -251,6 +251,7 @@ name = "chip2"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "lnss_core",
 ]
 
 [[package]]

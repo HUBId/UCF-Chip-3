@@ -8,8 +8,8 @@ use lnss_hooks::TapRegistry;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_runtime::{
-    CandleConfig, CandleLlmBackend, HookProvider, Limits, LlmBackend, LnssRuntime,
-    TapRegistryProvider,
+    CandleConfig, CandleLlmBackend, FeedbackConsumer, HookProvider, Limits, LlmBackend,
+    LnssRuntime, MappingAdaptationConfig, TapRegistryProvider,
 };
 use lnss_sae::CandleSaeBackend;
 
@@ -117,6 +117,8 @@ fn candle_end_to_end_is_deterministic() {
         rig: Box::new(rig),
         mapper,
         limits: Limits::default(),
+        feedback: FeedbackConsumer::default(),
+        adaptation: MappingAdaptationConfig::default(),
     };
 
     let mods = default_mods();

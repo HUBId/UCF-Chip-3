@@ -57,6 +57,7 @@ lnss_evolve = { path = "crates/lnss_evolve", optional = true }
 
 [dev-dependencies]
 chip2 = { path = "crates/chip2" }
+serde_json = { workspace = true }
 
 [workspace.dependencies]
 blake3 = "1"

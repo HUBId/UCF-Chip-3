@@ -27,6 +27,16 @@ pub fn digest(domain: &str, bytes: &[u8]) -> [u8; 32] {
     *digest.as_bytes()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BiophysFeedbackSnapshot {
+    pub tick: u64,
+    pub snapshot_digest: [u8; 32],
+    pub event_queue_overflowed: bool,
+    pub events_dropped: u64,
+    pub events_injected: u32,
+    pub injected_total: u64,
+}
+
 fn bound_string(value: &str) -> String {
     let mut out = value.to_string();
     out.truncate(MAX_STRING_LEN);

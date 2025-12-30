@@ -7,3 +7,4 @@ publish = false
 
 [dependencies]
 blake3 = { workspace = true }
+lnss_core = { path = "../lnss_core" }
