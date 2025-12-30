@@ -1,90 +1,183 @@
-use lnss_bluebridge::{Chip2InjectClient, Chip2RuntimeHandle, ExternalSpike};
-use lnss_core::{BrainTarget, FeatureEvent, FeatureToBrainMap};
-use lnss_runtime::{map_features_to_spikes, BrainSpike, RigClient};
+#![cfg(feature = "lnss-chip2-bridge")]
 
-#[derive(Debug, Default)]
-struct TestChip2Runtime {
-    injected: Vec<ExternalSpike>,
-    total_injected: usize,
+use std::sync::{Arc, Mutex};
+
+use chip2::{Chip2Runtime, DefaultRouter, L4Circuit};
+use lnss_bluebridge::{
+    AppliedTarget, Chip2InjectClient, Chip2RouterAdapter, Chip2RouterError, ExternalSpike,
+    InjectionReport,
+};
+use lnss_core::{BrainTarget, FeatureEvent, FeatureToBrainMap};
+use lnss_runtime::{map_features_to_spikes, RigClient};
+
+#[derive(Clone)]
+struct Chip2RouterBridge {
+    router: Arc<Mutex<DefaultRouter>>,
 }
 
-impl Chip2RuntimeHandle for TestChip2Runtime {
-    fn inject_external_spikes(&mut self, spikes: &[ExternalSpike]) -> Result<(), String> {
-        self.total_injected += spikes.len();
-        self.injected.extend_from_slice(spikes);
-        Ok(())
+impl Chip2RouterBridge {
+    fn new(router: DefaultRouter) -> Self {
+        Self {
+            router: Arc::new(Mutex::new(router)),
+        }
+    }
+
+    fn handle(&self) -> Arc<Mutex<DefaultRouter>> {
+        self.router.clone()
+    }
+}
+
+impl Chip2RouterAdapter for Chip2RouterBridge {
+    fn inject_external_spikes(
+        &mut self,
+        tick: u64,
+        spikes: &[ExternalSpike],
+    ) -> Result<InjectionReport, Chip2RouterError> {
+        let mut guard = match self.router.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let chip2_spikes: Vec<chip2::ExternalSpike> = spikes
+            .iter()
+            .map(|spike| chip2::ExternalSpike {
+                region: spike.region.clone(),
+                population: spike.population.clone(),
+                neuron_group: spike.neuron_group,
+                syn_kind: spike.syn_kind.clone(),
+                amplitude_q: spike.amplitude_q,
+            })
+            .collect();
+        let report = guard
+            .inject_external_spikes(tick, &chip2_spikes)
+            .map_err(|_| Chip2RouterError)?;
+        let applied = report
+            .applied
+            .into_iter()
+            .map(|target| AppliedTarget {
+                region: target.region,
+                population: target.population,
+                neuron_group: target.neuron_group,
+                syn_kind: target.syn_kind,
+            })
+            .collect();
+        Ok(InjectionReport { applied })
     }
 }
 
 fn sample_mapper() -> FeatureToBrainMap {
     let target_a = BrainTarget::new("rc", "pop", 1, "exc", 900);
-    let target_b = BrainTarget::new("rc", "pop", 2, "exc", 700);
-    FeatureToBrainMap::new(1, vec![(7, target_a), (9, target_b)])
+    let target_b = BrainTarget::new("rc", "pop", 2, "inh", 700);
+    let target_c = BrainTarget::new("rc", "pop", 3, "exc", 500);
+    FeatureToBrainMap::new(1, vec![(7, target_a), (9, target_b), (11, target_c)])
 }
 
-fn sample_events() -> Vec<FeatureEvent> {
+fn sample_events(tick: u64) -> Vec<FeatureEvent> {
     vec![
         FeatureEvent::new(
             "session",
-            "step",
+            &format!("step-{tick}"),
             "hook",
             vec![(7, 1000), (9, 500)],
-            123,
-            vec!["reason".to_string()],
+            123 + tick,
+            vec![format!("reason-{tick}")],
         ),
         FeatureEvent::new(
             "session",
-            "step",
+            &format!("step-{tick}-b"),
             "hook",
-            vec![(7, 600), (9, 800)],
-            124,
-            vec!["reason".to_string()],
+            vec![(7, 600), (11, 800)],
+            321 + tick,
+            vec![format!("reason-b-{tick}")],
         ),
     ]
 }
 
-#[test]
-fn injects_external_spikes_deterministically() {
+fn run_sequence(max_spikes: usize) -> (Vec<u8>, Vec<u8>, Vec<AppliedTarget>) {
     let mapper = sample_mapper();
-    let events = sample_events();
-    let mut spikes = map_features_to_spikes(&mapper, &events);
-    assert!(!spikes.is_empty());
-    for (idx, spike) in spikes.iter_mut().enumerate() {
-        spike.tick = idx as u64 % 2;
+    let circuit = L4Circuit::new(42);
+    let runtime = Chip2Runtime::new(circuit);
+    let router = DefaultRouter::new(runtime);
+    let bridge = Chip2RouterBridge::new(router);
+    let handle = bridge.handle();
+    let mut client = Chip2InjectClient::with_max_spikes_per_tick(Box::new(bridge), max_spikes);
+
+    let initial_digest = {
+        let guard = handle.lock().expect("router lock");
+        guard.runtime().snapshot_digest()
+    };
+
+    for tick in 0..10 {
+        let events = sample_events(tick);
+        let mut spikes = map_features_to_spikes(&mapper, &events);
+        for spike in &mut spikes {
+            spike.tick = tick;
+        }
+        client.send_spikes(&spikes).expect("inject spikes");
     }
 
-    let mut client = Chip2InjectClient::with_max_spikes_per_tick(TestChip2Runtime::default(), 2);
-    client.send_spikes(&spikes).unwrap();
+    let (digest, applied) = {
+        let guard = handle.lock().expect("router lock");
+        let digest = guard.runtime().snapshot_digest();
+        let applied = guard
+            .last_report()
+            .map(|report| {
+                report
+                    .applied
+                    .iter()
+                    .map(|target| AppliedTarget {
+                        region: target.region.clone(),
+                        population: target.population.clone(),
+                        neuron_group: target.neuron_group,
+                        syn_kind: target.syn_kind.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (digest, applied)
+    };
 
-    let runtime = client.runtime();
-    assert_eq!(runtime.injected.len(), runtime.total_injected);
-    assert!(runtime.total_injected <= 4);
-
-    let first = runtime.injected.first().expect("expected injected spikes");
-    assert_eq!(first.region, "rc");
-    assert_eq!(first.population, "pop");
-    assert_eq!(first.syn_kind, "exc");
+    (initial_digest.to_vec(), digest.to_vec(), applied)
 }
 
 #[test]
-fn drops_excess_spikes_per_tick_deterministically() {
+fn injects_deterministically_across_ticks() {
+    let (initial_digest, digest, applied) = run_sequence(256);
+    assert_ne!(
+        initial_digest, digest,
+        "digest should change after injection"
+    );
+    let first = applied.first().expect("expected applied targets");
+    assert_eq!(first.region, "rc");
+    assert_eq!(first.population, "pop");
+
+    let (_, digest_repeat, _) = run_sequence(256);
+    assert_eq!(digest, digest_repeat, "digest must be deterministic");
+}
+
+#[test]
+fn respects_per_tick_cap() {
     let mapper = sample_mapper();
-    let events = sample_events();
-    let spikes = map_features_to_spikes(&mapper, &events)
-        .into_iter()
-        .enumerate()
-        .map(|(idx, mut spike)| {
-            spike.tick = 0;
-            spike.amplitude_q = 1000 - idx as u16;
-            spike
-        })
-        .collect::<Vec<BrainSpike>>();
+    let circuit = L4Circuit::new(7);
+    let runtime = Chip2Runtime::new(circuit);
+    let router = DefaultRouter::new(runtime);
+    let bridge = Chip2RouterBridge::new(router);
+    let handle = bridge.handle();
+    let mut client = Chip2InjectClient::with_max_spikes_per_tick(Box::new(bridge), 2);
 
-    let mut client = Chip2InjectClient::with_max_spikes_per_tick(TestChip2Runtime::default(), 1);
-    client.send_spikes(&spikes).unwrap();
+    let events = sample_events(0);
+    let mut spikes = map_features_to_spikes(&mapper, &events);
+    for spike in &mut spikes {
+        spike.tick = 0;
+    }
 
-    let runtime = client.runtime();
-    assert_eq!(runtime.total_injected, 1);
-    let injected = runtime.injected.first().expect("expected injected spike");
-    assert_eq!(injected.tick, 0);
+    client.send_spikes(&spikes).expect("inject spikes");
+
+    let applied = {
+        let guard = handle.lock().expect("router lock");
+        guard
+            .last_report()
+            .map(|report| report.applied.len())
+            .unwrap_or(0)
+    };
+    assert!(applied <= 2, "applied spikes should respect cap");
 }

@@ -7,6 +7,7 @@ publish = false
 
 [workspace]
 members = [
+    "crates/chip2",
     "crates/lnss_core",
     "crates/lnss_runtime",
     "crates/lnss_hooks",
@@ -42,6 +43,7 @@ lnss-arrow = ["lnss_mechint/lnss-arrow"]
 lnss-pyo3 = ["lnss_bluebridge/lnss-pyo3"]
 lnss-cxx = ["lnss_bluebridge/lnss-cxx"]
 lnss-rig-sdk = ["lnss_rig/lnss-rig-sdk"]
+lnss-chip2-bridge = ["lnss_bluebridge/lnss-chip2-bridge"]
 
 [dependencies]
 lnss_core = { path = "crates/lnss_core", optional = true }
@@ -52,6 +54,9 @@ lnss_mechint = { path = "crates/lnss_mechint", optional = true }
 lnss_rig = { path = "crates/lnss_rig", optional = true }
 lnss_bluebridge = { path = "crates/lnss_bluebridge", optional = true }
 lnss_evolve = { path = "crates/lnss_evolve", optional = true }
+
+[dev-dependencies]
+chip2 = { path = "crates/chip2" }
 
 [workspace.dependencies]
 blake3 = "1"

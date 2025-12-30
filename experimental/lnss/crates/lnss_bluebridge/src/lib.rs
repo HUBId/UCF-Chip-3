@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use lnss_runtime::{BrainSpike, LnssRuntimeError, RigClient, DEFAULT_MAX_SPIKES};
+use lnss_runtime::{BrainSpike, LnssRuntimeError, RigClient};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
@@ -37,59 +37,70 @@ pub struct ExternalSpike {
     pub population: String,
     pub neuron_group: u32,
     pub syn_kind: String,
-    pub tick: u64,
     pub amplitude_q: u16,
 }
 
-impl ExternalSpike {
-    pub fn from_brain_spike(spike: &BrainSpike) -> Self {
-        Self {
-            region: spike.target.region.clone(),
-            population: spike.target.population.clone(),
-            neuron_group: spike.target.neuron_group,
-            syn_kind: spike.target.syn_kind.clone(),
-            tick: spike.tick,
-            amplitude_q: spike.amplitude_q,
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedTarget {
+    pub region: String,
+    pub population: String,
+    pub neuron_group: u32,
+    pub syn_kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectionReport {
+    pub applied: Vec<AppliedTarget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chip2RouterError;
+
+impl std::fmt::Display for Chip2RouterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("chip2 router error")
     }
 }
 
-pub trait Chip2RuntimeHandle {
-    fn inject_external_spikes(&mut self, spikes: &[ExternalSpike]) -> Result<(), String>;
+impl std::error::Error for Chip2RouterError {}
+
+pub trait Chip2RouterAdapter: Send {
+    fn inject_external_spikes(
+        &mut self,
+        tick: u64,
+        spikes: &[ExternalSpike],
+    ) -> Result<InjectionReport, Chip2RouterError>;
 }
 
-#[derive(Debug)]
-pub struct Chip2InjectClient<R> {
-    runtime: R,
+const MAX_SPIKES_PER_TICK: usize = 256;
+
+pub struct Chip2InjectClient {
+    router: Box<dyn Chip2RouterAdapter>,
     max_spikes_per_tick: usize,
 }
 
-impl<R> Chip2InjectClient<R> {
-    pub fn new(runtime: R) -> Self {
+impl Chip2InjectClient {
+    pub fn new(router: Box<dyn Chip2RouterAdapter>) -> Self {
+        Self::with_max_spikes_per_tick(router, MAX_SPIKES_PER_TICK)
+    }
+
+    pub fn with_max_spikes_per_tick(
+        router: Box<dyn Chip2RouterAdapter>,
+        max_spikes_per_tick: usize,
+    ) -> Self {
         Self {
-            runtime,
-            max_spikes_per_tick: DEFAULT_MAX_SPIKES,
+            router,
+            max_spikes_per_tick: max_spikes_per_tick.min(MAX_SPIKES_PER_TICK),
         }
     }
 
-    pub fn with_max_spikes_per_tick(runtime: R, max_spikes_per_tick: usize) -> Self {
-        Self {
-            runtime,
-            max_spikes_per_tick,
-        }
+    pub fn router_mut(&mut self) -> &mut dyn Chip2RouterAdapter {
+        self.router.as_mut()
     }
 
-    pub fn runtime(&self) -> &R {
-        &self.runtime
-    }
-
-    pub fn runtime_mut(&mut self) -> &mut R {
-        &mut self.runtime
-    }
-
-    fn prepare_external_spikes(&self, spikes: &[BrainSpike]) -> Vec<ExternalSpike> {
+    fn normalize_spikes(&self, spikes: &[BrainSpike]) -> BTreeMap<u64, Vec<ExternalSpike>> {
         if self.max_spikes_per_tick == 0 || spikes.is_empty() {
-            return Vec::new();
+            return BTreeMap::new();
         }
 
         let mut per_tick: BTreeMap<u64, Vec<ExternalSpike>> = BTreeMap::new();
@@ -97,7 +108,7 @@ impl<R> Chip2InjectClient<R> {
             per_tick
                 .entry(spike.tick)
                 .or_default()
-                .push(ExternalSpike::from_brain_spike(spike));
+                .push(map_external_spike(spike));
         }
 
         for spikes in per_tick.values_mut() {
@@ -112,22 +123,28 @@ impl<R> Chip2InjectClient<R> {
             spikes.truncate(self.max_spikes_per_tick);
         }
 
-        let mut out = Vec::new();
-        for (_, spikes) in per_tick {
-            out.extend(spikes);
-        }
-        out
+        per_tick
     }
 }
 
-impl<R> RigClient for Chip2InjectClient<R>
-where
-    R: Chip2RuntimeHandle,
-{
+impl RigClient for Chip2InjectClient {
     fn send_spikes(&mut self, spikes: &[BrainSpike]) -> Result<(), LnssRuntimeError> {
-        let external = self.prepare_external_spikes(spikes);
-        self.runtime
-            .inject_external_spikes(&external)
-            .map_err(LnssRuntimeError::Rig)
+        let per_tick = self.normalize_spikes(spikes);
+        for (tick, spikes) in per_tick {
+            self.router
+                .inject_external_spikes(tick, &spikes)
+                .map_err(|_| LnssRuntimeError::Rig("chip2 injection failed".to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+fn map_external_spike(spike: &BrainSpike) -> ExternalSpike {
+    ExternalSpike {
+        region: spike.target.region.clone(),
+        population: spike.target.population.clone(),
+        neuron_group: spike.target.neuron_group,
+        syn_kind: spike.target.syn_kind.clone(),
+        amplitude_q: spike.amplitude_q,
     }
 }

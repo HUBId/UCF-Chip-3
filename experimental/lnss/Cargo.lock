@@ -247,6 +247,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "chip2"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -746,6 +753,7 @@ checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 name = "lnss"
 version = "0.1.0"
 dependencies = [
+ "chip2",
  "lnss_bluebridge",
  "lnss_core",
  "lnss_evolve",
@@ -760,6 +768,7 @@ dependencies = [
 name = "lnss_bluebridge"
 version = "0.1.0"
 dependencies = [
+ "chip2",
  "lnss_core",
  "lnss_runtime",
 ]
