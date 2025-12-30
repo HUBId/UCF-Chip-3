@@ -109,7 +109,7 @@ impl ProposalInbox {
 
     fn should_scan(&mut self) -> bool {
         self.tick_counter = self.tick_counter.saturating_add(1);
-        self.tick_counter % self.ticks_per_scan == 0
+        self.tick_counter.is_multiple_of(self.ticks_per_scan)
     }
 
     pub fn ingest(
