@@ -679,12 +679,8 @@ pub mod ucf {
         impl ApprovalAlternativeForm {
             pub fn as_str_name(&self) -> &'static str {
                 match self {
-                    ApprovalAlternativeForm::Unspecified => {
-                        "APPROVAL_ALTERNATIVE_FORM_UNSPECIFIED"
-                    }
-                    ApprovalAlternativeForm::DoNothing => {
-                        "APPROVAL_ALTERNATIVE_FORM_DO_NOTHING"
-                    }
+                    ApprovalAlternativeForm::Unspecified => "APPROVAL_ALTERNATIVE_FORM_UNSPECIFIED",
+                    ApprovalAlternativeForm::DoNothing => "APPROVAL_ALTERNATIVE_FORM_DO_NOTHING",
                     ApprovalAlternativeForm::SimulateFirst => {
                         "APPROVAL_ALTERNATIVE_FORM_SIMULATE_FIRST"
                     }

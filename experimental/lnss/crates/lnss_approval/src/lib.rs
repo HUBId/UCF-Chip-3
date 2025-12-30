@@ -44,11 +44,9 @@ pub fn build_aap_for_proposal(
         aap_id: bound_string(&aap_id),
         session_id: bound_string(&ctx.session_id),
         requested_operation: ctx.requested_operation as i32,
-        ruleset_digest: ctx
-            .ruleset_digest
-            .map(|digest| ucf::v1::Digest32 {
-                value: digest.to_vec(),
-            }),
+        ruleset_digest: ctx.ruleset_digest.map(|digest| ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
         mapping_digest: match proposal.kind {
             ProposalKind::MappingUpdate => ctx.current_mapping_digest,
             _ => None,
@@ -228,14 +226,20 @@ mod tests {
             .iter()
             .find(|item| item.id == "proposal_digest")
             .expect("proposal digest ref");
-        assert_eq!(proposal_ref.digest.as_ref().unwrap().value, proposal.proposal_digest);
+        assert_eq!(
+            proposal_ref.digest.as_ref().unwrap().value,
+            proposal.proposal_digest
+        );
 
         let base_ref = aap
             .evidence_refs
             .iter()
             .find(|item| item.id == "base_evidence_digest")
             .expect("base evidence digest ref");
-        assert_eq!(base_ref.digest.as_ref().unwrap().value, proposal.base_evidence_digest);
+        assert_eq!(
+            base_ref.digest.as_ref().unwrap().value,
+            proposal.base_evidence_digest
+        );
     }
 
     #[test]

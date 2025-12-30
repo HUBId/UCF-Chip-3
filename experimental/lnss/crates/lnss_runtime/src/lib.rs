@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use lnss_approval::{approval_artifact_package_digest, build_aap_for_proposal, ApprovalContext};
 pub use lnss_core::BiophysFeedbackSnapshot;
 #[cfg(feature = "lnss-liquid-ode")]
 use lnss_core::TapKind;
@@ -14,7 +15,6 @@ use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
 };
-use lnss_approval::{approval_artifact_package_digest, build_aap_for_proposal, ApprovalContext};
 use lnss_evolve::{
     encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
     EvalVerdict, ProposalEvidence, ProposalKind,

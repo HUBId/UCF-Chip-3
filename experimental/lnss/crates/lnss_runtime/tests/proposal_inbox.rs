@@ -161,11 +161,17 @@ impl PvgsReader for SharedPvgsClient {
     }
 
     fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
-        self.inner.lock().expect("pvgs lock").get_latest_pev_digest()
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_latest_pev_digest()
     }
 
     fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
-        self.inner.lock().expect("pvgs lock").get_current_ruleset_digest()
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_current_ruleset_digest()
     }
 
     fn is_session_sealed(&self, session_id: &str) -> Result<bool, pvgs_client::PvgsClientError> {
