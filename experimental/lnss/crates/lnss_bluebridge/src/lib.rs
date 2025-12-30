@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use lnss_runtime::{BrainSpike, LnssRuntimeError, RigClient};
+use lnss_runtime::{BiophysFeedbackSnapshot, BrainSpike, LnssRuntimeError, RigClient};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
@@ -70,6 +70,10 @@ pub trait Chip2RouterAdapter: Send {
         tick: u64,
         spikes: &[ExternalSpike],
     ) -> Result<InjectionReport, Chip2RouterError>;
+
+    fn feedback_snapshot(&mut self) -> Option<BiophysFeedbackSnapshot> {
+        None
+    }
 }
 
 const MAX_SPIKES_PER_TICK: usize = 256;
@@ -77,6 +81,7 @@ const MAX_SPIKES_PER_TICK: usize = 256;
 pub struct Chip2InjectClient {
     router: Box<dyn Chip2RouterAdapter>,
     max_spikes_per_tick: usize,
+    latest_feedback: Option<BiophysFeedbackSnapshot>,
 }
 
 impl Chip2InjectClient {
@@ -91,6 +96,7 @@ impl Chip2InjectClient {
         Self {
             router,
             max_spikes_per_tick: max_spikes_per_tick.min(MAX_SPIKES_PER_TICK),
+            latest_feedback: None,
         }
     }
 
@@ -135,7 +141,12 @@ impl RigClient for Chip2InjectClient {
                 .inject_external_spikes(tick, &spikes)
                 .map_err(|_| LnssRuntimeError::Rig("chip2 injection failed".to_string()))?;
         }
+        self.latest_feedback = self.router.feedback_snapshot();
         Ok(())
+    }
+
+    fn poll_feedback(&mut self) -> Option<BiophysFeedbackSnapshot> {
+        self.latest_feedback.take()
     }
 }
 

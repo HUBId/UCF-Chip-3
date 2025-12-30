@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use blake3::Hasher;
+use lnss_core::BiophysFeedbackSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalSpike {
@@ -51,6 +52,9 @@ pub struct Chip2Runtime {
     tick: u64,
     injected_total: usize,
     digest: [u8; 32],
+    last_injected: u32,
+    last_dropped: u64,
+    last_overflowed: bool,
 }
 
 impl Chip2Runtime {
@@ -63,6 +67,9 @@ impl Chip2Runtime {
             tick: 0,
             injected_total: 0,
             digest,
+            last_injected: 0,
+            last_dropped: 0,
+            last_overflowed: false,
         }
     }
 
@@ -78,7 +85,19 @@ impl Chip2Runtime {
         self.digest
     }
 
+    pub fn feedback_snapshot(&self) -> BiophysFeedbackSnapshot {
+        BiophysFeedbackSnapshot {
+            tick: self.tick,
+            snapshot_digest: self.digest,
+            event_queue_overflowed: self.last_overflowed,
+            events_dropped: self.last_dropped,
+            events_injected: self.last_injected,
+            injected_total: self.injected_total as u64,
+        }
+    }
+
     fn apply_spikes(&mut self, tick: u64, spikes: &[ExternalSpike]) -> InjectionReport {
+        const FEEDBACK_QUEUE_CAP: usize = 128;
         let mut hasher = Hasher::new();
         hasher.update(b"chip2.runtime.inject.v1");
         hasher.update(&self.digest);
@@ -94,6 +113,10 @@ impl Chip2Runtime {
         self.digest = *hasher.finalize().as_bytes();
         self.tick = tick;
         self.injected_total = self.injected_total.saturating_add(spikes.len());
+        let dropped = spikes.len().saturating_sub(FEEDBACK_QUEUE_CAP);
+        self.last_dropped = dropped as u64;
+        self.last_overflowed = dropped > 0;
+        self.last_injected = spikes.len().min(u32::MAX as usize) as u32;
         let applied = spikes
             .iter()
             .map(|spike| AppliedTarget {

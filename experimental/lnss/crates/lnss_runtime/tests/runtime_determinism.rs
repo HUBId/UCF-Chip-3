@@ -8,8 +8,9 @@ use lnss_hooks::TapPlan;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_runtime::{
-    map_features_to_spikes, Limits, LnssRuntime, MechIntRecord, StubHookProvider, StubLlmBackend,
-    TapSummary,
+    map_features_to_spikes, BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime,
+    MappingAdaptationConfig, MappingAdaptationSuggestion, MechIntRecord, MechIntRecordParts,
+    StubHookProvider, StubLlmBackend, TapSummary,
 };
 use lnss_sae::StubSaeBackend;
 
@@ -62,8 +63,67 @@ fn boundedness_caps_are_enforced() {
             sample_len: 0,
         })
         .collect();
-    let record = MechIntRecord::new("s", "t", [1; 32], summaries, vec![], [3; 32]);
+    let record = MechIntRecord::new(MechIntRecordParts {
+        session_id: "s".to_string(),
+        step_id: "t".to_string(),
+        token_digest: [1; 32],
+        tap_summaries: summaries,
+        feature_event_digests: vec![],
+        mapping_digest: [3; 32],
+        feedback: None,
+        mapping_suggestion: None,
+    });
     assert_eq!(record.tap_digests.len(), 4);
+}
+
+#[test]
+fn feedback_consumer_keeps_latest_snapshot() {
+    let mut consumer = FeedbackConsumer::default();
+    let first = BiophysFeedbackSnapshot {
+        tick: 1,
+        snapshot_digest: [1; 32],
+        event_queue_overflowed: false,
+        events_dropped: 0,
+        events_injected: 4,
+        injected_total: 4,
+    };
+    let second = BiophysFeedbackSnapshot {
+        tick: 2,
+        snapshot_digest: [2; 32],
+        event_queue_overflowed: true,
+        events_dropped: 3,
+        events_injected: 7,
+        injected_total: 11,
+    };
+    consumer.ingest(first);
+    consumer.ingest(second.clone());
+    assert_eq!(consumer.last, Some(second));
+}
+
+#[test]
+fn mapping_adaptation_suggests_when_enabled() {
+    let cfg = MappingAdaptationConfig {
+        enabled: true,
+        events_dropped_threshold: 2,
+        amplitude_q_factor: 900,
+        max_targets_per_feature: 4,
+    };
+    let snapshot = BiophysFeedbackSnapshot {
+        tick: 5,
+        snapshot_digest: [9; 32],
+        event_queue_overflowed: false,
+        events_dropped: 3,
+        events_injected: 10,
+        injected_total: 20,
+    };
+    let suggestion = cfg.suggest(Some(&snapshot));
+    assert_eq!(
+        suggestion,
+        Some(MappingAdaptationSuggestion {
+            amplitude_q_factor: 900,
+            max_targets_per_feature: 4,
+        })
+    );
 }
 
 #[test]
@@ -104,6 +164,8 @@ fn end_to_end_stub_pipeline() {
         rig: Box::new(rig),
         mapper,
         limits: Limits::default(),
+        feedback: FeedbackConsumer::default(),
+        adaptation: MappingAdaptationConfig::default(),
     };
 
     let mods = EmotionFieldSnapshot::new(

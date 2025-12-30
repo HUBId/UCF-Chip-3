@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use lnss_core::BiophysFeedbackSnapshot;
 #[cfg(feature = "lnss-liquid-ode")]
 use lnss_core::TapKind;
 use lnss_core::{
@@ -44,6 +45,9 @@ pub trait MechIntWriter {
 
 pub trait RigClient {
     fn send_spikes(&mut self, spikes: &[BrainSpike]) -> Result<(), LnssRuntimeError>;
+    fn poll_feedback(&mut self) -> Option<BiophysFeedbackSnapshot> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +77,8 @@ pub struct LnssRuntime {
     pub rig: Box<dyn RigClient>,
     pub mapper: FeatureToBrainMap,
     pub limits: Limits,
+    pub feedback: FeedbackConsumer,
+    pub adaptation: MappingAdaptationConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +107,21 @@ pub struct MechIntRecord {
     pub tap_summaries: Vec<TapSummary>,
     pub feature_event_digests: Vec<[u8; 32]>,
     pub mapping_digest: [u8; 32],
+    pub feedback: Option<FeedbackSummary>,
+    pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
     pub record_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MechIntRecordParts {
+    pub session_id: String,
+    pub step_id: String,
+    pub token_digest: [u8; 32],
+    pub tap_summaries: Vec<TapSummary>,
+    pub feature_event_digests: Vec<[u8; 32]>,
+    pub mapping_digest: [u8; 32],
+    pub feedback: Option<FeedbackSummary>,
+    pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +129,85 @@ pub struct TapSummary {
     pub hook_id: String,
     pub activation_digest: [u8; 32],
     pub sample_len: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackSummary {
+    pub tick: u64,
+    pub snapshot_digest: [u8; 32],
+    pub event_queue_overflowed: bool,
+    pub events_dropped: u64,
+    pub events_injected: u32,
+    pub injected_total: u64,
+}
+
+impl FeedbackSummary {
+    pub fn from_snapshot(snapshot: &BiophysFeedbackSnapshot) -> Self {
+        Self {
+            tick: snapshot.tick,
+            snapshot_digest: snapshot.snapshot_digest,
+            event_queue_overflowed: snapshot.event_queue_overflowed,
+            events_dropped: snapshot.events_dropped,
+            events_injected: snapshot.events_injected,
+            injected_total: snapshot.injected_total,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MappingAdaptationSuggestion {
+    pub amplitude_q_factor: u16,
+    pub max_targets_per_feature: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct MappingAdaptationConfig {
+    pub enabled: bool,
+    pub events_dropped_threshold: u64,
+    pub amplitude_q_factor: u16,
+    pub max_targets_per_feature: u16,
+}
+
+impl Default for MappingAdaptationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            events_dropped_threshold: 1,
+            amplitude_q_factor: 900,
+            max_targets_per_feature: 8,
+        }
+    }
+}
+
+impl MappingAdaptationConfig {
+    pub fn suggest(
+        &self,
+        feedback: Option<&BiophysFeedbackSnapshot>,
+    ) -> Option<MappingAdaptationSuggestion> {
+        if !self.enabled {
+            return None;
+        }
+        let feedback = feedback?;
+        let dropped_high = feedback.events_dropped >= self.events_dropped_threshold;
+        if !(feedback.event_queue_overflowed || dropped_high) {
+            return None;
+        }
+        Some(MappingAdaptationSuggestion {
+            amplitude_q_factor: self.amplitude_q_factor.clamp(1, 1000),
+            max_targets_per_feature: self.max_targets_per_feature.max(1),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FeedbackConsumer {
+    pub last: Option<BiophysFeedbackSnapshot>,
+}
+
+impl FeedbackConsumer {
+    pub fn ingest(&mut self, snap: BiophysFeedbackSnapshot) {
+        self.last = Some(snap);
+    }
 }
 
 impl TapSummary {
@@ -122,71 +221,55 @@ impl TapSummary {
 }
 
 impl MechIntRecord {
-    pub fn new(
-        session_id: &str,
-        step_id: &str,
-        token_digest: [u8; 32],
-        mut tap_summaries: Vec<TapSummary>,
-        mut feature_event_digests: Vec<[u8; 32]>,
-        mapping_digest: [u8; 32],
-    ) -> Self {
-        tap_summaries.sort_by(|a, b| {
+    pub fn new(mut parts: MechIntRecordParts) -> Self {
+        parts.tap_summaries.sort_by(|a, b| {
             a.hook_id
                 .cmp(&b.hook_id)
                 .then_with(|| a.activation_digest.cmp(&b.activation_digest))
         });
-        let mut tap_digests: Vec<[u8; 32]> = tap_summaries
+        let mut tap_digests: Vec<[u8; 32]> = parts
+            .tap_summaries
             .iter()
             .map(|summary| summary.activation_digest)
             .collect();
         tap_digests.sort();
-        feature_event_digests.sort();
-        let record_digest = record_digest(
-            session_id,
-            step_id,
-            token_digest,
-            &tap_summaries,
-            &feature_event_digests,
-            mapping_digest,
-        );
+        parts.feature_event_digests.sort();
+        let record_digest = record_digest(&parts);
         Self {
-            session_id: session_id.to_string(),
-            step_id: step_id.to_string(),
-            token_digest,
+            session_id: parts.session_id,
+            step_id: parts.step_id,
+            token_digest: parts.token_digest,
             tap_digests,
-            tap_summaries,
-            feature_event_digests,
-            mapping_digest,
+            tap_summaries: parts.tap_summaries,
+            feature_event_digests: parts.feature_event_digests,
+            mapping_digest: parts.mapping_digest,
+            feedback: parts.feedback,
+            mapping_suggestion: parts.mapping_suggestion,
             record_digest,
         }
     }
 }
 
-fn record_digest(
-    session_id: &str,
-    step_id: &str,
-    token_digest: [u8; 32],
-    tap_summaries: &[TapSummary],
-    feature_event_digests: &[[u8; 32]],
-    mapping_digest: [u8; 32],
-) -> [u8; 32] {
+fn record_digest(parts: &MechIntRecordParts) -> [u8; 32] {
     let mut buf = Vec::new();
-    buf.extend_from_slice(session_id.as_bytes());
+    buf.extend_from_slice(parts.session_id.as_bytes());
     buf.push(0);
-    buf.extend_from_slice(step_id.as_bytes());
+    buf.extend_from_slice(parts.step_id.as_bytes());
     buf.push(0);
-    buf.extend_from_slice(&token_digest);
-    buf.extend_from_slice(&mapping_digest);
-    buf.extend_from_slice(&(tap_summaries.len() as u32).to_le_bytes());
-    for summary in tap_summaries {
+    buf.extend_from_slice(&parts.token_digest);
+    buf.extend_from_slice(&parts.mapping_digest);
+    buf.extend_from_slice(&(parts.tap_summaries.len() as u32).to_le_bytes());
+    for summary in &parts.tap_summaries {
         write_string(&mut buf, &summary.hook_id);
         buf.extend_from_slice(&summary.activation_digest);
         buf.extend_from_slice(&summary.sample_len.to_le_bytes());
     }
-    buf.extend_from_slice(&(feature_event_digests.len() as u32).to_le_bytes());
-    for digest_bytes in feature_event_digests {
+    buf.extend_from_slice(&(parts.feature_event_digests.len() as u32).to_le_bytes());
+    for digest_bytes in &parts.feature_event_digests {
         buf.extend_from_slice(digest_bytes);
     }
+    write_optional_feedback(&mut buf, parts.feedback.as_ref());
+    write_optional_suggestion(&mut buf, parts.mapping_suggestion.as_ref());
     digest("lnss.mechint.record.v1", &buf)
 }
 
@@ -196,6 +279,8 @@ pub struct RuntimeOutput {
     pub taps: Vec<TapFrame>,
     pub feature_events: Vec<FeatureEvent>,
     pub spikes: Vec<BrainSpike>,
+    pub feedback_snapshot: Option<BiophysFeedbackSnapshot>,
+    pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
     pub mechint_record: MechIntRecord,
 }
 
@@ -229,20 +314,30 @@ impl LnssRuntime {
         let mut spikes = map_features_to_spikes(&self.mapper, &feature_events);
         spikes.truncate(self.limits.max_spikes);
         self.rig.send_spikes(&spikes)?;
+        if let Some(snapshot) = self.rig.poll_feedback() {
+            self.feedback.ingest(snapshot);
+        }
+        let feedback_snapshot = self.feedback.last.clone();
+        let feedback_summary = feedback_snapshot
+            .as_ref()
+            .map(FeedbackSummary::from_snapshot);
+        let mapping_suggestion = self.adaptation.suggest(feedback_snapshot.as_ref());
 
         let tap_summaries = taps.iter().map(TapSummary::from_tap).collect();
         let feature_event_digests = feature_events
             .iter()
             .map(|event| event.event_digest)
             .collect();
-        let mechint_record = MechIntRecord::new(
-            session_id,
-            step_id,
+        let mechint_record = MechIntRecord::new(MechIntRecordParts {
+            session_id: session_id.to_string(),
+            step_id: step_id.to_string(),
             token_digest,
             tap_summaries,
             feature_event_digests,
-            self.mapper.map_digest,
-        );
+            mapping_digest: self.mapper.map_digest,
+            feedback: feedback_summary,
+            mapping_suggestion: mapping_suggestion.clone(),
+        });
         self.mechint.write_step(&mechint_record)?;
 
         Ok(RuntimeOutput {
@@ -250,6 +345,8 @@ impl LnssRuntime {
             taps,
             feature_events,
             spikes,
+            feedback_snapshot,
+            mapping_suggestion,
             mechint_record,
         })
     }
@@ -337,6 +434,48 @@ fn write_string(buf: &mut Vec<u8>, value: &str) {
     let len = bytes.len() as u32;
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(bytes);
+}
+
+fn write_u16(buf: &mut Vec<u8>, value: u16) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_bool(buf: &mut Vec<u8>, value: bool) {
+    buf.push(u8::from(value));
+}
+
+fn write_optional_feedback(buf: &mut Vec<u8>, feedback: Option<&FeedbackSummary>) {
+    match feedback {
+        Some(summary) => {
+            write_bool(buf, true);
+            write_u64(buf, summary.tick);
+            buf.extend_from_slice(&summary.snapshot_digest);
+            write_bool(buf, summary.event_queue_overflowed);
+            write_u64(buf, summary.events_dropped);
+            write_u32(buf, summary.events_injected);
+            write_u64(buf, summary.injected_total);
+        }
+        None => write_bool(buf, false),
+    }
+}
+
+fn write_optional_suggestion(buf: &mut Vec<u8>, suggestion: Option<&MappingAdaptationSuggestion>) {
+    match suggestion {
+        Some(suggestion) => {
+            write_bool(buf, true);
+            write_u16(buf, suggestion.amplitude_q_factor);
+            write_u16(buf, suggestion.max_targets_per_feature);
+        }
+        None => write_bool(buf, false),
+    }
 }
 
 pub struct TapRegistryProvider {
