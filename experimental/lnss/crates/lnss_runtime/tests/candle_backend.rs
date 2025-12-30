@@ -7,7 +7,10 @@ use lnss_core::{BrainTarget, EmotionFieldSnapshot, TapKind, TapSpec};
 use lnss_hooks::TapRegistry;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
-use lnss_runtime::{CandleConfig, CandleLlmBackend, Limits, LnssRuntime, TapRegistryProvider};
+use lnss_runtime::{
+    CandleConfig, CandleLlmBackend, HookProvider, Limits, LlmBackend, LnssRuntime,
+    TapRegistryProvider,
+};
 use lnss_sae::CandleSaeBackend;
 
 fn create_loaded_model_dir() -> std::path::PathBuf {
