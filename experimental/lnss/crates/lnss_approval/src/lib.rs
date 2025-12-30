@@ -1,302 +1,260 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use lnss_core::MAX_STRING_LEN;
+use lnss_evolve::{Proposal, ProposalKind};
+use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
-use lnss_core::digest;
-use lnss_evolve::{Proposal, ProposalPayload};
-use prost::Message;
-use thiserror::Error;
-use ucf_protocol::ucf;
+const AAP_DOMAIN: &str = "UCF:HASH:APPROVAL_ARTIFACT_PACKAGE";
+const AAP_ID_PREFIX_LEN: usize = 8;
+const MAX_EVIDENCE_REFS: usize = 4;
+const MAX_ALTERNATIVES: usize = 3;
+const MAX_CONSTRAINTS: usize = 8;
 
-const DEFAULT_MAX_AMPLITUDE_Q: u16 = 1000;
-const DEFAULT_MAX_TARGETS_PER_FEATURE: u16 = 8;
-const DEFAULT_MAX_SPIKES_PER_TICK: u32 = 2048;
-const DEFAULT_MAX_TARGETS_PER_SPIKE: u32 = 64;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApprovalConstraints {
-    pub max_amplitude_q: u16,
-    pub max_targets_per_feature: u16,
-    pub require_simulation_first: bool,
-    pub max_spikes_per_tick: u32,
-    pub max_targets_per_spike: u32,
+#[derive(Debug, Clone)]
+pub struct ApprovalContext {
+    pub session_id: String,
+    pub ruleset_digest: Option<[u8; 32]>,
+    pub current_mapping_digest: Option<[u8; 32]>,
+    pub current_sae_pack_digest: Option<[u8; 32]>,
+    pub current_liquid_params_digest: Option<[u8; 32]>,
+    pub latest_scorecard_digest: Option<[u8; 32]>,
+    pub requested_operation: ucf::v1::OperationCategory,
 }
 
-impl Default for ApprovalConstraints {
-    fn default() -> Self {
-        Self {
-            max_amplitude_q: DEFAULT_MAX_AMPLITUDE_Q,
-            max_targets_per_feature: DEFAULT_MAX_TARGETS_PER_FEATURE,
-            require_simulation_first: false,
-            max_spikes_per_tick: DEFAULT_MAX_SPIKES_PER_TICK,
-            max_targets_per_spike: DEFAULT_MAX_TARGETS_PER_SPIKE,
+pub fn build_aap_for_proposal(
+    proposal: &Proposal,
+    ctx: &ApprovalContext,
+) -> ucf::v1::ApprovalArtifactPackage {
+    let aap_id = aap_id_for_proposal(proposal);
+    let mut evidence_refs = Vec::new();
+    evidence_refs.push(related_ref("proposal_digest", proposal.proposal_digest));
+    evidence_refs.push(related_ref(
+        "base_evidence_digest",
+        proposal.base_evidence_digest,
+    ));
+    if let Some(scorecard) = ctx.latest_scorecard_digest {
+        evidence_refs.push(related_ref("scorecard_digest", scorecard));
+    }
+    evidence_refs.truncate(MAX_EVIDENCE_REFS);
+
+    let alternatives = build_alternatives();
+    let constraints = constraints_for_proposal(proposal);
+
+    let mut aap = ucf::v1::ApprovalArtifactPackage {
+        aap_id: bound_string(&aap_id),
+        session_id: bound_string(&ctx.session_id),
+        requested_operation: ctx.requested_operation as i32,
+        ruleset_digest: ctx.ruleset_digest.map(|digest| ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+        mapping_digest: match proposal.kind {
+            ProposalKind::MappingUpdate => ctx.current_mapping_digest,
+            _ => None,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApprovalActionPlan {
-    pub aap_digest: [u8; 32],
-    pub proposal_digest: [u8; 32],
-    pub constraints: ApprovalConstraints,
-}
-
-impl ApprovalActionPlan {
-    pub fn new(proposal_digest: [u8; 32], constraints: ApprovalConstraints) -> Self {
-        let aap_digest = approval_action_plan_digest(proposal_digest, &constraints);
-        Self {
-            aap_digest,
-            proposal_digest,
-            constraints,
+        .map(|digest| ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+        sae_pack_digest: match proposal.kind {
+            ProposalKind::SaePackUpdate => ctx.current_sae_pack_digest,
+            _ => None,
         }
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum LnssApprovalError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("decode error: {0}")]
-    Decode(String),
-    #[error("validation error: {0}")]
-    Validation(String),
-}
-
-pub fn create_aap_from_proposal(proposal: &Proposal) -> ApprovalActionPlan {
-    let mut constraints = ApprovalConstraints::default();
-    if let ProposalPayload::InjectionLimitsUpdate {
-        max_spikes_per_tick,
-        max_targets_per_spike,
-    } = proposal.payload
-    {
-        constraints.max_spikes_per_tick = max_spikes_per_tick;
-        constraints.max_targets_per_spike = max_targets_per_spike;
-    }
-    ApprovalActionPlan::new(proposal.proposal_digest, constraints)
-}
-
-pub fn register_pending_aap(aap: ApprovalActionPlan) {
-    let mut store = pending_aap_store().lock().expect("pending aap store");
-    store.insert(aap.aap_digest, aap);
-}
-
-pub fn clear_pending_aaps() {
-    pending_aap_store().lock().expect("pending aap store").clear();
-}
-
-pub fn clear_seen_approval_digests() {
-    seen_approval_store()
-        .lock()
-        .expect("seen approvals")
-        .clear();
-}
-
-pub fn load_approval_decisions(
-    dir: &Path,
-) -> Result<Vec<ucf::v1::ApprovalDecision>, LnssApprovalError> {
-    let mut entries: Vec<PathBuf> = fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .collect();
-
-    entries.sort_by(|a, b| {
-        a.file_name()
-            .unwrap_or_default()
-            .cmp(b.file_name().unwrap_or_default())
-    });
-
-    let mut decisions = Vec::new();
-    for path in entries {
-        let bytes = fs::read(&path)?;
-        let decision = ucf::v1::ApprovalDecision::decode(bytes.as_slice())
-            .map_err(|err| LnssApprovalError::Decode(err.to_string()))?;
-
-        let approval_digest = decision
-            .approval_digest
-            .as_ref()
-            .ok_or_else(|| LnssApprovalError::Validation("missing approval_digest".to_string()))?;
-        let approval_digest = digest32_from_proto(approval_digest)?;
-        let mut seen = seen_approval_store().lock().expect("seen approvals");
-        if seen.contains(&approval_digest) {
-            continue;
+        .map(|digest| ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+        liquid_params_digest: match proposal.kind {
+            ProposalKind::LiquidParamsUpdate => ctx.current_liquid_params_digest,
+            _ => None,
         }
+        .map(|digest| ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+        evidence_refs,
+        alternatives,
+        constraints,
+        aap_digest: None,
+    };
 
-        let aap_digest = decision
-            .aap_digest
-            .as_ref()
-            .ok_or_else(|| LnssApprovalError::Validation("missing aap_digest".to_string()))?;
-        let aap_digest = digest32_from_proto(aap_digest)?;
-        let pending = pending_aap_store().lock().expect("pending aap store");
-        if !pending.contains_key(&aap_digest) {
-            return Err(LnssApprovalError::Validation(format!(
-                "unknown aap_digest: {}",
-                hex::encode(aap_digest)
-            )));
-        }
-
-        seen.insert(approval_digest);
-        decisions.push(decision);
-    }
-
-    Ok(decisions)
-}
-
-pub fn decision_allows_activation(
-    decision: &ucf::v1::ApprovalDecision,
-    aap: &ApprovalActionPlan,
-) -> bool {
-    let form =
-        ucf::v1::ApprovalDecisionForm::try_from(decision.decision).unwrap_or(
-            ucf::v1::ApprovalDecisionForm::Unspecified,
-        );
-    match form {
-        ucf::v1::ApprovalDecisionForm::Approve => {
-            decision
-                .modifications
-                .as_ref()
-                .map(|mods| modifications_tighten_constraints(mods, &aap.constraints))
-                .unwrap_or(true)
-        }
-        ucf::v1::ApprovalDecisionForm::ApproveWithModifications => decision
-            .modifications
-            .as_ref()
-            .map(|mods| modifications_tighten_constraints(mods, &aap.constraints))
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-pub fn digest32_from_proto(digest: &ucf::v1::Digest32) -> Result<[u8; 32], LnssApprovalError> {
-    if digest.value.len() != 32 {
-        return Err(LnssApprovalError::Validation(
-            "digest length mismatch".to_string(),
-        ));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest.value);
-    Ok(out)
-}
-
-pub fn digest32_to_proto(digest: [u8; 32]) -> ucf::v1::Digest32 {
-    ucf::v1::Digest32 {
+    let digest = approval_artifact_package_digest(&aap);
+    aap.aap_digest = Some(ucf::v1::Digest32 {
         value: digest.to_vec(),
+    });
+    aap
+}
+
+pub fn approval_artifact_package_digest(aap: &ucf::v1::ApprovalArtifactPackage) -> [u8; 32] {
+    let mut canonical = aap.clone();
+    canonical.aap_digest = None;
+    digest_proto(AAP_DOMAIN, &canonical_bytes(&canonical))
+}
+
+pub fn encode_aap(aap: &ucf::v1::ApprovalArtifactPackage) -> Vec<u8> {
+    canonical_bytes(aap)
+}
+
+fn aap_id_for_proposal(proposal: &Proposal) -> String {
+    let prefix = hex::encode(&proposal.proposal_digest[..AAP_ID_PREFIX_LEN]);
+    format!("aap:proposal:{prefix}")
+}
+
+fn related_ref(id: &str, digest: [u8; 32]) -> ucf::v1::RelatedRef {
+    ucf::v1::RelatedRef {
+        id: bound_string(id),
+        digest: Some(ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
     }
 }
 
-fn modifications_tighten_constraints(
-    mods: &ucf::v1::ApprovalModifications,
-    constraints: &ApprovalConstraints,
-) -> bool {
-    if let Some(max_spikes) = mods.max_spikes_per_tick {
-        if max_spikes > constraints.max_spikes_per_tick {
-            return false;
-        }
-    }
-    if let Some(max_targets) = mods.max_targets_per_spike {
-        if max_targets > constraints.max_targets_per_spike {
-            return false;
-        }
-    }
-    if let Some(max_targets) = mods.max_targets_per_feature {
-        if max_targets > constraints.max_targets_per_feature as u32 {
-            return false;
-        }
-    }
-    if let Some(max_amplitude) = mods.max_amplitude_q {
-        if max_amplitude > constraints.max_amplitude_q as u32 {
-            return false;
-        }
-    }
-    if let Some(require_simulation_first) = mods.require_simulation_first {
-        if !require_simulation_first && constraints.require_simulation_first {
-            return false;
-        }
-    }
-    true
+fn build_alternatives() -> Vec<ucf::v1::ApprovalAlternative> {
+    let mut alternatives = vec![
+        ucf::v1::ApprovalAlternative {
+            form: ucf::v1::ApprovalAlternativeForm::DoNothing as i32,
+            label: bound_string("do_nothing"),
+        },
+        ucf::v1::ApprovalAlternative {
+            form: ucf::v1::ApprovalAlternativeForm::SimulateFirst as i32,
+            label: bound_string("simulate_first"),
+        },
+    ];
+    alternatives.truncate(MAX_ALTERNATIVES);
+    alternatives
 }
 
-fn pending_aap_store() -> &'static Mutex<BTreeMap<[u8; 32], ApprovalActionPlan>> {
-    static STORE: OnceLock<Mutex<BTreeMap<[u8; 32], ApprovalActionPlan>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(BTreeMap::new()))
+fn constraints_for_proposal(proposal: &Proposal) -> Option<ucf::v1::ConstraintsDelta> {
+    let mut constraints_added = match proposal.kind {
+        ProposalKind::MappingUpdate => vec![
+            "reduce amplitude_q".to_string(),
+            "reduce fan-out".to_string(),
+        ],
+        ProposalKind::SaePackUpdate => vec!["keep inference hooks unchanged".to_string()],
+        ProposalKind::LiquidParamsUpdate => vec!["restrict dt/substeps bounds".to_string()],
+        ProposalKind::InjectionLimitsUpdate => Vec::new(),
+    };
+
+    if constraints_added.is_empty() {
+        return None;
+    }
+
+    for constraint in &mut constraints_added {
+        *constraint = bound_string(constraint);
+    }
+    constraints_added.truncate(MAX_CONSTRAINTS);
+
+    Some(ucf::v1::ConstraintsDelta {
+        constraints_added,
+        constraints_removed: Vec::new(),
+        novelty_lock: false,
+    })
 }
 
-fn seen_approval_store() -> &'static Mutex<BTreeSet<[u8; 32]>> {
-    static STORE: OnceLock<Mutex<BTreeSet<[u8; 32]>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(BTreeSet::new()))
-}
-
-fn approval_action_plan_digest(
-    proposal_digest: [u8; 32],
-    constraints: &ApprovalConstraints,
-) -> [u8; 32] {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&proposal_digest);
-    buf.extend_from_slice(&constraints.max_amplitude_q.to_le_bytes());
-    buf.extend_from_slice(&constraints.max_targets_per_feature.to_le_bytes());
-    buf.push(u8::from(constraints.require_simulation_first));
-    buf.extend_from_slice(&constraints.max_spikes_per_tick.to_le_bytes());
-    buf.extend_from_slice(&constraints.max_targets_per_spike.to_le_bytes());
-    digest("lnss.aap.v1", &buf)
+fn bound_string(value: &str) -> String {
+    let mut out = value.trim().to_string();
+    out.truncate(MAX_STRING_LEN);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use lnss_evolve::{Proposal, ProposalKind, ProposalPayload};
 
-    fn temp_dir(prefix: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("{prefix}_{nanos}"));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
+    fn sample_proposal() -> Proposal {
+        Proposal {
+            proposal_id: "proposal-1".to_string(),
+            proposal_digest: [3u8; 32],
+            kind: ProposalKind::MappingUpdate,
+            created_at_ms: 100,
+            base_evidence_digest: [5u8; 32],
+            payload: ProposalPayload::MappingUpdate {
+                new_map_path: "maps/new.json".to_string(),
+                map_digest: [9u8; 32],
+                change_summary: vec!["adjust".to_string()],
+            },
+            reason_codes: vec!["RC.MAP.UPDATE".to_string()],
+        }
     }
 
-    fn write_decision(path: &Path, decision: &ucf::v1::ApprovalDecision) {
-        let bytes = decision.encode_to_vec();
-        fs::write(path, bytes).expect("write decision");
+    fn sample_context(session_id: &str) -> ApprovalContext {
+        ApprovalContext {
+            session_id: session_id.to_string(),
+            ruleset_digest: Some([7u8; 32]),
+            current_mapping_digest: Some([8u8; 32]),
+            current_sae_pack_digest: None,
+            current_liquid_params_digest: None,
+            latest_scorecard_digest: Some([1u8; 32]),
+            requested_operation: ucf::v1::OperationCategory::OpException,
+        }
     }
 
     #[test]
-    fn approval_decisions_are_deduped() {
-        clear_pending_aaps();
-        clear_seen_approval_digests();
+    fn aap_id_and_digest_are_deterministic() {
+        let proposal = sample_proposal();
+        let ctx = sample_context("session-1");
 
-        let dir = temp_dir("lnss_approval_dedup");
-        let proposal = Proposal {
-            proposal_id: "p".to_string(),
-            proposal_digest: [1; 32],
-            kind: lnss_evolve::ProposalKind::MappingUpdate,
-            created_at_ms: 1,
-            base_evidence_digest: [0; 32],
-            payload: ProposalPayload::MappingUpdate {
-                new_map_path: "maps/a.json".to_string(),
-                map_digest: [2; 32],
-                change_summary: vec![],
-            },
-            reason_codes: vec![],
-        };
-        let aap = create_aap_from_proposal(&proposal);
-        register_pending_aap(aap.clone());
+        let first = build_aap_for_proposal(&proposal, &ctx);
+        let second = build_aap_for_proposal(&proposal, &ctx);
 
-        let decision = ucf::v1::ApprovalDecision {
-            approval_digest: Some(digest32_to_proto([9; 32])),
-            aap_digest: Some(digest32_to_proto(aap.aap_digest)),
-            decision: ucf::v1::ApprovalDecisionForm::Approve as i32,
-            modifications: None,
-        };
-        write_decision(&dir.join("a.bin"), &decision);
-        write_decision(&dir.join("b.bin"), &decision);
+        assert_eq!(first.aap_id, second.aap_id);
+        assert_eq!(first.aap_digest, second.aap_digest);
+    }
 
-        let first = load_approval_decisions(&dir).expect("load approvals");
-        let second = load_approval_decisions(&dir).expect("load approvals");
+    #[test]
+    fn alternatives_present_and_ordered() {
+        let proposal = sample_proposal();
+        let ctx = sample_context("session-2");
+        let aap = build_aap_for_proposal(&proposal, &ctx);
 
-        assert_eq!(first.len(), 1);
-        assert_eq!(second.len(), 0);
+        assert!(aap.alternatives.len() >= 2);
+        assert_eq!(
+            aap.alternatives[0].form,
+            ucf::v1::ApprovalAlternativeForm::DoNothing as i32
+        );
+        assert_eq!(
+            aap.alternatives[1].form,
+            ucf::v1::ApprovalAlternativeForm::SimulateFirst as i32
+        );
+    }
+
+    #[test]
+    fn evidence_refs_include_proposal_and_base_evidence() {
+        let proposal = sample_proposal();
+        let ctx = sample_context("session-3");
+        let aap = build_aap_for_proposal(&proposal, &ctx);
+
+        let proposal_ref = aap
+            .evidence_refs
+            .iter()
+            .find(|item| item.id == "proposal_digest")
+            .expect("proposal digest ref");
+        assert_eq!(
+            proposal_ref.digest.as_ref().unwrap().value,
+            proposal.proposal_digest
+        );
+
+        let base_ref = aap
+            .evidence_refs
+            .iter()
+            .find(|item| item.id == "base_evidence_digest")
+            .expect("base evidence digest ref");
+        assert_eq!(
+            base_ref.digest.as_ref().unwrap().value,
+            proposal.base_evidence_digest
+        );
+    }
+
+    #[test]
+    fn fields_are_bounded() {
+        let proposal = sample_proposal();
+        let long_session = "s".repeat(MAX_STRING_LEN + 32);
+        let ctx = sample_context(&long_session);
+        let aap = build_aap_for_proposal(&proposal, &ctx);
+
+        assert!(aap.session_id.len() <= MAX_STRING_LEN);
+        assert!(aap.aap_id.len() <= MAX_STRING_LEN);
+        assert!(aap.evidence_refs.len() <= MAX_EVIDENCE_REFS);
+        assert!(aap.alternatives.len() <= MAX_ALTERNATIVES);
+        if let Some(constraints) = aap.constraints.as_ref() {
+            assert!(constraints.constraints_added.len() <= MAX_CONSTRAINTS);
+        }
     }
 }

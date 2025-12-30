@@ -17,6 +17,7 @@ members = [
     "crates/lnss_rig",
     "crates/lnss_bluebridge",
     "crates/lnss_evolve",
+    "crates/lnss_approval",
 ]
 resolver = "2"
 

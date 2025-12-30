@@ -1049,6 +1049,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df1d3c3b53da64cf5760482273a98e575c651a67eec7f77df96b5b642de8f039"
 
 [[package]]
+name = "lnss_approval"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "lnss_core",
+ "lnss_evolve",
+ "serde_json",
+ "ucf-protocol",
+]
+
+[[package]]
 name = "lnss_core"
 version = "0.1.0"
 dependencies = [
@@ -1107,6 +1118,8 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "burn",
+ "hex",
+ "lnss_approval",
  "lnss_core",
  "lnss_evolve",
  "lnss_hooks",

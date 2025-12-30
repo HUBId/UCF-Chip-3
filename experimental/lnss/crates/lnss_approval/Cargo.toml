@@ -8,8 +8,8 @@ publish = false
 [dependencies]
 lnss_core = { path = "../lnss_core" }
 lnss_evolve = { path = "../lnss_evolve" }
-serde = { workspace = true }
-hex = { workspace = true }
-prost = { workspace = true }
-thiserror = { workspace = true }
 ucf-protocol = { path = "../../../../crates/ucf-protocol" }
+hex = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

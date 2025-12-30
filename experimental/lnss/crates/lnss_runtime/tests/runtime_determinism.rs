@@ -78,6 +78,7 @@ fn boundedness_caps_are_enforced() {
         proposal_eval_score: None,
         proposal_verdict: None,
         proposal_base_evidence_digest: None,
+        aap_digest: None,
     });
     assert_eq!(record.tap_digests.len(), 4);
 }
