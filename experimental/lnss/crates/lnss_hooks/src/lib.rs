@@ -22,7 +22,11 @@ pub struct TapPlan {
 
 impl TapPlan {
     pub fn new(mut specs: Vec<TapSpec>) -> Self {
-        specs.sort_by(|a, b| a.hook_id.cmp(&b.hook_id).then_with(|| a.layer_index.cmp(&b.layer_index)));
+        specs.sort_by(|a, b| {
+            a.hook_id
+                .cmp(&b.hook_id)
+                .then_with(|| a.layer_index.cmp(&b.layer_index))
+        });
         specs.truncate(MAX_TAP_SPECS);
         Self { specs }
     }

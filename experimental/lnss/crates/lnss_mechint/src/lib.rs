@@ -23,7 +23,10 @@ pub struct JsonlMechIntWriter {
 }
 
 impl JsonlMechIntWriter {
-    pub fn new(path: impl AsRef<Path>, max_line_bytes: Option<usize>) -> Result<Self, MechIntError> {
+    pub fn new(
+        path: impl AsRef<Path>,
+        max_line_bytes: Option<usize>,
+    ) -> Result<Self, MechIntError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -40,7 +43,10 @@ impl JsonlMechIntWriter {
             line.truncate(self.max_line_bytes);
         }
         line.push(b'\n');
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(&line)?;
         Ok(())
     }

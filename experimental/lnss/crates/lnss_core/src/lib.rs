@@ -78,9 +78,7 @@ impl FeatureEvent {
         }
 
         top_features.sort_by(|(id_a, strength_a), (id_b, strength_b)| {
-            strength_b
-                .cmp(strength_a)
-                .then_with(|| id_a.cmp(id_b))
+            strength_b.cmp(strength_a).then_with(|| id_a.cmp(id_b))
         });
         top_features.truncate(MAX_TOP_FEATURES);
 

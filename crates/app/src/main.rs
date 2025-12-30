@@ -151,8 +151,8 @@ mod lnss_cli {
 
         let map_bytes =
             fs::read_to_string(map_path).unwrap_or_else(|err| panic!("map load failed: {err}"));
-        let map_file: MapFile =
-            serde_json::from_str(&map_bytes).unwrap_or_else(|err| panic!("map parse failed: {err}"));
+        let map_file: MapFile = serde_json::from_str(&map_bytes)
+            .unwrap_or_else(|err| panic!("map parse failed: {err}"));
         let entries = map_file
             .entries
             .into_iter()
@@ -160,9 +160,8 @@ mod lnss_cli {
             .collect();
         let mapper = FeatureToBrainMap::new(map_file.map_version, entries);
 
-        let mechint =
-            JsonlMechIntWriter::new("experimental/lnss/out/mechint.jsonl", Some(8192))
-                .expect("mechint writer");
+        let mechint = JsonlMechIntWriter::new("experimental/lnss/out/mechint.jsonl", Some(8192))
+            .expect("mechint writer");
         let rig =
             LoggingRigClient::new("experimental/lnss/out/rig.jsonl", 8192).expect("rig writer");
 
@@ -189,7 +188,13 @@ mod lnss_cli {
         for step in 0..steps {
             let input = format!("lnss-step-{step}").into_bytes();
             runtime
-                .run_step(session_id, &format!("step-{step}"), &input, &mods, &plan.specs)
+                .run_step(
+                    session_id,
+                    &format!("step-{step}"),
+                    &input,
+                    &mods,
+                    &plan.specs,
+                )
                 .expect("lnss step");
         }
     }

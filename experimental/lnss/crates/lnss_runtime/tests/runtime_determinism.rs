@@ -1,14 +1,14 @@
 use std::fs;
 
 use lnss_core::{
-    BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec, TapKind,
+    BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapKind, TapSpec,
     MAX_TOP_FEATURES,
 };
 use lnss_hooks::TapPlan;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_runtime::{
-    map_features_to_spikes, LnssRuntime, Limits, MechIntRecord, StubHookProvider, StubLlmBackend,
+    map_features_to_spikes, Limits, LnssRuntime, MechIntRecord, StubHookProvider, StubLlmBackend,
 };
 use lnss_sae::StubSaeBackend;
 
@@ -60,12 +60,22 @@ fn boundedness_caps_are_enforced() {
 
 #[test]
 fn end_to_end_stub_pipeline() {
-    let tap_specs = TapPlan::new(vec![TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid")]);
+    let tap_specs = TapPlan::new(vec![TapSpec::new(
+        "hook-a",
+        TapKind::ResidualStream,
+        0,
+        "resid",
+    )]);
     let tap_frame = TapFrame::new("hook-a", vec![9, 9, 9]);
     let mapper = FeatureToBrainMap::new(
         1,
         vec![(
-            u32::from_le_bytes([tap_frame.activation_digest[0], tap_frame.activation_digest[1], tap_frame.activation_digest[2], tap_frame.activation_digest[3]]),
+            u32::from_le_bytes([
+                tap_frame.activation_digest[0],
+                tap_frame.activation_digest[1],
+                tap_frame.activation_digest[2],
+                tap_frame.activation_digest[3],
+            ]),
             BrainTarget::new("v1", "pop", 1, "syn", 800),
         )],
     );
@@ -78,7 +88,9 @@ fn end_to_end_stub_pipeline() {
 
     let mut runtime = LnssRuntime {
         llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider { taps: vec![tap_frame.clone()] }),
+        hooks: Box::new(StubHookProvider {
+            taps: vec![tap_frame.clone()],
+        }),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         rig: Box::new(rig),

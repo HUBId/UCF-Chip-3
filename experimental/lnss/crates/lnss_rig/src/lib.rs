@@ -40,7 +40,10 @@ impl LoggingRigClient {
             line.truncate(self.max_line_bytes);
         }
         line.push(b'\n');
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(&line)?;
         Ok(())
     }
