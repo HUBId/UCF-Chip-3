@@ -133,7 +133,7 @@ impl MechIntRecord {
                 .cmp(&b.hook_id)
                 .then_with(|| a.activation_digest.cmp(&b.activation_digest))
         });
-        let tap_digests: Vec<[u8; 32]> = tap_summaries
+        let mut tap_digests: Vec<[u8; 32]> = tap_summaries
             .iter()
             .map(|summary| summary.activation_digest)
             .collect();
