@@ -24,7 +24,7 @@ pub fn digest(domain: &str, bytes: &[u8]) -> [u8; 32] {
     hasher.update(&[0u8]);
     hasher.update(bytes);
     let digest = hasher.finalize();
-    (*digest.as_bytes()).into()
+    *digest.as_bytes()
 }
 
 fn bound_string(value: &str) -> String {
