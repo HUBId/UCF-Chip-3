@@ -4,6 +4,11 @@ use std::path::PathBuf;
 
 use lnss_core::{digest, FeatureEvent, TapFrame, MAX_TOP_FEATURES};
 use lnss_runtime::SaeBackend;
+
+#[cfg(feature = "lnss-sae-real")]
+mod real;
+#[cfg(feature = "lnss-sae-real")]
+pub use real::{load_pack, RealSaeBackend, SaeNonlinearity, SaePack, SaePackMeta};
 #[derive(Debug, Clone)]
 pub struct SaeWeightsRef {
     pub path: PathBuf,

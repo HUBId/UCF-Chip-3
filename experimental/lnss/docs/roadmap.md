@@ -7,6 +7,8 @@
 
 ## Phase 2 (inference backends)
 * `lnss-candle`: local-only SAE inference with Candle.
+* SAE training offline via Python (Unsloth pipeline) with weight packs consumed in Rust.
+* SAE pack format documented for offline loading (meta.json + w_enc/b_enc binaries).
 * `lnss-liquid-ode`: open LiquidOdeBackend (fixed-step Euler, deterministic taps) as a substitute for the proprietary LFM.
 * `lnss-burn`: optional Burn ODE backend wiring (used by LiquidOdeBackend).
 * Future: replace Euler with `diffsol`/SUNDIALS behind a `lnss-diffsol` feature flag.
