@@ -8,6 +8,7 @@ use std::{
 
 use lnss_core::{digest, TapFrame};
 use lnss_sae::{load_pack, RealSaeBackend, SaeNonlinearity};
+use lnss_runtime::SaeBackend;
 
 fn write_pack(dir: &Path) -> PathBuf {
     fs::create_dir_all(dir).expect("create pack dir");

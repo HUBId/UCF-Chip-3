@@ -10,9 +10,7 @@ mod real_sae_backend_tests {
     use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapKind, TapSpec};
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
-    use lnss_runtime::{
-        HookProvider, Limits, LiquidOdeBackend, LiquidOdeConfig, LlmBackend, LnssRuntime,
-    };
+    use lnss_runtime::{Limits, LiquidOdeBackend, LiquidOdeConfig, LnssRuntime};
     use lnss_sae::{RealSaeBackend, SaeNonlinearity};
 
     fn write_pack(dir: &Path) -> PathBuf {
