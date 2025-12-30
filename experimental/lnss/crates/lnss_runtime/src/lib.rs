@@ -481,7 +481,7 @@ impl LiquidOdeBackend {
         let mut next = vec![0; state_dim];
         let alpha_q = LIQUID_Q_ONE / 8;
         let input_dim = self.cfg.input_proj_dim as usize;
-        for i in 0..state_dim {
+        for (i, next_val) in next.iter_mut().enumerate().take(state_dim) {
             let x_q = guard.x_q[i];
             let leak = -((alpha_q as i64 * x_q as i64) >> LIQUID_Q_SHIFT);
             let mut sum_in = 0i64;
@@ -504,7 +504,7 @@ impl LiquidOdeBackend {
             let delta = ((self.dt_q as i64) * f_q) >> LIQUID_Q_SHIFT;
             let updated = (x_q as i64 + delta)
                 .clamp(-(LIQUID_STATE_CLAMP_Q as i64), LIQUID_STATE_CLAMP_Q as i64);
-            next[i] = updated as i32;
+            *next_val = updated as i32;
         }
         guard.x_q = next;
         guard.step_count = guard.step_count.saturating_add(1);
