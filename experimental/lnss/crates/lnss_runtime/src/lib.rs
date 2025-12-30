@@ -281,6 +281,12 @@ impl StubRigClient {
     }
 }
 
+impl Default for StubRigClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RigClient for StubRigClient {
     fn send_spikes(&mut self, spikes: &[BrainSpike]) -> Result<(), LnssRuntimeError> {
         self.sent.extend_from_slice(spikes);
