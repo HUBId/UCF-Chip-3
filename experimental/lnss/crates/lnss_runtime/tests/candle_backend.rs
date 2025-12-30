@@ -119,6 +119,7 @@ fn candle_end_to_end_is_deterministic() {
         limits: Limits::default(),
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: None,
     };
 
     let mods = default_mods();
