@@ -65,7 +65,7 @@ impl TapRegistry {
 
     pub fn register_tap(&mut self, hook_id: &str, tensor_name: &str, layer_index: u16) {
         let candidate = RegisteredTap::new(hook_id, tensor_name, layer_index);
-        if self.registered.iter().any(|tap| *tap == candidate) {
+        if self.registered.contains(&candidate) {
             return;
         }
         if self.registered.len() >= MAX_TAP_SPECS {
