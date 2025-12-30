@@ -18,6 +18,7 @@ lnss_evolve = { path = "../lnss_evolve" }
 lnss_hooks = { path = "../lnss_hooks" }
 pvgs_client = { path = "../../../../crates/pvgs_client" }
 ucf-protocol = { path = "../../../../crates/ucf-protocol" }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -30,3 +31,4 @@ lnss_hooks = { path = "../lnss_hooks" }
 lnss_sae = { path = "../lnss_sae", features = ["lnss-sae-real"] }
 lnss_mechint = { path = "../lnss_mechint" }
 lnss_rig = { path = "../lnss_rig" }
+prost = { workspace = true }

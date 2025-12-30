@@ -9,8 +9,9 @@ use lnss_evolve::{
     ProposalEvidence, ProposalKind,
 };
 use lnss_runtime::{
-    FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter,
-    ProposalInbox, StubHookProvider, StubLlmBackend, StubRigClient,
+    ActivationRecord, ActivationState, FeedbackConsumer, Limits, LnssRuntime,
+    LocalProposalApplier, MappingAdaptationConfig, MechIntRecord, MechIntWriter, ProposalInbox,
+    StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_sae::StubSaeBackend;
 use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
@@ -19,17 +20,31 @@ use ucf_protocol::ucf;
 #[derive(Clone, Default)]
 struct RecordingWriter {
     records: Arc<Mutex<Vec<MechIntRecord>>>,
+    activations: Arc<Mutex<Vec<ActivationRecord>>>,
 }
 
 impl RecordingWriter {
     fn records(&self) -> Vec<MechIntRecord> {
         self.records.lock().expect("lock").clone()
     }
+
+    #[allow(dead_code)]
+    fn activations(&self) -> Vec<ActivationRecord> {
+        self.activations.lock().expect("lock").clone()
+    }
 }
 
 impl MechIntWriter for RecordingWriter {
     fn write_step(&mut self, rec: &MechIntRecord) -> Result<(), lnss_runtime::LnssRuntimeError> {
         self.records.lock().expect("lock").push(rec.clone());
+        Ok(())
+    }
+
+    fn write_activation(
+        &mut self,
+        rec: &ActivationRecord,
+    ) -> Result<(), lnss_runtime::LnssRuntimeError> {
+        self.activations.lock().expect("lock").push(rec.clone());
         Ok(())
     }
 }
@@ -293,6 +308,9 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 2)),
+        approval_inbox: None,
+        activation_state: ActivationState::default(),
+        proposal_applier: Box::new(LocalProposalApplier::default()),
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -400,6 +418,9 @@ fn proposal_commits_only_once_across_ticks() {
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 10)),
+        approval_inbox: None,
+        activation_state: ActivationState::default(),
+        proposal_applier: Box::new(LocalProposalApplier::default()),
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -494,6 +515,9 @@ fn proposal_commits_are_bounded_and_ordered() {
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
+        approval_inbox: None,
+        activation_state: ActivationState::default(),
+        proposal_applier: Box::new(LocalProposalApplier::default()),
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -590,6 +614,9 @@ fn local_pvgs_receives_expected_payload() {
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
+        approval_inbox: None,
+        activation_state: ActivationState::default(),
+        proposal_applier: Box::new(LocalProposalApplier::default()),
     };
 
     let mods = EmotionFieldSnapshot::new(

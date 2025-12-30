@@ -8,6 +8,7 @@ publish = false
 [workspace]
 members = [
     "crates/chip2",
+    "crates/lnss_approval",
     "crates/lnss_core",
     "crates/lnss_runtime",
     "crates/lnss_hooks",
@@ -23,6 +24,7 @@ resolver = "2"
 [features]
 default = []
 lnss = [
+    "lnss_approval",
     "lnss_core",
     "lnss_runtime",
     "lnss_hooks",
@@ -47,6 +49,7 @@ lnss-rig-sdk = ["lnss_rig/lnss-rig-sdk"]
 lnss-chip2-bridge = ["lnss_bluebridge/lnss-chip2-bridge"]
 
 [dependencies]
+lnss_approval = { path = "crates/lnss_approval", optional = true }
 lnss_core = { path = "crates/lnss_core", optional = true }
 lnss_runtime = { path = "crates/lnss_runtime", optional = true }
 lnss_hooks = { path = "crates/lnss_hooks", optional = true }
@@ -66,3 +69,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 hex = "0.4"
+prost = "0.12"
