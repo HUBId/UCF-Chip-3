@@ -11,8 +11,8 @@ mod real_sae_backend_tests {
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
     use lnss_runtime::{
-        FeedbackConsumer, Limits, LiquidOdeBackend, LiquidOdeConfig, LnssRuntime,
-        MappingAdaptationConfig,
+        ActivationState, FeedbackConsumer, Limits, LiquidOdeBackend, LiquidOdeConfig, LnssRuntime,
+        LocalProposalApplier, MappingAdaptationConfig,
     };
     use lnss_sae::{RealSaeBackend, SaeNonlinearity};
 
@@ -120,6 +120,9 @@ mod real_sae_backend_tests {
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
+            approval_inbox: None,
+            activation_state: ActivationState::default(),
+            proposal_applier: Box::new(LocalProposalApplier::default()),
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -136,6 +139,9 @@ mod real_sae_backend_tests {
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
+            approval_inbox: None,
+            activation_state: ActivationState::default(),
+            proposal_applier: Box::new(LocalProposalApplier::default()),
         };
 
         let mods = base_mods();

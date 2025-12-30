@@ -4,7 +4,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use lnss_runtime::{LnssRuntimeError, MechIntRecord, MechIntWriter, DEFAULT_MAX_MECHINT_BYTES};
+use lnss_runtime::{
+    ActivationRecord, LnssRuntimeError, MechIntRecord, MechIntWriter, DEFAULT_MAX_MECHINT_BYTES,
+};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -54,6 +56,11 @@ impl JsonlMechIntWriter {
 
 impl MechIntWriter for JsonlMechIntWriter {
     fn write_step(&mut self, rec: &MechIntRecord) -> Result<(), LnssRuntimeError> {
+        self.append_json(rec)
+            .map_err(|err| LnssRuntimeError::MechInt(err.to_string()))
+    }
+
+    fn write_activation(&mut self, rec: &ActivationRecord) -> Result<(), LnssRuntimeError> {
         self.append_json(rec)
             .map_err(|err| LnssRuntimeError::MechInt(err.to_string()))
     }

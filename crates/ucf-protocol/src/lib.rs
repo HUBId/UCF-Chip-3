@@ -192,6 +192,39 @@ pub mod ucf {
             Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
         )]
         #[repr(i32)]
+        pub enum ApprovalDecisionForm {
+            Unspecified = 0,
+            Deny = 1,
+            Approve = 2,
+            ApproveWithModifications = 3,
+        }
+        impl ApprovalDecisionForm {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ApprovalDecisionForm::Unspecified => "APPROVAL_DECISION_FORM_UNSPECIFIED",
+                    ApprovalDecisionForm::Deny => "APPROVAL_DECISION_FORM_DENY",
+                    ApprovalDecisionForm::Approve => "APPROVAL_DECISION_FORM_APPROVE",
+                    ApprovalDecisionForm::ApproveWithModifications => {
+                        "APPROVAL_DECISION_FORM_APPROVE_WITH_MODIFICATIONS"
+                    }
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "APPROVAL_DECISION_FORM_UNSPECIFIED" => Some(Self::Unspecified),
+                    "APPROVAL_DECISION_FORM_DENY" => Some(Self::Deny),
+                    "APPROVAL_DECISION_FORM_APPROVE" => Some(Self::Approve),
+                    "APPROVAL_DECISION_FORM_APPROVE_WITH_MODIFICATIONS" => {
+                        Some(Self::ApproveWithModifications)
+                    }
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
         pub enum IntegrityState {
             Unspecified = 0,
             Ok = 1,
@@ -635,6 +668,30 @@ pub mod ucf {
             pub reason_codes: ::core::option::Option<ReasonCodes>,
             #[prost(message, optional, tag = "3")]
             pub constraints: ::core::option::Option<ConstraintsDelta>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ApprovalModifications {
+            #[prost(uint32, optional, tag = "1")]
+            pub max_spikes_per_tick: ::core::option::Option<u32>,
+            #[prost(uint32, optional, tag = "2")]
+            pub max_targets_per_spike: ::core::option::Option<u32>,
+            #[prost(uint32, optional, tag = "3")]
+            pub max_targets_per_feature: ::core::option::Option<u32>,
+            #[prost(uint32, optional, tag = "4")]
+            pub max_amplitude_q: ::core::option::Option<u32>,
+            #[prost(bool, optional, tag = "5")]
+            pub require_simulation_first: ::core::option::Option<bool>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ApprovalDecision {
+            #[prost(message, optional, tag = "1")]
+            pub approval_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "2")]
+            pub aap_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "ApprovalDecisionForm", tag = "3")]
+            pub decision: i32,
+            #[prost(message, optional, tag = "4")]
+            pub modifications: ::core::option::Option<ApprovalModifications>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct PvgsReceipt {

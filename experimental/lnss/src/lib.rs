@@ -3,6 +3,8 @@
 #[cfg(feature = "lnss")]
 pub use lnss_bluebridge;
 #[cfg(feature = "lnss")]
+pub use lnss_approval;
+#[cfg(feature = "lnss")]
 pub use lnss_core;
 #[cfg(feature = "lnss")]
 pub use lnss_evolve;

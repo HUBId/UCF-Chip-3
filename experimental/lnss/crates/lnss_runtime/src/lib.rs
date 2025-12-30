@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,10 @@ use lnss_core::TapKind;
 use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
+};
+use lnss_approval::{
+    create_aap_from_proposal, decision_allows_activation, digest32_from_proto,
+    load_approval_decisions, ApprovalActionPlan,
 };
 use lnss_evolve::{
     encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
@@ -28,6 +32,8 @@ pub const DEFAULT_MAX_MECHINT_BYTES: usize = 8192;
 pub const MAX_TAP_SAMPLE_BYTES: usize = 4096;
 pub const DEFAULT_PROPOSAL_SCAN_TICKS: u64 = 50;
 pub const DEFAULT_PROPOSAL_MAX_PER_TICK: usize = 5;
+pub const DEFAULT_APPROVAL_SCAN_TICKS: u64 = 25;
+pub const DEFAULT_APPROVAL_MAX_PER_TICK: usize = 1;
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -37,6 +43,12 @@ pub enum LnssRuntimeError {
     Rig(String),
     #[error("proposal inbox error: {0}")]
     Proposal(String),
+    #[error("approval inbox error: {0}")]
+    Approval(String),
+    #[error("activation error: {0}")]
+    Activation(String),
+    #[error("state error: {0}")]
+    State(String),
 }
 
 pub trait LlmBackend {
@@ -54,6 +66,7 @@ pub trait SaeBackend {
 
 pub trait MechIntWriter {
     fn write_step(&mut self, rec: &MechIntRecord) -> Result<(), LnssRuntimeError>;
+    fn write_activation(&mut self, rec: &ActivationRecord) -> Result<(), LnssRuntimeError>;
 }
 
 pub trait RigClient {
@@ -186,6 +199,313 @@ impl ProposalInbox {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ActivationOutcome {
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationRecord {
+    pub approval_digest: [u8; 32],
+    pub proposal_digest: [u8; 32],
+    pub outcome: ActivationOutcome,
+    pub active_mapping_digest: Option<[u8; 32]>,
+    pub active_sae_pack_digest: Option<[u8; 32]>,
+    pub active_liquid_params_digest: Option<[u8; 32]>,
+    pub active_injection_limits: Option<InjectionLimits>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectionLimits {
+    pub max_spikes_per_tick: u32,
+    pub max_targets_per_spike: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivationState {
+    pub active_mapping_digest: Option<[u8; 32]>,
+    pub active_sae_pack_digest: Option<[u8; 32]>,
+    pub active_liquid_params_digest: Option<[u8; 32]>,
+    pub active_injection_limits: Option<InjectionLimits>,
+    path: PathBuf,
+}
+
+impl ActivationState {
+    pub fn load_or_default(path: impl AsRef<Path>) -> Result<Self, LnssRuntimeError> {
+        let path = path.as_ref().to_path_buf();
+        if !path.exists() {
+            return Ok(Self {
+                active_mapping_digest: None,
+                active_sae_pack_digest: None,
+                active_liquid_params_digest: None,
+                active_injection_limits: None,
+                path,
+            });
+        }
+        let bytes = std::fs::read(&path).map_err(|err| LnssRuntimeError::State(err.to_string()))?;
+        let content = String::from_utf8(bytes).map_err(|err| LnssRuntimeError::State(err.to_string()))?;
+        let mut mapping = None;
+        let mut sae = None;
+        let mut liquid = None;
+        let mut limits = None;
+        for line in content.lines() {
+            let mut parts = line.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default();
+            match key {
+                "mapping_digest" => mapping = parse_optional_digest(value)?,
+                "sae_pack_digest" => sae = parse_optional_digest(value)?,
+                "liquid_params_digest" => liquid = parse_optional_digest(value)?,
+                "injection_limits" => limits = parse_injection_limits(value)?,
+                _ => {}
+            }
+        }
+        Ok(Self {
+            active_mapping_digest: mapping,
+            active_sae_pack_digest: sae,
+            active_liquid_params_digest: liquid,
+            active_injection_limits: limits,
+            path,
+        })
+    }
+
+    pub fn persist(&self) -> Result<(), LnssRuntimeError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| LnssRuntimeError::State(err.to_string()))?;
+        }
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "mapping_digest={}",
+            format_optional_digest(self.active_mapping_digest)
+        ));
+        lines.push(format!(
+            "sae_pack_digest={}",
+            format_optional_digest(self.active_sae_pack_digest)
+        ));
+        lines.push(format!(
+            "liquid_params_digest={}",
+            format_optional_digest(self.active_liquid_params_digest)
+        ));
+        lines.push(format!(
+            "injection_limits={}",
+            format_injection_limits(self.active_injection_limits)
+        ));
+        let mut content = lines.join("\n");
+        content.push('\n');
+        std::fs::write(&self.path, content)
+            .map_err(|err| LnssRuntimeError::State(err.to_string()))?;
+        Ok(())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Default for ActivationState {
+    fn default() -> Self {
+        Self::load_or_default(default_activation_state_path()).unwrap_or_else(|_| Self {
+            active_mapping_digest: None,
+            active_sae_pack_digest: None,
+            active_liquid_params_digest: None,
+            active_injection_limits: None,
+            path: default_activation_state_path(),
+        })
+    }
+}
+
+pub trait ProposalApplier {
+    fn apply_mapping_update(&mut self, path: &str, digest: [u8; 32])
+        -> Result<(), LnssRuntimeError>;
+    fn apply_sae_pack_update(&mut self, path: &str, digest: [u8; 32])
+        -> Result<(), LnssRuntimeError>;
+    fn apply_liquid_params_update(
+        &mut self,
+        params_digest: [u8; 32],
+        kv_pairs: &[(String, String)],
+    ) -> Result<(), LnssRuntimeError>;
+    fn apply_injection_limits_update(
+        &mut self,
+        max_spikes: u32,
+        max_targets: u32,
+    ) -> Result<(), LnssRuntimeError>;
+}
+
+#[derive(Debug, Default)]
+pub struct LocalProposalApplier;
+
+impl ProposalApplier for LocalProposalApplier {
+    fn apply_mapping_update(
+        &mut self,
+        path: &str,
+        digest_bytes: [u8; 32],
+    ) -> Result<(), LnssRuntimeError> {
+        let bytes = std::fs::read(path).map_err(|err| LnssRuntimeError::Activation(err.to_string()))?;
+        let actual = mapping_file_digest(&bytes);
+        if actual != digest_bytes {
+            return Err(LnssRuntimeError::Activation("mapping digest mismatch".to_string()));
+        }
+        Ok(())
+    }
+
+    fn apply_sae_pack_update(
+        &mut self,
+        path: &str,
+        digest_bytes: [u8; 32],
+    ) -> Result<(), LnssRuntimeError> {
+        let bytes = std::fs::read(path).map_err(|err| LnssRuntimeError::Activation(err.to_string()))?;
+        let actual = sae_pack_file_digest(&bytes);
+        if actual != digest_bytes {
+            return Err(LnssRuntimeError::Activation("sae pack digest mismatch".to_string()));
+        }
+        Ok(())
+    }
+
+    fn apply_liquid_params_update(
+        &mut self,
+        params_digest: [u8; 32],
+        kv_pairs: &[(String, String)],
+    ) -> Result<(), LnssRuntimeError> {
+        let actual = liquid_params_digest(kv_pairs);
+        if actual != params_digest {
+            return Err(LnssRuntimeError::Activation(
+                "liquid params digest mismatch".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn apply_injection_limits_update(
+        &mut self,
+        _max_spikes: u32,
+        _max_targets: u32,
+    ) -> Result<(), LnssRuntimeError> {
+        Ok(())
+    }
+}
+
+pub struct ApprovalInbox {
+    pub approvals_dir: PathBuf,
+    pub proposals_dir: PathBuf,
+    pub ticks_per_scan: u64,
+    pub max_per_tick: usize,
+    tick_counter: u64,
+    pending_aaps: BTreeMap<[u8; 32], ApprovalActionPlan>,
+    pending_proposals: BTreeMap<[u8; 32], lnss_evolve::Proposal>,
+}
+
+impl ApprovalInbox {
+    pub fn new(approvals_dir: impl AsRef<Path>, proposals_dir: impl AsRef<Path>) -> Self {
+        Self {
+            approvals_dir: approvals_dir.as_ref().to_path_buf(),
+            proposals_dir: proposals_dir.as_ref().to_path_buf(),
+            ticks_per_scan: DEFAULT_APPROVAL_SCAN_TICKS,
+            max_per_tick: DEFAULT_APPROVAL_MAX_PER_TICK,
+            tick_counter: 0,
+            pending_aaps: BTreeMap::new(),
+            pending_proposals: BTreeMap::new(),
+        }
+    }
+
+    fn should_scan(&mut self) -> bool {
+        self.tick_counter = self.tick_counter.saturating_add(1);
+        self.tick_counter.is_multiple_of(self.ticks_per_scan)
+    }
+
+    fn refresh_pending(&mut self) -> Result<(), LnssRuntimeError> {
+        let proposals = load_proposals(&self.proposals_dir)
+            .map_err(|err| LnssRuntimeError::Approval(err.to_string()))?;
+        for proposal in proposals {
+            if self.pending_proposals.contains_key(&proposal.proposal_digest) {
+                continue;
+            }
+            let aap = create_aap_from_proposal(&proposal);
+            self.pending_aaps.insert(aap.aap_digest, aap.clone());
+            self.pending_proposals
+                .insert(proposal.proposal_digest, proposal);
+            lnss_approval::register_pending_aap(aap);
+        }
+        Ok(())
+    }
+
+    pub fn ingest(
+        &mut self,
+        activation_state: &mut ActivationState,
+        applier: &mut dyn ProposalApplier,
+        mechint: &mut dyn MechIntWriter,
+    ) -> Result<usize, LnssRuntimeError> {
+        if !self.should_scan() {
+            return Ok(0);
+        }
+        self.refresh_pending()?;
+        let decisions = load_approval_decisions(&self.approvals_dir)
+            .map_err(|err| LnssRuntimeError::Approval(err.to_string()))?;
+
+        let mut candidates = Vec::new();
+        for decision in decisions {
+            let approval_digest = decision
+                .approval_digest
+                .as_ref()
+                .and_then(|digest| digest32_from_proto(digest).ok());
+            let aap_digest = decision
+                .aap_digest
+                .as_ref()
+                .and_then(|digest| digest32_from_proto(digest).ok());
+            let (approval_digest, aap_digest) = match (approval_digest, aap_digest) {
+                (Some(approval), Some(aap)) => (approval, aap),
+                _ => continue,
+            };
+            let aap = match self.pending_aaps.get(&aap_digest) {
+                Some(aap) => aap.clone(),
+                None => continue,
+            };
+            let proposal = match self.pending_proposals.get(&aap.proposal_digest) {
+                Some(proposal) => proposal.clone(),
+                None => continue,
+            };
+            candidates.push((approval_digest, decision, aap, proposal));
+        }
+
+        candidates.sort_by(|a, b| {
+            let a_kind = activation_priority(&a.3.kind);
+            let b_kind = activation_priority(&b.3.kind);
+            a_kind
+                .cmp(&b_kind)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        let mut processed = 0usize;
+        for (approval_digest, decision, aap, proposal) in candidates {
+            let allowed = decision_allows_activation(&decision, &aap);
+            let outcome = if allowed {
+                apply_proposal(applier, activation_state, &proposal)?
+            } else {
+                ActivationOutcome::Rejected
+            };
+
+            let record = ActivationRecord {
+                approval_digest,
+                proposal_digest: proposal.proposal_digest,
+                outcome,
+                active_mapping_digest: activation_state.active_mapping_digest,
+                active_sae_pack_digest: activation_state.active_sae_pack_digest,
+                active_liquid_params_digest: activation_state.active_liquid_params_digest,
+                active_injection_limits: activation_state.active_injection_limits,
+            };
+            mechint.write_activation(&record)?;
+            activation_state.persist()?;
+            processed += 1;
+            if processed >= self.max_per_tick {
+                break;
+            }
+        }
+        Ok(processed)
+    }
+}
+
 pub struct LnssRuntime {
     pub llm: Box<dyn LlmBackend>,
     pub hooks: Box<dyn HookProvider>,
@@ -198,6 +518,9 @@ pub struct LnssRuntime {
     pub feedback: FeedbackConsumer,
     pub adaptation: MappingAdaptationConfig,
     pub proposal_inbox: Option<ProposalInbox>,
+    pub approval_inbox: Option<ApprovalInbox>,
+    pub activation_state: ActivationState,
+    pub proposal_applier: Box<dyn ProposalApplier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +831,14 @@ impl LnssRuntime {
             )?;
         }
 
+        if let Some(approval_inbox) = self.approval_inbox.as_mut() {
+            approval_inbox.ingest(
+                &mut self.activation_state,
+                self.proposal_applier.as_mut(),
+                self.mechint.as_mut(),
+            )?;
+        }
+
         Ok(RuntimeOutput {
             output_bytes,
             taps,
@@ -539,6 +870,142 @@ pub fn map_features_to_spikes(
     }
 
     spikes
+}
+
+pub fn default_activation_state_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../state/activation_state.txt")
+}
+
+pub fn mapping_file_digest(bytes: &[u8]) -> [u8; 32] {
+    digest("lnss.mapping.file.v1", bytes)
+}
+
+pub fn sae_pack_file_digest(bytes: &[u8]) -> [u8; 32] {
+    digest("lnss.sae.pack.v1", bytes)
+}
+
+pub fn liquid_params_digest(kv_pairs: &[(String, String)]) -> [u8; 32] {
+    let mut params = kv_pairs.to_vec();
+    params.sort_by(|(a_key, a_val), (b_key, b_val)| {
+        a_key.cmp(b_key).then_with(|| a_val.cmp(b_val))
+    });
+    let mut buf = Vec::new();
+    for (key, value) in params {
+        write_string(&mut buf, &key);
+        write_string(&mut buf, &value);
+    }
+    digest("lnss.liquid.params.v1", &buf)
+}
+
+fn apply_proposal(
+    applier: &mut dyn ProposalApplier,
+    activation_state: &mut ActivationState,
+    proposal: &lnss_evolve::Proposal,
+) -> Result<ActivationOutcome, LnssRuntimeError> {
+    let result = match &proposal.payload {
+        lnss_evolve::ProposalPayload::MappingUpdate {
+            new_map_path,
+            map_digest,
+            ..
+        } => applier
+            .apply_mapping_update(new_map_path, *map_digest)
+            .map(|_| {
+                activation_state.active_mapping_digest = Some(*map_digest);
+                ActivationOutcome::Applied
+            }),
+        lnss_evolve::ProposalPayload::SaePackUpdate {
+            pack_path,
+            pack_digest,
+        } => applier
+            .apply_sae_pack_update(pack_path, *pack_digest)
+            .map(|_| {
+                activation_state.active_sae_pack_digest = Some(*pack_digest);
+                ActivationOutcome::Applied
+            }),
+        lnss_evolve::ProposalPayload::LiquidParamsUpdate {
+            param_set,
+            params_digest,
+        } => applier
+            .apply_liquid_params_update(*params_digest, param_set)
+            .map(|_| {
+                activation_state.active_liquid_params_digest = Some(*params_digest);
+                ActivationOutcome::Applied
+            }),
+        lnss_evolve::ProposalPayload::InjectionLimitsUpdate {
+            max_spikes_per_tick,
+            max_targets_per_spike,
+        } => applier
+            .apply_injection_limits_update(*max_spikes_per_tick, *max_targets_per_spike)
+            .map(|_| {
+                activation_state.active_injection_limits = Some(InjectionLimits {
+                    max_spikes_per_tick: *max_spikes_per_tick,
+                    max_targets_per_spike: *max_targets_per_spike,
+                });
+                ActivationOutcome::Applied
+            }),
+    };
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(_) => Ok(ActivationOutcome::Rejected),
+    }
+}
+
+fn activation_priority(kind: &ProposalKind) -> u8 {
+    match kind {
+        ProposalKind::MappingUpdate => 0,
+        ProposalKind::SaePackUpdate => 1,
+        ProposalKind::LiquidParamsUpdate => 2,
+        ProposalKind::InjectionLimitsUpdate => 3,
+    }
+}
+
+fn format_optional_digest(digest: Option<[u8; 32]>) -> String {
+    digest.map(hex::encode).unwrap_or_default()
+}
+
+fn parse_optional_digest(value: &str) -> Result<Option<[u8; 32]>, LnssRuntimeError> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    let bytes = hex::decode(value.trim())
+        .map_err(|err| LnssRuntimeError::State(err.to_string()))?;
+    if bytes.len() != 32 {
+        return Err(LnssRuntimeError::State("digest length mismatch".to_string()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(Some(out))
+}
+
+fn format_injection_limits(limits: Option<InjectionLimits>) -> String {
+    match limits {
+        Some(limits) => format!("{},{}", limits.max_spikes_per_tick, limits.max_targets_per_spike),
+        None => String::new(),
+    }
+}
+
+fn parse_injection_limits(value: &str) -> Result<Option<InjectionLimits>, LnssRuntimeError> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut parts = value.split(',');
+    let max_spikes = parts
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse::<u32>()
+        .map_err(|err| LnssRuntimeError::State(err.to_string()))?;
+    let max_targets = parts
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse::<u32>()
+        .map_err(|err| LnssRuntimeError::State(err.to_string()))?;
+    Ok(Some(InjectionLimits {
+        max_spikes_per_tick: max_spikes,
+        max_targets_per_spike: max_targets,
+    }))
 }
 
 pub struct StubLlmBackend;

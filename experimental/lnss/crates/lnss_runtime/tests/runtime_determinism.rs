@@ -8,9 +8,10 @@ use lnss_hooks::TapPlan;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_runtime::{
-    map_features_to_spikes, BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime,
-    MappingAdaptationConfig, MappingAdaptationSuggestion, MechIntRecord, MechIntRecordParts,
-    StubHookProvider, StubLlmBackend, TapSummary,
+    map_features_to_spikes, ActivationState, BiophysFeedbackSnapshot, FeedbackConsumer,
+    Limits, LnssRuntime, LocalProposalApplier, MappingAdaptationConfig,
+    MappingAdaptationSuggestion, MechIntRecord, MechIntRecordParts, StubHookProvider,
+    StubLlmBackend, TapSummary,
 };
 use lnss_sae::StubSaeBackend;
 
@@ -173,6 +174,9 @@ fn end_to_end_stub_pipeline() {
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
+        approval_inbox: None,
+        activation_state: ActivationState::default(),
+        proposal_applier: Box::new(LocalProposalApplier::default()),
     };
 
     let mods = EmotionFieldSnapshot::new(

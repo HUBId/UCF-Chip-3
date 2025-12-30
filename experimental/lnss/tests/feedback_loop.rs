@@ -13,8 +13,8 @@ use lnss::lnss_core::{
 };
 use lnss::lnss_mechint::JsonlMechIntWriter;
 use lnss::lnss_runtime::{
-    BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig,
-    MechIntRecord, StubHookProvider, StubLlmBackend,
+    ActivationState, BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime,
+    LocalProposalApplier, MappingAdaptationConfig, MechIntRecord, StubHookProvider, StubLlmBackend,
 };
 use lnss::lnss_sae::StubSaeBackend;
 
@@ -120,6 +120,9 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
+        approval_inbox: None,
+        activation_state: ActivationState::default(),
+        proposal_applier: Box::new(LocalProposalApplier::default()),
     };
 
     let mods = EmotionFieldSnapshot::new(
