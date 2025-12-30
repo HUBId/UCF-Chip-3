@@ -118,6 +118,7 @@ mod real_sae_backend_tests {
             limits: Limits::default(),
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
+            proposal_inbox: None,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -132,6 +133,7 @@ mod real_sae_backend_tests {
             limits: Limits::default(),
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
+            proposal_inbox: None,
         };
 
         let mods = base_mods();

@@ -118,6 +118,7 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         limits: Limits::default(),
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

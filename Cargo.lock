@@ -1060,6 +1060,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnss_evolve"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "lnss_core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "lnss_hooks"
 version = "0.1.0"
 dependencies = [
@@ -1096,6 +1108,7 @@ dependencies = [
  "bincode",
  "burn",
  "lnss_core",
+ "lnss_evolve",
  "lnss_hooks",
  "lnss_mechint",
  "lnss_rig",

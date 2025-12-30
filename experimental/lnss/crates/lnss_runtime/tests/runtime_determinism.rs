@@ -72,6 +72,11 @@ fn boundedness_caps_are_enforced() {
         mapping_digest: [3; 32],
         feedback: None,
         mapping_suggestion: None,
+        proposal_digest: None,
+        proposal_kind: None,
+        proposal_eval_score: None,
+        proposal_verdict: None,
+        proposal_base_evidence_digest: None,
     });
     assert_eq!(record.tap_digests.len(), 4);
 }
@@ -166,6 +171,7 @@ fn end_to_end_stub_pipeline() {
         limits: Limits::default(),
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

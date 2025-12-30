@@ -208,6 +208,7 @@ mod lnss_cli {
             limits: Limits::default(),
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
+            proposal_inbox: None,
         };
 
         let mods = EmotionFieldSnapshot::new(

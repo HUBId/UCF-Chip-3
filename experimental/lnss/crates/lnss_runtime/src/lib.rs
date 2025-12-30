@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -10,6 +13,7 @@ use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
 };
+use lnss_evolve::{evaluate, load_proposals, EvalContext, EvalVerdict, ProposalKind};
 use lnss_hooks::TapRegistry;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4096;
@@ -17,6 +21,8 @@ pub const DEFAULT_MAX_SPIKES: usize = 2048;
 pub const DEFAULT_MAX_TAPS: usize = 128;
 pub const DEFAULT_MAX_MECHINT_BYTES: usize = 8192;
 pub const MAX_TAP_SAMPLE_BYTES: usize = 4096;
+pub const DEFAULT_PROPOSAL_SCAN_TICKS: u64 = 50;
+pub const DEFAULT_PROPOSAL_MAX_PER_TICK: usize = 5;
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -24,6 +30,8 @@ pub enum LnssRuntimeError {
     MechInt(String),
     #[error("rig client error: {0}")]
     Rig(String),
+    #[error("proposal inbox error: {0}")]
+    Proposal(String),
 }
 
 pub trait LlmBackend {
@@ -69,6 +77,77 @@ impl Default for Limits {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ProposalInbox {
+    pub dir: PathBuf,
+    pub ticks_per_scan: u64,
+    pub max_per_tick: usize,
+    tick_counter: u64,
+    seen: BTreeSet<[u8; 32]>,
+}
+
+impl ProposalInbox {
+    pub fn new(dir: impl AsRef<Path>) -> Self {
+        Self {
+            dir: dir.as_ref().to_path_buf(),
+            ticks_per_scan: DEFAULT_PROPOSAL_SCAN_TICKS,
+            max_per_tick: DEFAULT_PROPOSAL_MAX_PER_TICK,
+            tick_counter: 0,
+            seen: BTreeSet::new(),
+        }
+    }
+
+    pub fn with_limits(dir: impl AsRef<Path>, ticks_per_scan: u64, max_per_tick: usize) -> Self {
+        Self {
+            dir: dir.as_ref().to_path_buf(),
+            ticks_per_scan: ticks_per_scan.max(1),
+            max_per_tick: max_per_tick.max(1),
+            tick_counter: 0,
+            seen: BTreeSet::new(),
+        }
+    }
+
+    fn should_scan(&mut self) -> bool {
+        self.tick_counter = self.tick_counter.saturating_add(1);
+        self.tick_counter.is_multiple_of(self.ticks_per_scan)
+    }
+
+    pub fn ingest(
+        &mut self,
+        eval_ctx: &EvalContext,
+        base_parts: &MechIntRecordParts,
+        mechint: &mut dyn MechIntWriter,
+    ) -> Result<usize, LnssRuntimeError> {
+        if !self.should_scan() {
+            return Ok(0);
+        }
+        let proposals =
+            load_proposals(&self.dir).map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
+
+        let mut processed = 0usize;
+        for proposal in proposals {
+            if self.seen.contains(&proposal.proposal_digest) {
+                continue;
+            }
+            let eval = evaluate(&proposal, eval_ctx);
+            let mut parts = base_parts.clone();
+            parts.proposal_digest = Some(proposal.proposal_digest);
+            parts.proposal_kind = Some(proposal.kind.clone());
+            parts.proposal_eval_score = Some(eval.score);
+            parts.proposal_verdict = Some(eval.verdict.clone());
+            parts.proposal_base_evidence_digest = Some(proposal.base_evidence_digest);
+            let record = MechIntRecord::new(parts);
+            mechint.write_step(&record)?;
+            self.seen.insert(proposal.proposal_digest);
+            processed += 1;
+            if processed >= self.max_per_tick {
+                break;
+            }
+        }
+        Ok(processed)
+    }
+}
+
 pub struct LnssRuntime {
     pub llm: Box<dyn LlmBackend>,
     pub hooks: Box<dyn HookProvider>,
@@ -79,6 +158,7 @@ pub struct LnssRuntime {
     pub limits: Limits,
     pub feedback: FeedbackConsumer,
     pub adaptation: MappingAdaptationConfig,
+    pub proposal_inbox: Option<ProposalInbox>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +189,11 @@ pub struct MechIntRecord {
     pub mapping_digest: [u8; 32],
     pub feedback: Option<FeedbackSummary>,
     pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
+    pub proposal_digest: Option<[u8; 32]>,
+    pub proposal_kind: Option<ProposalKind>,
+    pub proposal_eval_score: Option<i32>,
+    pub proposal_verdict: Option<EvalVerdict>,
+    pub proposal_base_evidence_digest: Option<[u8; 32]>,
     pub record_digest: [u8; 32],
 }
 
@@ -122,6 +207,11 @@ pub struct MechIntRecordParts {
     pub mapping_digest: [u8; 32],
     pub feedback: Option<FeedbackSummary>,
     pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
+    pub proposal_digest: Option<[u8; 32]>,
+    pub proposal_kind: Option<ProposalKind>,
+    pub proposal_eval_score: Option<i32>,
+    pub proposal_verdict: Option<EvalVerdict>,
+    pub proposal_base_evidence_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +335,11 @@ impl MechIntRecord {
             mapping_digest: parts.mapping_digest,
             feedback: parts.feedback,
             mapping_suggestion: parts.mapping_suggestion,
+            proposal_digest: parts.proposal_digest,
+            proposal_kind: parts.proposal_kind,
+            proposal_eval_score: parts.proposal_eval_score,
+            proposal_verdict: parts.proposal_verdict,
+            proposal_base_evidence_digest: parts.proposal_base_evidence_digest,
             record_digest,
         }
     }
@@ -270,6 +365,7 @@ fn record_digest(parts: &MechIntRecordParts) -> [u8; 32] {
     }
     write_optional_feedback(&mut buf, parts.feedback.as_ref());
     write_optional_suggestion(&mut buf, parts.mapping_suggestion.as_ref());
+    write_optional_proposal(&mut buf, parts);
     digest("lnss.mechint.record.v1", &buf)
 }
 
@@ -328,7 +424,7 @@ impl LnssRuntime {
             .iter()
             .map(|event| event.event_digest)
             .collect();
-        let mechint_record = MechIntRecord::new(MechIntRecordParts {
+        let mechint_parts = MechIntRecordParts {
             session_id: session_id.to_string(),
             step_id: step_id.to_string(),
             token_digest,
@@ -337,8 +433,36 @@ impl LnssRuntime {
             mapping_digest: self.mapper.map_digest,
             feedback: feedback_summary,
             mapping_suggestion: mapping_suggestion.clone(),
-        });
+            proposal_digest: None,
+            proposal_kind: None,
+            proposal_eval_score: None,
+            proposal_verdict: None,
+            proposal_base_evidence_digest: None,
+        };
+        let mechint_record = MechIntRecord::new(mechint_parts.clone());
         self.mechint.write_step(&mechint_record)?;
+
+        if let Some(inbox) = self.proposal_inbox.as_mut() {
+            let eval_ctx = EvalContext {
+                latest_feedback_digest: feedback_snapshot.as_ref().map(|snap| snap.snapshot_digest),
+                trace_run_digest: None,
+                metrics: feedback_snapshot
+                    .as_ref()
+                    .map(|snap| {
+                        vec![
+                            (
+                                "event_queue_overflowed".to_string(),
+                                i64::from(snap.event_queue_overflowed),
+                            ),
+                            ("events_dropped".to_string(), snap.events_dropped as i64),
+                            ("events_injected".to_string(), snap.events_injected as i64),
+                            ("injected_total".to_string(), snap.injected_total as i64),
+                        ]
+                    })
+                    .unwrap_or_default(),
+            };
+            inbox.ingest(&eval_ctx, &mechint_parts, self.mechint.as_mut())?;
+        }
 
         Ok(RuntimeOutput {
             output_bytes,
@@ -448,6 +572,10 @@ fn write_u64(buf: &mut Vec<u8>, value: u64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
+fn write_i32(buf: &mut Vec<u8>, value: i32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
 fn write_bool(buf: &mut Vec<u8>, value: bool) {
     buf.push(u8::from(value));
 }
@@ -475,6 +603,46 @@ fn write_optional_suggestion(buf: &mut Vec<u8>, suggestion: Option<&MappingAdapt
             write_u16(buf, suggestion.max_targets_per_feature);
         }
         None => write_bool(buf, false),
+    }
+}
+
+fn write_optional_proposal(buf: &mut Vec<u8>, parts: &MechIntRecordParts) {
+    write_bool(buf, parts.proposal_digest.is_some());
+    if let Some(digest_bytes) = parts.proposal_digest {
+        buf.extend_from_slice(&digest_bytes);
+    }
+    write_bool(buf, parts.proposal_kind.is_some());
+    if let Some(kind) = &parts.proposal_kind {
+        buf.push(proposal_kind_tag(kind));
+    }
+    write_bool(buf, parts.proposal_eval_score.is_some());
+    if let Some(score) = parts.proposal_eval_score {
+        write_i32(buf, score);
+    }
+    write_bool(buf, parts.proposal_verdict.is_some());
+    if let Some(verdict) = &parts.proposal_verdict {
+        buf.push(eval_verdict_tag(verdict));
+    }
+    write_bool(buf, parts.proposal_base_evidence_digest.is_some());
+    if let Some(digest_bytes) = parts.proposal_base_evidence_digest {
+        buf.extend_from_slice(&digest_bytes);
+    }
+}
+
+fn proposal_kind_tag(kind: &ProposalKind) -> u8 {
+    match kind {
+        ProposalKind::MappingUpdate => 1,
+        ProposalKind::SaePackUpdate => 2,
+        ProposalKind::LiquidParamsUpdate => 3,
+        ProposalKind::InjectionLimitsUpdate => 4,
+    }
+}
+
+fn eval_verdict_tag(verdict: &EvalVerdict) -> u8 {
+    match verdict {
+        EvalVerdict::Promising => 1,
+        EvalVerdict::Neutral => 2,
+        EvalVerdict::Risky => 3,
     }
 }
 
