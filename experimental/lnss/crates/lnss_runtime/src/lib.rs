@@ -435,11 +435,7 @@ impl CandleLlmBackend {
 
     pub fn try_load(&mut self) -> Result<(), CandleLoadError> {
         let readme_path = std::path::Path::new(&self.cfg.model_dir).join("README");
-        if readme_path.exists() {
-            self.loaded = true;
-        } else {
-            self.loaded = false;
-        }
+        self.loaded = readme_path.exists();
         Ok(())
     }
 
