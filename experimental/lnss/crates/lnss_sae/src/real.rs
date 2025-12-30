@@ -112,14 +112,12 @@ impl RealSaeBackend {
 
     fn sample_to_input(sample: &[u8], input_dim: usize) -> Vec<f32> {
         let mut input = vec![0.0f32; input_dim];
-        let mut idx = 0usize;
-        for chunk in sample.chunks_exact(2) {
+        for (idx, chunk) in sample.chunks_exact(2).enumerate() {
             if idx >= input_dim {
                 break;
             }
             let value = i16::from_le_bytes([chunk[0], chunk[1]]) as f32;
             input[idx] = value;
-            idx += 1;
         }
         input
     }
