@@ -19,8 +19,11 @@ fn write_pack(dir: &Path) -> PathBuf {
         "top_k": 2,
         "scaling_q": 10
     });
-    fs::write(dir.join("meta.json"), serde_json::to_string(&meta).expect("meta json"))
-        .expect("write meta");
+    fs::write(
+        dir.join("meta.json"),
+        serde_json::to_string(&meta).expect("meta json"),
+    )
+    .expect("write meta");
     let mut w_bytes = Vec::new();
     for i in 0..4 {
         for j in 0..4 {

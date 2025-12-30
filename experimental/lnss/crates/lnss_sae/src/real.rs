@@ -86,11 +86,7 @@ impl RealSaeBackend {
     }
 
     fn load_pack_for_hook(&mut self, hook_id: &str) -> Result<&SaePack, SaePackError> {
-        if let Some(pos) = self
-            .cache
-            .iter()
-            .position(|entry| entry.hook_id == hook_id)
-        {
+        if let Some(pos) = self.cache.iter().position(|entry| entry.hook_id == hook_id) {
             return Ok(&self.cache[pos].pack);
         }
 

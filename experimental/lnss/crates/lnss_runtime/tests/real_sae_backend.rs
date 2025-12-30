@@ -25,8 +25,11 @@ mod real_sae_backend_tests {
             "top_k": 2,
             "scaling_q": 10
         });
-        fs::write(dir.join("meta.json"), serde_json::to_string(&meta).expect("meta json"))
-            .expect("write meta");
+        fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string(&meta).expect("meta json"),
+        )
+        .expect("write meta");
         let mut w_bytes = Vec::new();
         for i in 0..4 {
             for j in 0..4 {
@@ -76,12 +79,16 @@ mod real_sae_backend_tests {
             "state",
         )];
 
-        let mechint_a =
-            JsonlMechIntWriter::new(std::env::temp_dir().join("lnss_real_sae_a.jsonl"), Some(512))
-                .expect("jsonl writer");
-        let mechint_b =
-            JsonlMechIntWriter::new(std::env::temp_dir().join("lnss_real_sae_b.jsonl"), Some(512))
-                .expect("jsonl writer");
+        let mechint_a = JsonlMechIntWriter::new(
+            std::env::temp_dir().join("lnss_real_sae_a.jsonl"),
+            Some(512),
+        )
+        .expect("jsonl writer");
+        let mechint_b = JsonlMechIntWriter::new(
+            std::env::temp_dir().join("lnss_real_sae_b.jsonl"),
+            Some(512),
+        )
+        .expect("jsonl writer");
         let rig_a = InMemoryRigClient::default();
         let rig_b = InMemoryRigClient::default();
 

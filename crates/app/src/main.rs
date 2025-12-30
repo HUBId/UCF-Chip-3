@@ -108,7 +108,13 @@ fn main() {
 
             #[cfg(feature = "lnss")]
             {
-                lnss_cli::run_lnss(&session_id, steps, &tap_plan, &map_path, sae_pack.as_deref());
+                lnss_cli::run_lnss(
+                    &session_id,
+                    steps,
+                    &tap_plan,
+                    &map_path,
+                    sae_pack.as_deref(),
+                );
                 return;
             }
 
@@ -179,10 +185,7 @@ mod lnss_cli {
                 {
                     use lnss_sae::{RealSaeBackend, SaeNonlinearity};
 
-                    Box::new(RealSaeBackend::new(
-                        path.into(),
-                        SaeNonlinearity::Relu,
-                    ))
+                    Box::new(RealSaeBackend::new(path.into(), SaeNonlinearity::Relu))
                 }
                 #[cfg(not(feature = "lnss-sae-real"))]
                 {
