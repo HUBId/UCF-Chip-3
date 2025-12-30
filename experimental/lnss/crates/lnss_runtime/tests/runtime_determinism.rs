@@ -8,8 +8,8 @@ use lnss_hooks::TapPlan;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_runtime::{
-    map_features_to_spikes, Limits, LnssRuntime, MechIntRecord, TapSummary, StubHookProvider,
-    StubLlmBackend,
+    map_features_to_spikes, Limits, LnssRuntime, MechIntRecord, StubHookProvider, StubLlmBackend,
+    TapSummary,
 };
 use lnss_sae::StubSaeBackend;
 

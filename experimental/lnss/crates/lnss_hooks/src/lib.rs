@@ -72,8 +72,11 @@ impl TapRegistry {
             return;
         }
         self.registered.push(candidate);
-        self.registered
-            .sort_by(|a, b| a.hook_id.cmp(&b.hook_id).then_with(|| a.layer_index.cmp(&b.layer_index)));
+        self.registered.sort_by(|a, b| {
+            a.hook_id
+                .cmp(&b.hook_id)
+                .then_with(|| a.layer_index.cmp(&b.layer_index))
+        });
     }
 
     pub fn registered(&self) -> Vec<RegisteredTap> {

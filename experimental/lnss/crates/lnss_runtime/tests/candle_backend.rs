@@ -7,16 +7,11 @@ use lnss_core::{BrainTarget, EmotionFieldSnapshot, TapKind, TapSpec};
 use lnss_hooks::TapRegistry;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
-use lnss_runtime::{
-    CandleConfig, CandleLlmBackend, Limits, LnssRuntime, TapRegistryProvider,
-};
+use lnss_runtime::{CandleConfig, CandleLlmBackend, Limits, LnssRuntime, TapRegistryProvider};
 use lnss_sae::CandleSaeBackend;
 
 fn create_loaded_model_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "lnss_candle_test_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("lnss_candle_test_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create model dir");
     fs::write(dir.join("README"), "stub").expect("write readme");
@@ -54,12 +49,7 @@ fn candle_tap_summary_is_deterministic_and_bounded() {
     let mut backend = CandleLlmBackend::with_registry(cfg, registry.clone());
     backend.try_load().expect("load stub");
     let mods = default_mods();
-    let tap_specs = vec![TapSpec::new(
-        "hook-a",
-        TapKind::ResidualStream,
-        0,
-        "resid",
-    )];
+    let tap_specs = vec![TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid")];
 
     backend.infer_step(b"input", &mods);
     let mut provider = TapRegistryProvider::new(registry.clone(), true);
@@ -70,8 +60,14 @@ fn candle_tap_summary_is_deterministic_and_bounded() {
 
     assert_eq!(taps_first.len(), 1);
     assert_eq!(taps_second.len(), 1);
-    assert_eq!(taps_first[0].activation_digest, taps_second[0].activation_digest);
-    assert_eq!(taps_first[0].activation_bytes, taps_second[0].activation_bytes);
+    assert_eq!(
+        taps_first[0].activation_digest,
+        taps_second[0].activation_digest
+    );
+    assert_eq!(
+        taps_first[0].activation_bytes,
+        taps_second[0].activation_bytes
+    );
     assert!(taps_first[0].activation_bytes.len() <= 4096);
 }
 
@@ -94,12 +90,7 @@ fn candle_end_to_end_is_deterministic() {
     let mut backend = CandleLlmBackend::with_registry(cfg, registry.clone());
     backend.try_load().expect("load stub");
 
-    let tap_specs = vec![TapSpec::new(
-        "hook-a",
-        TapKind::ResidualStream,
-        0,
-        "resid",
-    )];
+    let tap_specs = vec![TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid")];
 
     let mut entries = Vec::new();
     for feature_id in 0..1024u32 {

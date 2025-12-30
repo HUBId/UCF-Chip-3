@@ -9,7 +9,9 @@ pub struct Chip2BiophysBridge {
 
 impl Chip2BiophysBridge {
     pub fn new() -> Self {
-        Self { received: Vec::new() }
+        Self {
+            received: Vec::new(),
+        }
     }
 
     pub fn send_spikes(&mut self, spikes: &[BrainSpike]) {

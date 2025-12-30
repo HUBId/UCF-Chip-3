@@ -537,7 +537,9 @@ fn candle_sample_bytes(
         let chunk = digest("lnss.candle.tap.sample.v1", &chunk_seed);
         let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
         let f = (raw as f32 / u16::MAX as f32) * 2.0 - 1.0;
-        let q = (f * 32767.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let q = (f * 32767.0)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         sample.extend_from_slice(&q.to_le_bytes());
     }
     sample.truncate(MAX_TAP_SAMPLE_BYTES);
