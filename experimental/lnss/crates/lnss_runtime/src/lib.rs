@@ -112,6 +112,18 @@ pub struct MechIntRecord {
     pub record_digest: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MechIntRecordParts {
+    pub session_id: String,
+    pub step_id: String,
+    pub token_digest: [u8; 32],
+    pub tap_summaries: Vec<TapSummary>,
+    pub feature_event_digests: Vec<[u8; 32]>,
+    pub mapping_digest: [u8; 32],
+    pub feedback: Option<FeedbackSummary>,
+    pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TapSummary {
     pub hook_id: String,
@@ -209,81 +221,55 @@ impl TapSummary {
 }
 
 impl MechIntRecord {
-    pub fn new(
-        session_id: &str,
-        step_id: &str,
-        token_digest: [u8; 32],
-        mut tap_summaries: Vec<TapSummary>,
-        mut feature_event_digests: Vec<[u8; 32]>,
-        mapping_digest: [u8; 32],
-        feedback: Option<FeedbackSummary>,
-        mapping_suggestion: Option<MappingAdaptationSuggestion>,
-    ) -> Self {
-        tap_summaries.sort_by(|a, b| {
+    pub fn new(mut parts: MechIntRecordParts) -> Self {
+        parts.tap_summaries.sort_by(|a, b| {
             a.hook_id
                 .cmp(&b.hook_id)
                 .then_with(|| a.activation_digest.cmp(&b.activation_digest))
         });
-        let mut tap_digests: Vec<[u8; 32]> = tap_summaries
+        let mut tap_digests: Vec<[u8; 32]> = parts
+            .tap_summaries
             .iter()
             .map(|summary| summary.activation_digest)
             .collect();
         tap_digests.sort();
-        feature_event_digests.sort();
-        let record_digest = record_digest(
-            session_id,
-            step_id,
-            token_digest,
-            &tap_summaries,
-            &feature_event_digests,
-            mapping_digest,
-            feedback.as_ref(),
-            mapping_suggestion.as_ref(),
-        );
+        parts.feature_event_digests.sort();
+        let record_digest = record_digest(&parts);
         Self {
-            session_id: session_id.to_string(),
-            step_id: step_id.to_string(),
-            token_digest,
+            session_id: parts.session_id,
+            step_id: parts.step_id,
+            token_digest: parts.token_digest,
             tap_digests,
-            tap_summaries,
-            feature_event_digests,
-            mapping_digest,
-            feedback,
-            mapping_suggestion,
+            tap_summaries: parts.tap_summaries,
+            feature_event_digests: parts.feature_event_digests,
+            mapping_digest: parts.mapping_digest,
+            feedback: parts.feedback,
+            mapping_suggestion: parts.mapping_suggestion,
             record_digest,
         }
     }
 }
 
-fn record_digest(
-    session_id: &str,
-    step_id: &str,
-    token_digest: [u8; 32],
-    tap_summaries: &[TapSummary],
-    feature_event_digests: &[[u8; 32]],
-    mapping_digest: [u8; 32],
-    feedback: Option<&FeedbackSummary>,
-    mapping_suggestion: Option<&MappingAdaptationSuggestion>,
-) -> [u8; 32] {
+fn record_digest(parts: &MechIntRecordParts) -> [u8; 32] {
     let mut buf = Vec::new();
-    buf.extend_from_slice(session_id.as_bytes());
+    buf.extend_from_slice(parts.session_id.as_bytes());
     buf.push(0);
-    buf.extend_from_slice(step_id.as_bytes());
+    buf.extend_from_slice(parts.step_id.as_bytes());
     buf.push(0);
-    buf.extend_from_slice(&token_digest);
-    buf.extend_from_slice(&mapping_digest);
-    buf.extend_from_slice(&(tap_summaries.len() as u32).to_le_bytes());
-    for summary in tap_summaries {
+    buf.extend_from_slice(&parts.token_digest);
+    buf.extend_from_slice(&parts.mapping_digest);
+    buf.extend_from_slice(&(parts.tap_summaries.len() as u32).to_le_bytes());
+    for summary in &parts.tap_summaries {
         write_string(&mut buf, &summary.hook_id);
         buf.extend_from_slice(&summary.activation_digest);
         buf.extend_from_slice(&summary.sample_len.to_le_bytes());
     }
-    buf.extend_from_slice(&(feature_event_digests.len() as u32).to_le_bytes());
-    for digest_bytes in feature_event_digests {
+    buf.extend_from_slice(&(parts.feature_event_digests.len() as u32).to_le_bytes());
+    for digest_bytes in &parts.feature_event_digests {
         buf.extend_from_slice(digest_bytes);
     }
-    write_optional_feedback(&mut buf, feedback);
-    write_optional_suggestion(&mut buf, mapping_suggestion);
+    write_optional_feedback(&mut buf, parts.feedback.as_ref());
+    write_optional_suggestion(&mut buf, parts.mapping_suggestion.as_ref());
     digest("lnss.mechint.record.v1", &buf)
 }
 
@@ -342,16 +328,16 @@ impl LnssRuntime {
             .iter()
             .map(|event| event.event_digest)
             .collect();
-        let mechint_record = MechIntRecord::new(
-            session_id,
-            step_id,
+        let mechint_record = MechIntRecord::new(MechIntRecordParts {
+            session_id: session_id.to_string(),
+            step_id: step_id.to_string(),
             token_digest,
             tap_summaries,
             feature_event_digests,
-            self.mapper.map_digest,
-            feedback_summary,
-            mapping_suggestion.clone(),
-        );
+            mapping_digest: self.mapper.map_digest,
+            feedback: feedback_summary,
+            mapping_suggestion: mapping_suggestion.clone(),
+        });
         self.mechint.write_step(&mechint_record)?;
 
         Ok(RuntimeOutput {

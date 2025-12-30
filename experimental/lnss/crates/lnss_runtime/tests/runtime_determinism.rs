@@ -9,8 +9,8 @@ use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_runtime::{
     map_features_to_spikes, BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime,
-    MappingAdaptationConfig, MappingAdaptationSuggestion, MechIntRecord, StubHookProvider,
-    StubLlmBackend, TapSummary,
+    MappingAdaptationConfig, MappingAdaptationSuggestion, MechIntRecord, MechIntRecordParts,
+    StubHookProvider, StubLlmBackend, TapSummary,
 };
 use lnss_sae::StubSaeBackend;
 
@@ -63,7 +63,16 @@ fn boundedness_caps_are_enforced() {
             sample_len: 0,
         })
         .collect();
-    let record = MechIntRecord::new("s", "t", [1; 32], summaries, vec![], [3; 32], None, None);
+    let record = MechIntRecord::new(MechIntRecordParts {
+        session_id: "s".to_string(),
+        step_id: "t".to_string(),
+        token_digest: [1; 32],
+        tap_summaries: summaries,
+        feature_event_digests: vec![],
+        mapping_digest: [3; 32],
+        feedback: None,
+        mapping_suggestion: None,
+    });
     assert_eq!(record.tap_digests.len(), 4);
 }
 
