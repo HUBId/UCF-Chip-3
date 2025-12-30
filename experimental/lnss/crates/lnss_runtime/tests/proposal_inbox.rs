@@ -13,7 +13,7 @@ use lnss_runtime::{
     ProposalInbox, StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_sae::StubSaeBackend;
-use pvgs_client::{MockPvgsClient, PvgsClient};
+use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
 use ucf_protocol::ucf;
 
 #[derive(Clone, Default)]
@@ -152,6 +152,40 @@ impl PvgsClient for SharedPvgsClient {
 
     fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
         self.inner.lock().expect("pvgs lock").get_pvgs_head()
+    }
+}
+
+impl PvgsReader for SharedPvgsClient {
+    fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+        self.inner.lock().expect("pvgs lock").get_latest_pev()
+    }
+
+    fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_latest_pev_digest()
+    }
+
+    fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_current_ruleset_digest()
+    }
+
+    fn is_session_sealed(&self, session_id: &str) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .is_session_sealed(session_id)
+    }
+
+    fn has_unlock_permit(&self, session_id: &str) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .has_unlock_permit(session_id)
     }
 }
 
