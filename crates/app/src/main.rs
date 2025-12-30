@@ -203,6 +203,7 @@ mod lnss_cli {
             hooks: Box::new(StubHookProvider { taps: Vec::new() }),
             sae,
             mechint: Box::new(mechint),
+            pvgs: None,
             rig: Box::new(rig),
             mapper,
             limits: Limits::default(),
