@@ -12,3 +12,6 @@ lnss-cxx = []
 
 [dependencies]
 lnss_runtime = { path = "../lnss_runtime" }
+
+[dev-dependencies]
+lnss_core = { path = "../lnss_core" }
