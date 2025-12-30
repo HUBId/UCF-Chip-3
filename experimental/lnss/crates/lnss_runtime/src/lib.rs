@@ -444,10 +444,11 @@ impl LiquidOdeBackend {
         };
         let dt_q =
             ((cfg.dt_ms_q as i64) * (LIQUID_Q_ONE as i64) / 1000).clamp(1, i32::MAX as i64) as i32;
+        let weights = LiquidWeights::new(&cfg);
         Self {
             cfg,
             state: std::sync::Arc::new(std::sync::Mutex::new(state)),
-            weights: LiquidWeights::new(&cfg),
+            weights,
             dt_q,
         }
     }
