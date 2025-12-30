@@ -35,7 +35,8 @@ lnss-candle = [
     "lnss_hooks/lnss-candle",
     "lnss_sae/lnss-candle",
 ]
-lnss-burn = ["lnss_runtime/lnss-burn"]
+lnss-burn = ["lnss_runtime/lnss-burn", "burn"]
+lnss-liquid-ode = ["lnss-burn", "lnss_runtime/lnss-liquid-ode"]
 lnss-arrow = ["lnss_mechint/lnss-arrow"]
 lnss-pyo3 = ["lnss_bluebridge/lnss-pyo3"]
 lnss-cxx = ["lnss_bluebridge/lnss-cxx"]
@@ -50,6 +51,7 @@ lnss_mechint = { path = "crates/lnss_mechint", optional = true }
 lnss_rig = { path = "crates/lnss_rig", optional = true }
 lnss_bluebridge = { path = "crates/lnss_bluebridge", optional = true }
 lnss_evolve = { path = "crates/lnss_evolve", optional = true }
+burn = { workspace = true, optional = true }
 
 [workspace.dependencies]
 blake3 = "1"
@@ -57,3 +59,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 hex = "0.4"
+burn = { version = "0.12", default-features = false }

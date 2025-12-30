@@ -7,7 +7,9 @@
 
 ## Phase 2 (inference backends)
 * `lnss-candle`: local-only SAE inference with Candle.
-* `lnss-burn`: optional Burn ODE backend wiring.
+* `lnss-liquid-ode`: open LiquidOdeBackend (fixed-step Euler, deterministic taps) as a substitute for the proprietary LFM.
+* `lnss-burn`: optional Burn ODE backend wiring (used by LiquidOdeBackend).
+* Future: replace Euler with `diffsol`/SUNDIALS behind a `lnss-diffsol` feature flag.
 * Candle hooks/taps (local-only model loading, no downloads).
 
 ## Phase 3 (data & logging)

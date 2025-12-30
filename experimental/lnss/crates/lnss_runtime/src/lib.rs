@@ -7,6 +7,8 @@ use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
 };
+#[cfg(feature = "lnss-liquid-ode")]
+use lnss_core::TapKind;
 use lnss_hooks::TapRegistry;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4096;
@@ -340,6 +342,344 @@ fn write_string(buf: &mut Vec<u8>, value: &str) {
 pub struct TapRegistryProvider {
     registry: std::sync::Arc<std::sync::Mutex<TapRegistry>>,
     enabled: bool,
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+const LIQUID_Q_SHIFT: i32 = 16;
+#[cfg(feature = "lnss-liquid-ode")]
+const LIQUID_Q_ONE: i32 = 1 << LIQUID_Q_SHIFT;
+#[cfg(feature = "lnss-liquid-ode")]
+const LIQUID_WEIGHT_SCALE: i64 = 64;
+#[cfg(feature = "lnss-liquid-ode")]
+const LIQUID_OUTPUT_SAMPLE_DIMS: usize = 16;
+#[cfg(feature = "lnss-liquid-ode")]
+const LIQUID_TAP_SAMPLE_DIMS: usize = 64;
+#[cfg(feature = "lnss-liquid-ode")]
+const LIQUID_STATE_CLAMP_Q: i32 = LIQUID_Q_ONE * 8;
+
+#[cfg(feature = "lnss-liquid-ode")]
+#[derive(Debug, Clone)]
+pub struct LiquidOdeConfig {
+    pub state_dim: u32,
+    pub dt_ms_q: u16,
+    pub steps_per_call: u16,
+    pub seed: u64,
+    pub input_proj_dim: u32,
+    pub mods_gain_q: u16,
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+impl Default for LiquidOdeConfig {
+    fn default() -> Self {
+        Self {
+            state_dim: 256,
+            dt_ms_q: 1000,
+            steps_per_call: 1,
+            seed: 0,
+            input_proj_dim: 64,
+            mods_gain_q: 100,
+        }
+    }
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+#[derive(Debug, Clone)]
+pub struct LiquidOdeState {
+    pub x_q: Vec<i32>,
+    pub step_count: u64,
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+#[derive(Debug, Clone)]
+struct LiquidWeights {
+    w_in: Vec<i16>,
+    w_rec: Vec<i16>,
+    bias_q: Vec<i32>,
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+impl LiquidWeights {
+    fn new(cfg: &LiquidOdeConfig) -> Self {
+        let state_dim = cfg.state_dim.max(1) as usize;
+        let input_dim = cfg.input_proj_dim.max(1) as usize;
+        let mut w_in = Vec::with_capacity(state_dim * input_dim);
+        for idx in 0..(state_dim * input_dim) {
+            w_in.push(derive_weight(cfg.seed, idx as u64, "w_in"));
+        }
+        let mut w_rec = Vec::with_capacity(state_dim * state_dim);
+        for idx in 0..(state_dim * state_dim) {
+            w_rec.push(derive_weight(cfg.seed, idx as u64, "w_rec"));
+        }
+        let mut bias_q = Vec::with_capacity(state_dim);
+        for idx in 0..state_dim {
+            bias_q.push(derive_bias(cfg.seed, idx as u64));
+        }
+        Self {
+            w_in,
+            w_rec,
+            bias_q,
+        }
+    }
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+#[derive(Debug)]
+pub struct LiquidOdeBackend {
+    cfg: LiquidOdeConfig,
+    state: std::sync::Arc<std::sync::Mutex<LiquidOdeState>>,
+    weights: LiquidWeights,
+    dt_q: i32,
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+impl LiquidOdeBackend {
+    pub fn new(mut cfg: LiquidOdeConfig) -> Self {
+        cfg.state_dim = cfg.state_dim.max(1);
+        cfg.input_proj_dim = cfg.input_proj_dim.max(1);
+        cfg.steps_per_call = cfg.steps_per_call.max(1);
+        let state_dim = cfg.state_dim as usize;
+        let state = LiquidOdeState {
+            x_q: vec![0; state_dim],
+            step_count: 0,
+        };
+        let dt_q =
+            ((cfg.dt_ms_q as i64) * (LIQUID_Q_ONE as i64) / 1000).clamp(1, i32::MAX as i64) as i32;
+        Self {
+            cfg,
+            state: std::sync::Arc::new(std::sync::Mutex::new(state)),
+            weights: LiquidWeights::new(&cfg),
+            dt_q,
+        }
+    }
+
+    pub fn tap_provider(&self) -> LiquidTapProvider {
+        LiquidTapProvider::new(self.state.clone(), self.cfg.clone())
+    }
+
+    pub fn state_len(&self) -> usize {
+        let guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.x_q.len()
+    }
+
+    fn step_state(&mut self, input_proj: &[i32], gain_q: i32) {
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let state_dim = self.cfg.state_dim as usize;
+        if guard.x_q.len() != state_dim {
+            guard.x_q.resize(state_dim, 0);
+        }
+        let mut tanh_vals = Vec::with_capacity(state_dim);
+        for &x_q in &guard.x_q {
+            tanh_vals.push(tanh_approx_q(x_q));
+        }
+        let mut next = vec![0; state_dim];
+        let alpha_q = LIQUID_Q_ONE / 8;
+        let input_dim = self.cfg.input_proj_dim as usize;
+        for i in 0..state_dim {
+            let x_q = guard.x_q[i];
+            let leak = -((alpha_q as i64 * x_q as i64) >> LIQUID_Q_SHIFT);
+            let mut sum_in = 0i64;
+            let w_in_offset = i * input_dim;
+            for (j, u_q) in input_proj.iter().enumerate() {
+                let w = self.weights.w_in[w_in_offset + j] as i64;
+                sum_in += w * (*u_q as i64);
+            }
+            let mut sum_rec = 0i64;
+            let w_rec_offset = i * state_dim;
+            for (j, tanh_q) in tanh_vals.iter().enumerate() {
+                let w = self.weights.w_rec[w_rec_offset + j] as i64;
+                sum_rec += w * (*tanh_q as i64);
+            }
+            let input_term = sum_in / LIQUID_WEIGHT_SCALE;
+            let rec_term = sum_rec / LIQUID_WEIGHT_SCALE;
+            let mut drive = input_term + rec_term + self.weights.bias_q[i] as i64;
+            drive = (drive * gain_q as i64) >> LIQUID_Q_SHIFT;
+            let f_q = leak + drive;
+            let delta = ((self.dt_q as i64) * f_q) >> LIQUID_Q_SHIFT;
+            let updated = (x_q as i64 + delta)
+                .clamp(-(LIQUID_STATE_CLAMP_Q as i64), LIQUID_STATE_CLAMP_Q as i64);
+            next[i] = updated as i32;
+        }
+        guard.x_q = next;
+        guard.step_count = guard.step_count.saturating_add(1);
+    }
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+impl LlmBackend for LiquidOdeBackend {
+    fn infer_step(&mut self, input: &[u8], mods: &EmotionFieldSnapshot) -> Vec<u8> {
+        let input_proj = encode_input_projection(input, &self.cfg);
+        let gain_q = modulation_gain_q(mods, self.cfg.mods_gain_q);
+        for _ in 0..self.cfg.steps_per_call {
+            self.step_state(&input_proj, gain_q);
+        }
+        let guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let sample = sample_state_bytes(&guard.x_q, LIQUID_OUTPUT_SAMPLE_DIMS);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&self.cfg.seed.to_le_bytes());
+        buf.extend_from_slice(&guard.step_count.to_le_bytes());
+        buf.extend_from_slice(&sample);
+        let digest_bytes = digest("lnss.liquid.output.v1", &buf);
+        let mut output = Vec::new();
+        output.extend_from_slice(&digest_bytes);
+        output.extend_from_slice(&sample);
+        output
+    }
+
+    fn supports_hooks(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+#[derive(Debug)]
+pub struct LiquidTapProvider {
+    state: std::sync::Arc<std::sync::Mutex<LiquidOdeState>>,
+    cfg: LiquidOdeConfig,
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+impl LiquidTapProvider {
+    pub fn new(
+        state: std::sync::Arc<std::sync::Mutex<LiquidOdeState>>,
+        cfg: LiquidOdeConfig,
+    ) -> Self {
+        Self { state, cfg }
+    }
+
+    fn tap_frame(&self, hook_id: &str) -> TapFrame {
+        let guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut state_bytes = Vec::with_capacity(guard.x_q.len() * 4);
+        for x_q in &guard.x_q {
+            state_bytes.extend_from_slice(&x_q.to_le_bytes());
+        }
+        let activation_digest = digest("lnss.liquid.tap.v1", &state_bytes);
+        let sample_dims = (self.cfg.state_dim as usize).min(LIQUID_TAP_SAMPLE_DIMS);
+        let activation_bytes = sample_state_bytes(&guard.x_q, sample_dims);
+        TapFrame {
+            hook_id: hook_id.to_string(),
+            activation_digest,
+            activation_bytes,
+        }
+    }
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+impl HookProvider for LiquidTapProvider {
+    fn collect_taps(&mut self, specs: &[TapSpec]) -> Vec<TapFrame> {
+        let liquid_specs: Vec<&TapSpec> = specs
+            .iter()
+            .filter(|spec| spec.tap_kind == TapKind::LiquidState)
+            .collect();
+        let targets: Vec<String> = if liquid_specs.is_empty() {
+            vec!["liquid-state".to_string()]
+        } else {
+            liquid_specs
+                .iter()
+                .map(|spec| spec.hook_id.clone())
+                .collect()
+        };
+        targets
+            .iter()
+            .map(|hook_id| self.tap_frame(hook_id))
+            .collect()
+    }
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn derive_weight(seed: u64, index: u64, tag: &str) -> i16 {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(tag.as_bytes());
+    buf.extend_from_slice(&seed.to_le_bytes());
+    buf.extend_from_slice(&index.to_le_bytes());
+    let digest_bytes = digest("lnss.liquid.weight.v1", &buf);
+    let raw = i16::from_le_bytes([digest_bytes[0], digest_bytes[1]]) as i32;
+    let bounded = raw.rem_euclid(129) - 64;
+    bounded as i16
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn derive_bias(seed: u64, index: u64) -> i32 {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&seed.to_le_bytes());
+    buf.extend_from_slice(&index.to_le_bytes());
+    let digest_bytes = digest("lnss.liquid.bias.v1", &buf);
+    let raw = i16::from_le_bytes([digest_bytes[0], digest_bytes[1]]) as i32;
+    let bounded = raw.rem_euclid(257) - 128;
+    bounded * (LIQUID_Q_ONE / 128)
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn encode_input_projection(input: &[u8], cfg: &LiquidOdeConfig) -> Vec<i32> {
+    let mut base = Vec::new();
+    base.extend_from_slice(&cfg.seed.to_le_bytes());
+    base.extend_from_slice(input);
+    let input_dim = cfg.input_proj_dim.max(1) as usize;
+    let mut proj = Vec::with_capacity(input_dim);
+    for idx in 0..input_dim {
+        let mut buf = base.clone();
+        buf.extend_from_slice(&(idx as u32).to_le_bytes());
+        let digest_bytes = digest("lnss.liquid.input.v1", &buf);
+        let raw = i16::from_le_bytes([digest_bytes[0], digest_bytes[1]]) as i32;
+        let scaled = raw / 256;
+        let u_q = scaled * (LIQUID_Q_ONE / 128);
+        proj.push(u_q);
+    }
+    proj
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn modulation_gain_q(mods: &EmotionFieldSnapshot, base_gain: u16) -> i32 {
+    let mut gain = base_gain as i32;
+    if mods.noise.eq_ignore_ascii_case("high") {
+        gain = gain * 90 / 100;
+    } else if mods.noise.eq_ignore_ascii_case("low") {
+        gain = gain * 110 / 100;
+    }
+    if mods.priority.eq_ignore_ascii_case("high") {
+        gain = gain * 110 / 100;
+    } else if mods.priority.eq_ignore_ascii_case("low") {
+        gain = gain * 90 / 100;
+    }
+    let gain = gain.clamp(10, 200);
+    (gain * LIQUID_Q_ONE) / 100
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn tanh_approx_q(x_q: i32) -> i32 {
+    let abs = x_q.abs();
+    if abs >= 3 * LIQUID_Q_ONE {
+        return if x_q >= 0 { LIQUID_Q_ONE } else { -LIQUID_Q_ONE };
+    }
+    if abs <= LIQUID_Q_ONE {
+        return x_q;
+    }
+    let base = LIQUID_Q_ONE * 4 / 5;
+    let extra = (abs - LIQUID_Q_ONE) / 10;
+    let value = base + extra;
+    if x_q >= 0 { value } else { -value }
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn sample_state_bytes(x_q: &[i32], dims: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for &value in x_q.iter().take(dims) {
+        let quantized = (value >> 8).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        bytes.extend_from_slice(&quantized.to_le_bytes());
+    }
+    bytes.truncate(MAX_TAP_SAMPLE_BYTES);
+    bytes
 }
 
 impl TapRegistryProvider {

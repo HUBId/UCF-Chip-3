@@ -118,6 +118,7 @@ impl TransformerLensPlanImport {
                 "mlp_post" => TapKind::MlpPost,
                 "attn_out" => TapKind::AttnOut,
                 "embedding" => TapKind::Embedding,
+                "liquid_state" => TapKind::LiquidState,
                 _ => TapKind::ResidualStream,
             };
             tap_specs.push(TapSpec::new(
