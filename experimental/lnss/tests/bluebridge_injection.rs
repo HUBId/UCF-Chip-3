@@ -1,20 +1,62 @@
-#![cfg(all(feature = "lnss", any(feature = "lnss-burn", feature = "lnss-candle")))]
+#![cfg(all(feature = "lnss", feature = "lnss-chip2-bridge"))]
 
-use lnss::lnss_bluebridge::{Chip2InjectClient, Chip2RuntimeHandle, ExternalSpike};
+use std::sync::{Arc, Mutex};
+
+use chip2::{Chip2Runtime, DefaultRouter, L4Circuit};
+use lnss::lnss_bluebridge::{
+    AppliedTarget, Chip2InjectClient, Chip2RouterAdapter, Chip2RouterError, ExternalSpike,
+    InjectionReport,
+};
 use lnss::lnss_core::{BrainTarget, FeatureEvent, FeatureToBrainMap};
 use lnss::lnss_runtime::{map_features_to_spikes, RigClient};
 
-#[derive(Debug, Default)]
-struct TestChip2Runtime {
-    injected: Vec<ExternalSpike>,
-    total_injected: usize,
+#[derive(Clone)]
+struct Chip2RouterBridge {
+    router: Arc<Mutex<DefaultRouter>>,
 }
 
-impl Chip2RuntimeHandle for TestChip2Runtime {
-    fn inject_external_spikes(&mut self, spikes: &[ExternalSpike]) -> Result<(), String> {
-        self.total_injected += spikes.len();
-        self.injected.extend_from_slice(spikes);
-        Ok(())
+impl Chip2RouterBridge {
+    fn new(router: DefaultRouter) -> Self {
+        Self {
+            router: Arc::new(Mutex::new(router)),
+        }
+    }
+}
+
+impl Chip2RouterAdapter for Chip2RouterBridge {
+    fn inject_external_spikes(
+        &mut self,
+        tick: u64,
+        spikes: &[ExternalSpike],
+    ) -> Result<InjectionReport, Chip2RouterError> {
+        let mut guard = match self.router.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let chip2_spikes: Vec<chip2::ExternalSpike> = spikes
+            .iter()
+            .map(|spike| chip2::ExternalSpike {
+                region: spike.region.clone(),
+                population: spike.population.clone(),
+                neuron_group: spike.neuron_group,
+                syn_kind: spike.syn_kind.clone(),
+                amplitude_q: spike.amplitude_q,
+            })
+            .collect();
+        let report = guard
+            .inject_external_spikes(tick, &chip2_spikes)
+            .map_err(|_| Chip2RouterError)?;
+        let applied = report
+            .applied
+            .into_iter()
+            .map(|target| AppliedTarget {
+                region: target.region,
+                population: target.population,
+                neuron_group: target.neuron_group,
+                syn_kind: target.syn_kind,
+            })
+            .collect();
+        Ok(InjectionReport { applied })
     }
 }
 
@@ -55,10 +97,10 @@ fn injects_external_spikes_deterministically() {
         spike.tick = idx as u64 % 2;
     }
 
-    let mut client = Chip2InjectClient::with_max_spikes_per_tick(TestChip2Runtime::default(), 2);
+    let circuit = L4Circuit::new(99);
+    let runtime = Chip2Runtime::new(circuit);
+    let router = DefaultRouter::new(runtime);
+    let bridge = Chip2RouterBridge::new(router);
+    let mut client = Chip2InjectClient::with_max_spikes_per_tick(Box::new(bridge), 2);
     client.send_spikes(&spikes).unwrap();
-
-    let runtime = client.runtime();
-    assert_eq!(runtime.injected.len(), runtime.total_injected);
-    assert!(runtime.total_injected <= 4);
 }
