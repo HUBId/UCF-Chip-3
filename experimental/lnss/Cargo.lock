@@ -760,6 +760,7 @@ dependencies = [
 name = "lnss_bluebridge"
 version = "0.1.0"
 dependencies = [
+ "lnss_core",
  "lnss_runtime",
 ]
 
