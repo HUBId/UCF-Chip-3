@@ -636,6 +636,126 @@ pub mod ucf {
             #[prost(message, optional, tag = "3")]
             pub constraints: ::core::option::Option<ConstraintsDelta>,
         }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum OperationCategory {
+            Unspecified = 0,
+            OpException = 1,
+            OpRecovery = 2,
+            OpPersist = 3,
+        }
+        impl OperationCategory {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    OperationCategory::Unspecified => "OPERATION_CATEGORY_UNSPECIFIED",
+                    OperationCategory::OpException => "OPERATION_CATEGORY_OP_EXCEPTION",
+                    OperationCategory::OpRecovery => "OPERATION_CATEGORY_OP_RECOVERY",
+                    OperationCategory::OpPersist => "OPERATION_CATEGORY_OP_PERSIST",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "OPERATION_CATEGORY_UNSPECIFIED" => Some(Self::Unspecified),
+                    "OPERATION_CATEGORY_OP_EXCEPTION" => Some(Self::OpException),
+                    "OPERATION_CATEGORY_OP_RECOVERY" => Some(Self::OpRecovery),
+                    "OPERATION_CATEGORY_OP_PERSIST" => Some(Self::OpPersist),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ApprovalAlternativeForm {
+            Unspecified = 0,
+            DoNothing = 1,
+            SimulateFirst = 2,
+            NarrowScope = 3,
+            ApplyInShadowMode = 4,
+        }
+        impl ApprovalAlternativeForm {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ApprovalAlternativeForm::Unspecified => {
+                        "APPROVAL_ALTERNATIVE_FORM_UNSPECIFIED"
+                    }
+                    ApprovalAlternativeForm::DoNothing => {
+                        "APPROVAL_ALTERNATIVE_FORM_DO_NOTHING"
+                    }
+                    ApprovalAlternativeForm::SimulateFirst => {
+                        "APPROVAL_ALTERNATIVE_FORM_SIMULATE_FIRST"
+                    }
+                    ApprovalAlternativeForm::NarrowScope => {
+                        "APPROVAL_ALTERNATIVE_FORM_NARROW_SCOPE"
+                    }
+                    ApprovalAlternativeForm::ApplyInShadowMode => {
+                        "APPROVAL_ALTERNATIVE_FORM_APPLY_IN_SHADOW_MODE"
+                    }
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "APPROVAL_ALTERNATIVE_FORM_UNSPECIFIED" => Some(Self::Unspecified),
+                    "APPROVAL_ALTERNATIVE_FORM_DO_NOTHING" => Some(Self::DoNothing),
+                    "APPROVAL_ALTERNATIVE_FORM_SIMULATE_FIRST" => Some(Self::SimulateFirst),
+                    "APPROVAL_ALTERNATIVE_FORM_NARROW_SCOPE" => Some(Self::NarrowScope),
+                    "APPROVAL_ALTERNATIVE_FORM_APPLY_IN_SHADOW_MODE" => {
+                        Some(Self::ApplyInShadowMode)
+                    }
+                    _ => None,
+                }
+            }
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ApprovalAlternative {
+            #[prost(enumeration = "ApprovalAlternativeForm", tag = "1")]
+            pub form: i32,
+            #[prost(string, tag = "2")]
+            pub label: ::prost::alloc::string::String,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ApprovalArtifactPackage {
+            #[prost(string, tag = "1")]
+            pub aap_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub session_id: ::prost::alloc::string::String,
+            #[prost(enumeration = "OperationCategory", tag = "3")]
+            pub requested_operation: i32,
+            #[prost(message, optional, tag = "4")]
+            pub ruleset_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "5")]
+            pub mapping_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "6")]
+            pub sae_pack_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "7")]
+            pub liquid_params_digest: ::core::option::Option<Digest32>,
+            #[prost(message, repeated, tag = "8")]
+            pub evidence_refs: ::prost::alloc::vec::Vec<RelatedRef>,
+            #[prost(message, repeated, tag = "9")]
+            pub alternatives: ::prost::alloc::vec::Vec<ApprovalAlternative>,
+            #[prost(message, optional, tag = "10")]
+            pub constraints: ::core::option::Option<ConstraintsDelta>,
+            #[prost(message, optional, tag = "11")]
+            pub aap_digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ApprovalDecision {
+            #[prost(string, tag = "1")]
+            pub decision_id: ::prost::alloc::string::String,
+            #[prost(string, tag = "2")]
+            pub aap_id: ::prost::alloc::string::String,
+            #[prost(enumeration = "DecisionForm", tag = "3")]
+            pub decision: i32,
+            #[prost(message, optional, tag = "4")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+            #[prost(message, optional, tag = "5")]
+            pub constraints: ::core::option::Option<ConstraintsDelta>,
+            #[prost(message, optional, tag = "6")]
+            pub approval_decision_digest: ::core::option::Option<Digest32>,
+        }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct PvgsReceipt {
             #[prost(string, tag = "1")]

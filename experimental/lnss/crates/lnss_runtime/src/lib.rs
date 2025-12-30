@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,12 +14,13 @@ use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
 };
+use lnss_approval::{approval_artifact_package_digest, build_aap_for_proposal, ApprovalContext};
 use lnss_evolve::{
     encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
     EvalVerdict, ProposalEvidence, ProposalKind,
 };
 use lnss_hooks::TapRegistry;
-use pvgs_client::PvgsClient;
+use pvgs_client::PvgsClientReader;
 use ucf_protocol::ucf;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4096;
@@ -85,6 +87,7 @@ impl Default for Limits {
 #[derive(Debug, Clone)]
 pub struct ProposalInbox {
     pub dir: PathBuf,
+    pub aap_dir: PathBuf,
     pub ticks_per_scan: u64,
     pub max_per_tick: usize,
     tick_counter: u64,
@@ -93,8 +96,11 @@ pub struct ProposalInbox {
 
 impl ProposalInbox {
     pub fn new(dir: impl AsRef<Path>) -> Self {
+        let dir = dir.as_ref().to_path_buf();
+        let aap_dir = dir.join("aap");
         Self {
-            dir: dir.as_ref().to_path_buf(),
+            dir,
+            aap_dir,
             ticks_per_scan: DEFAULT_PROPOSAL_SCAN_TICKS,
             max_per_tick: DEFAULT_PROPOSAL_MAX_PER_TICK,
             tick_counter: 0,
@@ -103,8 +109,11 @@ impl ProposalInbox {
     }
 
     pub fn with_limits(dir: impl AsRef<Path>, ticks_per_scan: u64, max_per_tick: usize) -> Self {
+        let dir = dir.as_ref().to_path_buf();
+        let aap_dir = dir.join("aap");
         Self {
-            dir: dir.as_ref().to_path_buf(),
+            dir,
+            aap_dir,
             ticks_per_scan: ticks_per_scan.max(1),
             max_per_tick: max_per_tick.max(1),
             tick_counter: 0,
@@ -122,7 +131,7 @@ impl ProposalInbox {
         eval_ctx: &EvalContext,
         base_parts: &MechIntRecordParts,
         mechint: &mut dyn MechIntWriter,
-        mut pvgs: Option<&mut (dyn PvgsClient + '_)>,
+        mut pvgs: Option<&mut (dyn PvgsClientReader + '_)>,
     ) -> Result<usize, LnssRuntimeError> {
         if !self.should_scan() {
             return Ok(0);
@@ -142,6 +151,31 @@ impl ProposalInbox {
             parts.proposal_eval_score = Some(eval.score);
             parts.proposal_verdict = Some(eval.verdict.clone());
             parts.proposal_base_evidence_digest = Some(proposal.base_evidence_digest);
+            if eval.verdict == EvalVerdict::Promising {
+                let ruleset_digest = pvgs
+                    .as_deref()
+                    .and_then(|client| client.get_current_ruleset_digest());
+                let ctx = ApprovalContext {
+                    session_id: parts.session_id.clone(),
+                    ruleset_digest,
+                    current_mapping_digest: Some(parts.mapping_digest),
+                    current_sae_pack_digest: None,
+                    current_liquid_params_digest: None,
+                    latest_scorecard_digest: None,
+                    requested_operation: ucf::v1::OperationCategory::OpException,
+                };
+                let aap = build_aap_for_proposal(&proposal, &ctx);
+                let aap_digest = approval_artifact_package_digest(&aap);
+                parts.aap_digest = Some(aap_digest);
+                if let Err(err) = fs::create_dir_all(&self.aap_dir) {
+                    return Err(LnssRuntimeError::Proposal(err.to_string()));
+                }
+                let filename = format!("aap_{}.bin", hex::encode(aap_digest));
+                let path = self.aap_dir.join(filename);
+                if let Err(err) = fs::write(path, lnss_approval::encode_aap(&aap)) {
+                    return Err(LnssRuntimeError::Proposal(err.to_string()));
+                }
+            }
             let record = MechIntRecord::new(parts);
             mechint.write_step(&record)?;
 
@@ -191,7 +225,7 @@ pub struct LnssRuntime {
     pub hooks: Box<dyn HookProvider>,
     pub sae: Box<dyn SaeBackend>,
     pub mechint: Box<dyn MechIntWriter>,
-    pub pvgs: Option<Box<dyn PvgsClient>>,
+    pub pvgs: Option<Box<dyn PvgsClientReader>>,
     pub rig: Box<dyn RigClient>,
     pub mapper: FeatureToBrainMap,
     pub limits: Limits,
@@ -233,6 +267,7 @@ pub struct MechIntRecord {
     pub proposal_eval_score: Option<i32>,
     pub proposal_verdict: Option<EvalVerdict>,
     pub proposal_base_evidence_digest: Option<[u8; 32]>,
+    pub aap_digest: Option<[u8; 32]>,
     pub record_digest: [u8; 32],
 }
 
@@ -251,6 +286,7 @@ pub struct MechIntRecordParts {
     pub proposal_eval_score: Option<i32>,
     pub proposal_verdict: Option<EvalVerdict>,
     pub proposal_base_evidence_digest: Option<[u8; 32]>,
+    pub aap_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +415,7 @@ impl MechIntRecord {
             proposal_eval_score: parts.proposal_eval_score,
             proposal_verdict: parts.proposal_verdict,
             proposal_base_evidence_digest: parts.proposal_base_evidence_digest,
+            aap_digest: parts.aap_digest,
             record_digest,
         }
     }
@@ -477,6 +514,7 @@ impl LnssRuntime {
             proposal_eval_score: None,
             proposal_verdict: None,
             proposal_base_evidence_digest: None,
+            aap_digest: None,
         };
         let mechint_record = MechIntRecord::new(mechint_parts.clone());
         self.mechint.write_step(&mechint_record)?;
@@ -669,6 +707,10 @@ fn write_optional_proposal(buf: &mut Vec<u8>, parts: &MechIntRecordParts) {
     }
     write_bool(buf, parts.proposal_base_evidence_digest.is_some());
     if let Some(digest_bytes) = parts.proposal_base_evidence_digest {
+        buf.extend_from_slice(&digest_bytes);
+    }
+    write_bool(buf, parts.aap_digest.is_some());
+    if let Some(digest_bytes) = parts.aap_digest {
         buf.extend_from_slice(&digest_bytes);
     }
 }
