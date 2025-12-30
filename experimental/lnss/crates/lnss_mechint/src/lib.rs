@@ -68,3 +68,10 @@ impl ArrowMechIntWriter {
         Self
     }
 }
+
+#[cfg(feature = "lnss-arrow")]
+impl Default for ArrowMechIntWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}

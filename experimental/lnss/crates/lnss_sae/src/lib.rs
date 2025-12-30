@@ -23,7 +23,7 @@ impl StubSaeBackend {
         let base = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
         for idx in 0..self.top_k.min(MAX_TOP_FEATURES) {
             let feature_id = base.wrapping_add(idx as u32);
-            let strength = ((digest[(idx * 2) % digest.len()] as u16) % 1001) as u16;
+            let strength = (digest[(idx * 2) % digest.len()] as u16) % 1001;
             features.push((feature_id, strength));
         }
         features
