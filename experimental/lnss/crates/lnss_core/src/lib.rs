@@ -1,0 +1,294 @@
+#![forbid(unsafe_code)]
+
+use blake3::Hasher;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub const MAX_STRING_LEN: usize = 128;
+pub const MAX_REASON_CODES: usize = 16;
+pub const MAX_TOP_FEATURES: usize = 64;
+pub const MAX_TAP_SPECS: usize = 128;
+pub const MAX_ACTIVATION_BYTES: usize = 1024 * 1024;
+pub const MAX_MAPPING_ENTRIES: usize = 4096;
+pub const MAX_OVERLAYS: usize = 16;
+
+#[derive(Debug, Error)]
+pub enum LnssCoreError {
+    #[error("string length exceeded limit")]
+    StringTooLong,
+}
+
+pub fn digest(domain: &str, bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    (*digest.as_bytes()).into()
+}
+
+fn bound_string(value: &str) -> String {
+    let mut out = value.to_string();
+    out.truncate(MAX_STRING_LEN);
+    out
+}
+
+fn write_string(buf: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    let len = bytes.len() as u32;
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+fn write_u16(buf: &mut Vec<u8>, value: u16) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureEvent {
+    pub event_id: String,
+    pub event_digest: [u8; 32],
+    pub session_id: String,
+    pub step_id: String,
+    pub hook_id: String,
+    pub top_features: Vec<(u32, u16)>,
+    pub timestamp_ms: u64,
+    pub reason_codes: Vec<String>,
+}
+
+impl FeatureEvent {
+    pub fn new(
+        session_id: &str,
+        step_id: &str,
+        hook_id: &str,
+        mut top_features: Vec<(u32, u16)>,
+        timestamp_ms: u64,
+        mut reason_codes: Vec<String>,
+    ) -> Self {
+        for (_, strength) in &mut top_features {
+            *strength = (*strength).min(1000);
+        }
+
+        top_features.sort_by(|(id_a, strength_a), (id_b, strength_b)| {
+            strength_b
+                .cmp(strength_a)
+                .then_with(|| id_a.cmp(id_b))
+        });
+        top_features.truncate(MAX_TOP_FEATURES);
+
+        reason_codes.iter_mut().for_each(|s| *s = bound_string(s));
+        reason_codes.sort();
+        reason_codes.dedup();
+        reason_codes.truncate(MAX_REASON_CODES);
+
+        let session_id = bound_string(session_id);
+        let step_id = bound_string(step_id);
+        let hook_id = bound_string(hook_id);
+
+        let event_digest = feature_event_digest(
+            &session_id,
+            &step_id,
+            &hook_id,
+            &top_features,
+            timestamp_ms,
+            &reason_codes,
+        );
+        let event_id = hex::encode(event_digest);
+
+        Self {
+            event_id,
+            event_digest,
+            session_id,
+            step_id,
+            hook_id,
+            top_features,
+            timestamp_ms,
+            reason_codes,
+        }
+    }
+}
+
+fn feature_event_digest(
+    session_id: &str,
+    step_id: &str,
+    hook_id: &str,
+    top_features: &[(u32, u16)],
+    timestamp_ms: u64,
+    reason_codes: &[String],
+) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_string(&mut buf, session_id);
+    write_string(&mut buf, step_id);
+    write_string(&mut buf, hook_id);
+    write_u64(&mut buf, timestamp_ms);
+    write_u32(&mut buf, top_features.len() as u32);
+    for (feature_id, strength_q) in top_features {
+        write_u32(&mut buf, *feature_id);
+        write_u16(&mut buf, *strength_q);
+    }
+    write_u32(&mut buf, reason_codes.len() as u32);
+    for code in reason_codes {
+        write_string(&mut buf, code);
+    }
+    digest("lnss.feature_event.v1", &buf)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TapKind {
+    ResidualStream,
+    MlpPost,
+    AttnOut,
+    Embedding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapSpec {
+    pub hook_id: String,
+    pub tap_kind: TapKind,
+    pub layer_index: u16,
+    pub tensor_name: String,
+}
+
+impl TapSpec {
+    pub fn new(hook_id: &str, tap_kind: TapKind, layer_index: u16, tensor_name: &str) -> Self {
+        Self {
+            hook_id: bound_string(hook_id),
+            tap_kind,
+            layer_index,
+            tensor_name: bound_string(tensor_name),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapFrame {
+    pub hook_id: String,
+    pub activation_digest: [u8; 32],
+    pub activation_bytes: Vec<u8>,
+}
+
+impl TapFrame {
+    pub fn new(hook_id: &str, activation_bytes: Vec<u8>) -> Self {
+        let mut bytes = activation_bytes;
+        bytes.truncate(MAX_ACTIVATION_BYTES);
+        let activation_digest = digest("lnss.tap_frame.v1", &bytes);
+        Self {
+            hook_id: bound_string(hook_id),
+            activation_digest,
+            activation_bytes: bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainTarget {
+    pub region: String,
+    pub population: String,
+    pub neuron_group: u32,
+    pub syn_kind: String,
+    pub amplitude_q: u16,
+}
+
+impl BrainTarget {
+    pub fn new(
+        region: &str,
+        population: &str,
+        neuron_group: u32,
+        syn_kind: &str,
+        amplitude_q: u16,
+    ) -> Self {
+        Self {
+            region: bound_string(region),
+            population: bound_string(population),
+            neuron_group,
+            syn_kind: bound_string(syn_kind),
+            amplitude_q: amplitude_q.min(1000),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureToBrainMap {
+    pub map_version: u32,
+    pub map_digest: [u8; 32],
+    pub entries: Vec<(u32, BrainTarget)>,
+}
+
+impl FeatureToBrainMap {
+    pub fn new(map_version: u32, mut entries: Vec<(u32, BrainTarget)>) -> Self {
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries.truncate(MAX_MAPPING_ENTRIES);
+        let map_digest = mapping_digest(map_version, &entries);
+        Self {
+            map_version,
+            map_digest,
+            entries,
+        }
+    }
+}
+
+fn mapping_digest(map_version: u32, entries: &[(u32, BrainTarget)]) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_u32(&mut buf, map_version);
+    write_u32(&mut buf, entries.len() as u32);
+    for (feature_id, target) in entries {
+        write_u32(&mut buf, *feature_id);
+        write_string(&mut buf, &target.region);
+        write_string(&mut buf, &target.population);
+        write_u32(&mut buf, target.neuron_group);
+        write_string(&mut buf, &target.syn_kind);
+        write_u16(&mut buf, target.amplitude_q);
+    }
+    digest("lnss.feature_map.v1", &buf)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmotionFieldSnapshot {
+    pub noise: String,
+    pub priority: String,
+    pub recursion_depth: String,
+    pub dwm: String,
+    pub profile: String,
+    pub overlays: Vec<String>,
+    pub top_reason_codes: Vec<String>,
+}
+
+impl EmotionFieldSnapshot {
+    pub fn new(
+        noise: &str,
+        priority: &str,
+        recursion_depth: &str,
+        dwm: &str,
+        profile: &str,
+        overlays: Vec<String>,
+        top_reason_codes: Vec<String>,
+    ) -> Self {
+        let mut overlays = overlays;
+        overlays.iter_mut().for_each(|s| *s = bound_string(s));
+        overlays.truncate(MAX_OVERLAYS);
+
+        let mut reasons = top_reason_codes;
+        reasons.iter_mut().for_each(|s| *s = bound_string(s));
+        reasons.sort();
+        reasons.dedup();
+        reasons.truncate(MAX_REASON_CODES);
+
+        Self {
+            noise: bound_string(noise),
+            priority: bound_string(priority),
+            recursion_depth: bound_string(recursion_depth),
+            dwm: bound_string(dwm),
+            profile: bound_string(profile),
+            overlays,
+            top_reason_codes: reasons,
+        }
+    }
+}
