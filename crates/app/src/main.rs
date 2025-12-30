@@ -137,7 +137,10 @@ mod lnss_cli {
     use lnss_hooks::TransformerLensPlanImport;
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::LoggingRigClient;
-    use lnss_runtime::{Limits, LnssRuntime, SaeBackend, StubHookProvider, StubLlmBackend};
+    use lnss_runtime::{
+        FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig, SaeBackend,
+        StubHookProvider, StubLlmBackend,
+    };
     use lnss_sae::StubSaeBackend;
     use serde::Deserialize;
 
@@ -203,6 +206,8 @@ mod lnss_cli {
             rig: Box::new(rig),
             mapper,
             limits: Limits::default(),
+            feedback: FeedbackConsumer::default(),
+            adaptation: MappingAdaptationConfig::default(),
         };
 
         let mods = EmotionFieldSnapshot::new(
