@@ -113,6 +113,7 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         }),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
+        pvgs: None,
         rig: Box::new(client),
         mapper,
         limits: Limits::default(),

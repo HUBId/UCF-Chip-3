@@ -4,11 +4,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapFrame, TapKind, TapSpec};
+use lnss_evolve::{
+    encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
+    ProposalEvidence, ProposalKind,
+};
 use lnss_runtime::{
     FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter,
     ProposalInbox, StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_sae::StubSaeBackend;
+use pvgs_client::{MockPvgsClient, PvgsClient};
+use ucf_protocol::ucf;
 
 #[derive(Clone, Default)]
 struct RecordingWriter {
@@ -28,6 +34,127 @@ impl MechIntWriter for RecordingWriter {
     }
 }
 
+#[derive(Clone)]
+struct SharedPvgsClient {
+    inner: Arc<Mutex<MockPvgsClient>>,
+}
+
+impl SharedPvgsClient {
+    fn new(inner: Arc<Mutex<MockPvgsClient>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl PvgsClient for SharedPvgsClient {
+    fn commit_experience_record(
+        &mut self,
+        record: ucf::v1::ExperienceRecord,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_experience_record(record)
+    }
+
+    fn commit_dlp_decision(
+        &mut self,
+        dlp: ucf::v1::DlpDecision,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_dlp_decision(dlp)
+    }
+
+    fn commit_tool_registry(
+        &mut self,
+        trc: ucf::v1::ToolRegistryContainer,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_tool_registry(trc)
+    }
+
+    fn commit_tool_onboarding_event(
+        &mut self,
+        event: ucf::v1::ToolOnboardingEvent,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_tool_onboarding_event(event)
+    }
+
+    fn commit_micro_milestone(
+        &mut self,
+        micro: ucf::v1::MicroMilestone,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_micro_milestone(micro)
+    }
+
+    fn commit_consistency_feedback(
+        &mut self,
+        feedback: ucf::v1::ConsistencyFeedback,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_consistency_feedback(feedback)
+    }
+
+    fn commit_proposal_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_proposal_evidence(payload_bytes)
+    }
+
+    fn try_commit_next_micro(
+        &mut self,
+        session_id: &str,
+    ) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .try_commit_next_micro(session_id)
+    }
+
+    fn try_commit_next_meso(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner.lock().expect("pvgs lock").try_commit_next_meso()
+    }
+
+    fn try_commit_next_macro(
+        &mut self,
+        consistency_digest: Option<[u8; 32]>,
+    ) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .try_commit_next_macro(consistency_digest)
+    }
+
+    fn get_pending_replay_plans(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_pending_replay_plans(session_id)
+    }
+
+    fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
+        self.inner.lock().expect("pvgs lock").get_pvgs_head()
+    }
+}
+
 fn temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -40,6 +167,13 @@ fn temp_dir(prefix: &str) -> PathBuf {
 
 fn write_json(path: &Path, value: serde_json::Value) {
     fs::write(path, serde_json::to_vec(&value).expect("json")).expect("write json");
+}
+
+fn proposal_id_from_payload(payload: &[u8]) -> String {
+    let len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    let start = 2;
+    let end = start + len;
+    String::from_utf8(payload[start..end].to_vec()).expect("proposal id")
 }
 
 #[test]
@@ -118,6 +252,7 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         }),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(writer),
+        pvgs: None,
         rig: Box::new(StubRigClient::default()),
         mapper,
         limits: Limits::default(),
@@ -162,4 +297,315 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
     let records_after_second = writer_handle.records();
     assert_eq!(records_after_second.len(), 5);
     assert_eq!(runtime.mapper.map_digest, mapping_digest);
+}
+
+#[test]
+fn proposal_commits_only_once_across_ticks() {
+    let dir = temp_dir("lnss_inbox_commit_once");
+    write_json(
+        &dir.join("a.json"),
+        serde_json::json!({
+            "proposal_id": "proposal-a",
+            "kind": "mapping_update",
+            "created_at_ms": 1,
+            "base_evidence_digest": vec![1; 32],
+            "payload": {
+                "type": "mapping_update",
+                "new_map_path": "maps/new.json",
+                "map_digest": vec![2; 32],
+                "change_summary": ["swap", "trim"]
+            },
+            "reason_codes": ["offline"]
+        }),
+    );
+    write_json(
+        &dir.join("b.json"),
+        serde_json::json!({
+            "proposal_id": "proposal-b",
+            "kind": "injection_limits_update",
+            "created_at_ms": 2,
+            "base_evidence_digest": vec![2; 32],
+            "payload": {
+                "type": "injection_limits_update",
+                "max_spikes_per_tick": 32,
+                "max_targets_per_spike": 4
+            },
+            "reason_codes": []
+        }),
+    );
+
+    let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
+    let tap_frame = TapFrame::new("hook-a", vec![1, 2, 3]);
+    let mapper = FeatureToBrainMap::new(
+        1,
+        vec![(
+            u32::from_le_bytes([
+                tap_frame.activation_digest[0],
+                tap_frame.activation_digest[1],
+                tap_frame.activation_digest[2],
+                tap_frame.activation_digest[3],
+            ]),
+            BrainTarget::new("v1", "pop", 1, "syn", 800),
+        )],
+    );
+
+    let pvgs_inner = Arc::new(Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+
+    let mut runtime = LnssRuntime {
+        llm: Box::new(StubLlmBackend),
+        hooks: Box::new(StubHookProvider {
+            taps: vec![tap_frame],
+        }),
+        sae: Box::new(StubSaeBackend::new(4)),
+        mechint: Box::new(RecordingWriter::default()),
+        pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
+        rig: Box::new(StubRigClient::default()),
+        mapper,
+        limits: Limits::default(),
+        feedback: FeedbackConsumer::default(),
+        adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 10)),
+    };
+
+    let mods = EmotionFieldSnapshot::new(
+        "calm",
+        "low",
+        "shallow",
+        "baseline",
+        "stable",
+        vec![],
+        vec![],
+    );
+
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &mods,
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+
+    runtime
+        .run_step(
+            "session-1",
+            "step-2",
+            b"input",
+            &mods,
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_evidence_bytes
+        .len();
+    assert_eq!(committed, 2);
+}
+
+#[test]
+fn proposal_commits_are_bounded_and_ordered() {
+    let dir = temp_dir("lnss_inbox_bounded");
+    for idx in 0..20 {
+        write_json(
+            &dir.join(format!("{idx:02}.json")),
+            serde_json::json!({
+                "proposal_id": format!("proposal-{idx:02}"),
+                "kind": "injection_limits_update",
+                "created_at_ms": idx,
+                "base_evidence_digest": vec![idx as u8; 32],
+                "payload": {
+                    "type": "injection_limits_update",
+                    "max_spikes_per_tick": 32,
+                    "max_targets_per_spike": 4
+                },
+                "reason_codes": []
+            }),
+        );
+    }
+
+    let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
+    let tap_frame = TapFrame::new("hook-a", vec![1, 2, 3]);
+    let mapper = FeatureToBrainMap::new(
+        1,
+        vec![(
+            u32::from_le_bytes([
+                tap_frame.activation_digest[0],
+                tap_frame.activation_digest[1],
+                tap_frame.activation_digest[2],
+                tap_frame.activation_digest[3],
+            ]),
+            BrainTarget::new("v1", "pop", 1, "syn", 800),
+        )],
+    );
+
+    let pvgs_inner = Arc::new(Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+
+    let mut runtime = LnssRuntime {
+        llm: Box::new(StubLlmBackend),
+        hooks: Box::new(StubHookProvider {
+            taps: vec![tap_frame],
+        }),
+        sae: Box::new(StubSaeBackend::new(4)),
+        mechint: Box::new(RecordingWriter::default()),
+        pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
+        rig: Box::new(StubRigClient::default()),
+        mapper,
+        limits: Limits::default(),
+        feedback: FeedbackConsumer::default(),
+        adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
+    };
+
+    let mods = EmotionFieldSnapshot::new(
+        "calm",
+        "low",
+        "shallow",
+        "baseline",
+        "stable",
+        vec![],
+        vec![],
+    );
+
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &mods,
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_evidence_bytes
+        .clone();
+    assert_eq!(committed.len(), 5);
+    let committed_ids = committed
+        .iter()
+        .map(|payload| proposal_id_from_payload(payload))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        committed_ids,
+        vec![
+            "PROPOSAL-00",
+            "PROPOSAL-01",
+            "PROPOSAL-02",
+            "PROPOSAL-03",
+            "PROPOSAL-04"
+        ]
+    );
+}
+
+#[test]
+fn local_pvgs_receives_expected_payload() {
+    let dir = temp_dir("lnss_inbox_payload");
+    write_json(
+        &dir.join("a.json"),
+        serde_json::json!({
+            "proposal_id": "proposal-a",
+            "kind": "injection_limits_update",
+            "created_at_ms": 1,
+            "base_evidence_digest": vec![1; 32],
+            "payload": {
+                "type": "injection_limits_update",
+                "max_spikes_per_tick": 32,
+                "max_targets_per_spike": 4
+            },
+            "reason_codes": []
+        }),
+    );
+
+    let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
+    let tap_frame = TapFrame::new("hook-a", vec![1, 2, 3]);
+    let mapper = FeatureToBrainMap::new(
+        1,
+        vec![(
+            u32::from_le_bytes([
+                tap_frame.activation_digest[0],
+                tap_frame.activation_digest[1],
+                tap_frame.activation_digest[2],
+                tap_frame.activation_digest[3],
+            ]),
+            BrainTarget::new("v1", "pop", 1, "syn", 800),
+        )],
+    );
+
+    let pvgs_inner = Arc::new(Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+
+    let mut runtime = LnssRuntime {
+        llm: Box::new(StubLlmBackend),
+        hooks: Box::new(StubHookProvider {
+            taps: vec![tap_frame],
+        }),
+        sae: Box::new(StubSaeBackend::new(4)),
+        mechint: Box::new(RecordingWriter::default()),
+        pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
+        rig: Box::new(StubRigClient::default()),
+        mapper,
+        limits: Limits::default(),
+        feedback: FeedbackConsumer::default(),
+        adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
+    };
+
+    let mods = EmotionFieldSnapshot::new(
+        "calm",
+        "low",
+        "shallow",
+        "baseline",
+        "stable",
+        vec![],
+        vec![],
+    );
+
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &mods,
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+
+    let proposals = load_proposals(&dir).expect("load proposals");
+    let proposal = proposals.first().expect("proposal");
+    let eval_ctx = EvalContext {
+        latest_feedback_digest: None,
+        trace_run_digest: None,
+        metrics: Vec::new(),
+    };
+    let eval = evaluate(proposal, &eval_ctx);
+    let payload_digest = proposal_payload_digest(&proposal.payload).expect("payload digest");
+    let evidence = ProposalEvidence {
+        proposal_id: proposal.proposal_id.clone(),
+        proposal_digest: proposal.proposal_digest,
+        kind: ProposalKind::InjectionLimitsUpdate,
+        base_evidence_digest: [0u8; 32],
+        payload_digest,
+        created_at_ms: proposal.created_at_ms,
+        score: eval.score,
+        verdict: eval.verdict,
+        reason_codes: vec!["RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string()],
+    };
+    let expected = encode_proposal_evidence(&evidence);
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_evidence_bytes
+        .clone();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0], expected);
 }
