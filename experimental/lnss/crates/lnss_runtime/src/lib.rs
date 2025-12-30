@@ -122,7 +122,7 @@ impl ProposalInbox {
         eval_ctx: &EvalContext,
         base_parts: &MechIntRecordParts,
         mechint: &mut dyn MechIntWriter,
-        mut pvgs: Option<&mut dyn PvgsClient>,
+        mut pvgs: Option<&mut (dyn PvgsClient + '_)>,
     ) -> Result<usize, LnssRuntimeError> {
         if !self.should_scan() {
             return Ok(0);
