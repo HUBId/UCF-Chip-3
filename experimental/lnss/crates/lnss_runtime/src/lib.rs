@@ -13,8 +13,13 @@ use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
 };
-use lnss_evolve::{evaluate, load_proposals, EvalContext, EvalVerdict, ProposalKind};
+use lnss_evolve::{
+    encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
+    EvalVerdict, ProposalEvidence, ProposalKind,
+};
 use lnss_hooks::TapRegistry;
+use pvgs_client::PvgsClient;
+use ucf_protocol::ucf;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4096;
 pub const DEFAULT_MAX_SPIKES: usize = 2048;
@@ -83,7 +88,7 @@ pub struct ProposalInbox {
     pub ticks_per_scan: u64,
     pub max_per_tick: usize,
     tick_counter: u64,
-    seen: BTreeSet<[u8; 32]>,
+    committed: BTreeSet<[u8; 32]>,
 }
 
 impl ProposalInbox {
@@ -93,7 +98,7 @@ impl ProposalInbox {
             ticks_per_scan: DEFAULT_PROPOSAL_SCAN_TICKS,
             max_per_tick: DEFAULT_PROPOSAL_MAX_PER_TICK,
             tick_counter: 0,
-            seen: BTreeSet::new(),
+            committed: BTreeSet::new(),
         }
     }
 
@@ -103,7 +108,7 @@ impl ProposalInbox {
             ticks_per_scan: ticks_per_scan.max(1),
             max_per_tick: max_per_tick.max(1),
             tick_counter: 0,
-            seen: BTreeSet::new(),
+            committed: BTreeSet::new(),
         }
     }
 
@@ -117,6 +122,7 @@ impl ProposalInbox {
         eval_ctx: &EvalContext,
         base_parts: &MechIntRecordParts,
         mechint: &mut dyn MechIntWriter,
+        mut pvgs: Option<&mut (dyn PvgsClient + '_)>,
     ) -> Result<usize, LnssRuntimeError> {
         if !self.should_scan() {
             return Ok(0);
@@ -126,7 +132,7 @@ impl ProposalInbox {
 
         let mut processed = 0usize;
         for proposal in proposals {
-            if self.seen.contains(&proposal.proposal_digest) {
+            if self.committed.contains(&proposal.proposal_digest) {
                 continue;
             }
             let eval = evaluate(&proposal, eval_ctx);
@@ -138,7 +144,39 @@ impl ProposalInbox {
             parts.proposal_base_evidence_digest = Some(proposal.base_evidence_digest);
             let record = MechIntRecord::new(parts);
             mechint.write_step(&record)?;
-            self.seen.insert(proposal.proposal_digest);
+
+            let base_evidence_digest = eval_ctx.latest_feedback_digest.unwrap_or([0u8; 32]);
+            let mut reason_codes = eval.reason_codes.clone();
+            if base_evidence_digest == [0u8; 32] {
+                reason_codes.push("RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string());
+            }
+            let payload_digest = proposal_payload_digest(&proposal.payload)
+                .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
+            let evidence = ProposalEvidence {
+                proposal_id: proposal.proposal_id.clone(),
+                proposal_digest: proposal.proposal_digest,
+                kind: proposal.kind.clone(),
+                base_evidence_digest,
+                payload_digest,
+                created_at_ms: proposal.created_at_ms,
+                score: eval.score,
+                verdict: eval.verdict,
+                reason_codes,
+            };
+            let payload_bytes = encode_proposal_evidence(&evidence);
+
+            let accepted = match pvgs.as_deref_mut() {
+                Some(client) => match client.commit_proposal_evidence(payload_bytes) {
+                    Ok(receipt) => receipt.status == ucf::v1::ReceiptStatus::Accepted as i32,
+                    Err(_) => false,
+                },
+                None => true,
+            };
+
+            if accepted {
+                self.committed.insert(proposal.proposal_digest);
+            }
+
             processed += 1;
             if processed >= self.max_per_tick {
                 break;
@@ -153,6 +191,7 @@ pub struct LnssRuntime {
     pub hooks: Box<dyn HookProvider>,
     pub sae: Box<dyn SaeBackend>,
     pub mechint: Box<dyn MechIntWriter>,
+    pub pvgs: Option<Box<dyn PvgsClient>>,
     pub rig: Box<dyn RigClient>,
     pub mapper: FeatureToBrainMap,
     pub limits: Limits,
@@ -461,7 +500,12 @@ impl LnssRuntime {
                     })
                     .unwrap_or_default(),
             };
-            inbox.ingest(&eval_ctx, &mechint_parts, self.mechint.as_mut())?;
+            inbox.ingest(
+                &eval_ctx,
+                &mechint_parts,
+                self.mechint.as_mut(),
+                self.pvgs.as_deref_mut(),
+            )?;
         }
 
         Ok(RuntimeOutput {

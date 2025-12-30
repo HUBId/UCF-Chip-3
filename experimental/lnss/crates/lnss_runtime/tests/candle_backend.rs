@@ -114,6 +114,7 @@ fn candle_end_to_end_is_deterministic() {
         hooks: Box::new(TapRegistryProvider::new(registry.clone(), true)),
         sae: Box::new(CandleSaeBackend::new(4)),
         mechint: Box::new(mechint),
+        pvgs: None,
         rig: Box::new(rig),
         mapper,
         limits: Limits::default(),

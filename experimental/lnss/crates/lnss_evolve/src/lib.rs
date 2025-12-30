@@ -73,6 +73,19 @@ pub struct EvalResult {
     pub reason_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalEvidence {
+    pub proposal_id: String,
+    pub proposal_digest: [u8; 32],
+    pub kind: ProposalKind,
+    pub base_evidence_digest: [u8; 32],
+    pub payload_digest: [u8; 32],
+    pub created_at_ms: u64,
+    pub score: i32,
+    pub verdict: EvalVerdict,
+    pub reason_codes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EvalVerdict {
@@ -208,6 +221,49 @@ pub fn evaluate(proposal: &Proposal, ctx: &EvalContext) -> EvalResult {
     }
 }
 
+pub fn proposal_payload_digest(payload: &ProposalPayload) -> Result<[u8; 32], LnssEvolveError> {
+    let value = serde_json::to_value(payload)?;
+    let bytes = canonical_json_bytes(value);
+    Ok(domain_digest("UCF:LNSS:PROPOSAL_PAYLOAD", &bytes))
+}
+
+pub fn encode_proposal_evidence(pe: &ProposalEvidence) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    let proposal_id = bound_string(&pe.proposal_id, MAX_STRING_LEN).to_uppercase();
+    let proposal_id_bytes = proposal_id.as_bytes();
+    let proposal_id_len = u16::try_from(proposal_id_bytes.len()).unwrap_or(u16::MAX);
+    buf.extend_from_slice(&proposal_id_len.to_le_bytes());
+    buf.extend_from_slice(&proposal_id_bytes[..proposal_id_len as usize]);
+
+    buf.extend_from_slice(&pe.proposal_digest);
+    buf.push(proposal_kind_tag(&pe.kind));
+    buf.extend_from_slice(&pe.base_evidence_digest);
+    buf.extend_from_slice(&pe.payload_digest);
+    buf.extend_from_slice(&pe.created_at_ms.to_le_bytes());
+    buf.extend_from_slice(&pe.score.to_le_bytes());
+    buf.push(eval_verdict_tag(&pe.verdict));
+
+    let mut reason_codes = normalize_reason_codes(pe.reason_codes.clone())
+        .into_iter()
+        .map(|code| code.to_uppercase())
+        .collect::<Vec<_>>();
+    reason_codes.sort();
+    reason_codes.truncate(MAX_REASON_CODES);
+    let reason_count = u16::try_from(reason_codes.len()).unwrap_or(u16::MAX);
+    buf.extend_from_slice(&reason_count.to_le_bytes());
+
+    for code in reason_codes.into_iter().take(reason_count as usize) {
+        let code = bound_string(&code, MAX_REASON_CODE_LEN);
+        let code_bytes = code.as_bytes();
+        let code_len = u16::try_from(code_bytes.len()).unwrap_or(u16::MAX);
+        buf.extend_from_slice(&code_len.to_le_bytes());
+        buf.extend_from_slice(&code_bytes[..code_len as usize]);
+    }
+
+    buf
+}
+
 fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError> {
     let mut reason_codes = normalize_reason_codes(input.reason_codes);
     reason_codes.truncate(MAX_REASON_CODES);
@@ -314,6 +370,23 @@ fn normalize_reason_codes(reason_codes: Vec<String>) -> Vec<String> {
     codes.sort();
     codes.dedup();
     codes
+}
+
+fn proposal_kind_tag(kind: &ProposalKind) -> u8 {
+    match kind {
+        ProposalKind::MappingUpdate => 1,
+        ProposalKind::SaePackUpdate => 2,
+        ProposalKind::LiquidParamsUpdate => 3,
+        ProposalKind::InjectionLimitsUpdate => 4,
+    }
+}
+
+fn eval_verdict_tag(verdict: &EvalVerdict) -> u8 {
+    match verdict {
+        EvalVerdict::Promising => 1,
+        EvalVerdict::Neutral => 2,
+        EvalVerdict::Risky => 3,
+    }
 }
 
 fn normalize_metrics(metrics: &[(String, i64)]) -> BTreeMap<String, i64> {
@@ -517,6 +590,30 @@ mod tests {
 
         let first = evaluate(&proposal, &ctx);
         let second = evaluate(&proposal, &ctx);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn encoding_is_deterministic() {
+        let payload = ProposalPayload::InjectionLimitsUpdate {
+            max_spikes_per_tick: 32,
+            max_targets_per_spike: 4,
+        };
+        let payload_digest = proposal_payload_digest(&payload).expect("payload digest");
+        let evidence = ProposalEvidence {
+            proposal_id: "proposal-1".to_string(),
+            proposal_digest: [9; 32],
+            kind: ProposalKind::InjectionLimitsUpdate,
+            base_evidence_digest: [0; 32],
+            payload_digest,
+            created_at_ms: 123,
+            score: 7,
+            verdict: EvalVerdict::Neutral,
+            reason_codes: vec!["rc.beta".to_string(), "RC.ALPHA".to_string()],
+        };
+
+        let first = encode_proposal_evidence(&evidence);
+        let second = encode_proposal_evidence(&evidence);
         assert_eq!(first, second);
     }
 }

@@ -166,6 +166,7 @@ fn end_to_end_stub_pipeline() {
         }),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
+        pvgs: None,
         rig: Box::new(rig),
         mapper,
         limits: Limits::default(),

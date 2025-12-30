@@ -174,6 +174,16 @@ pub trait PvgsClient: Send + Sync {
         feedback: ucf::v1::ConsistencyFeedback,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError>;
 
+    fn commit_proposal_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let _ = payload_bytes;
+        Err(PvgsClientError::CommitFailed(
+            "proposal evidence not supported".to_string(),
+        ))
+    }
+
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError>;
 
     fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError>;
@@ -520,6 +530,13 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(receipt)
     }
 
+    fn commit_proposal_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        Ok(self.pvgs.append_proposal_evidence(payload_bytes))
+    }
+
     fn try_commit_next_micro(&mut self, _session_id: &str) -> Result<bool, PvgsClientError> {
         Ok(false)
     }
@@ -750,6 +767,7 @@ pub struct LocalPvgsClient {
     pub committed_micro_bytes: Vec<Vec<u8>>,
     pub committed_consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     pub committed_consistency_bytes: Vec<Vec<u8>>,
+    pub committed_proposal_evidence_bytes: Vec<Vec<u8>>,
     pub micro_chunk_size: u64,
     pub micro_last_end: u64,
     pub try_commit_meso_outcome: Option<bool>,
@@ -789,6 +807,7 @@ impl Default for LocalPvgsClient {
             committed_micro_bytes: Vec::new(),
             committed_consistency_feedback: Vec::new(),
             committed_consistency_bytes: Vec::new(),
+            committed_proposal_evidence_bytes: Vec::new(),
             micro_chunk_size: 256,
             micro_last_end: 0,
             try_commit_meso_outcome: None,
@@ -1185,6 +1204,44 @@ impl PvgsClient for LocalPvgsClient {
             tool_profile_digest: None,
             reject_reason_codes: if status == ucf::v1::ReceiptStatus::Rejected {
                 reject_reason_codes
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
+    fn commit_proposal_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let digest = ucf_protocol::digest_proto("UCF:HASH:PROPOSAL_EVIDENCE", &payload_bytes);
+        self.committed_proposal_evidence_bytes.push(payload_bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!(
+                "pvgs-local-proposal-evidence-{}",
+                self.committed_proposal_evidence_bytes.len()
+            ),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            status: self.default_status.into(),
+            action_digest: None,
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if self.default_status == ucf::v1::ReceiptStatus::Rejected {
+                self.reject_reason_codes.clone()
             } else {
                 Vec::new()
             },
@@ -1818,6 +1875,13 @@ impl PvgsClient for MockPvgsClient {
 
         self.committed_consistency_feedback.push(feedback.clone());
         self.local.commit_consistency_feedback(feedback)
+    }
+
+    fn commit_proposal_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.local.commit_proposal_evidence(payload_bytes)
     }
 
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError> {
