@@ -1,0 +1,4 @@
+[
+  {"hook_id": "blocks.0.hook_resid", "tap_kind": "residual_stream", "layer_index": 0, "tensor_name": "resid"},
+  {"hook_id": "blocks.1.hook_mlp", "tap_kind": "mlp_post", "layer_index": 1, "tensor_name": "mlp"}
+]

@@ -1,0 +1,55 @@
+[package]
+name = "lnss"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+members = [
+    "crates/lnss_core",
+    "crates/lnss_runtime",
+    "crates/lnss_hooks",
+    "crates/lnss_sae",
+    "crates/lnss_mechint",
+    "crates/lnss_rig",
+    "crates/lnss_bluebridge",
+    "crates/lnss_evolve",
+]
+resolver = "2"
+
+[features]
+default = []
+lnss = [
+    "lnss_core",
+    "lnss_runtime",
+    "lnss_hooks",
+    "lnss_sae",
+    "lnss_mechint",
+    "lnss_rig",
+    "lnss_bluebridge",
+    "lnss_evolve",
+]
+lnss-candle = ["lnss_sae/lnss-candle"]
+lnss-burn = ["lnss_runtime/lnss-burn"]
+lnss-arrow = ["lnss_mechint/lnss-arrow"]
+lnss-pyo3 = ["lnss_bluebridge/lnss-pyo3"]
+lnss-cxx = ["lnss_bluebridge/lnss-cxx"]
+lnss-rig-sdk = ["lnss_rig/lnss-rig-sdk"]
+
+[dependencies]
+lnss_core = { path = "crates/lnss_core", optional = true }
+lnss_runtime = { path = "crates/lnss_runtime", optional = true }
+lnss_hooks = { path = "crates/lnss_hooks", optional = true }
+lnss_sae = { path = "crates/lnss_sae", optional = true }
+lnss_mechint = { path = "crates/lnss_mechint", optional = true }
+lnss_rig = { path = "crates/lnss_rig", optional = true }
+lnss_bluebridge = { path = "crates/lnss_bluebridge", optional = true }
+lnss_evolve = { path = "crates/lnss_evolve", optional = true }
+
+[workspace.dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+hex = "0.4"

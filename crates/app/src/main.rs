@@ -72,9 +72,132 @@ fn main() {
             run_scheduler(&session_id, ticks);
             return;
         }
+
+        if subcommand == "lnss-run" {
+            args.next();
+            let mut session_id: Option<String> = None;
+            let mut steps: Option<u64> = None;
+            let mut tap_plan: Option<String> = None;
+            let mut map_path: Option<String> = None;
+
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--session" => session_id = args.next(),
+                    "--steps" => steps = args.next().and_then(|value| value.parse::<u64>().ok()),
+                    "--tap-plan" => tap_plan = args.next(),
+                    "--map" => map_path = args.next(),
+                    _ => {
+                        eprintln!(
+                            "usage: app lnss-run --session <id> --steps <n> --tap-plan <file> --map <file>"
+                        );
+                        process::exit(1);
+                    }
+                }
+            }
+
+            let (Some(session_id), Some(steps), Some(tap_plan), Some(map_path)) =
+                (session_id, steps, tap_plan, map_path)
+            else {
+                eprintln!(
+                    "usage: app lnss-run --session <id> --steps <n> --tap-plan <file> --map <file>"
+                );
+                process::exit(1);
+            };
+
+            #[cfg(feature = "lnss")]
+            {
+                lnss_cli::run_lnss(&session_id, steps, &tap_plan, &map_path);
+                return;
+            }
+
+            #[cfg(not(feature = "lnss"))]
+            {
+                eprintln!("lnss feature not enabled");
+                process::exit(1);
+            }
+        }
     }
 
     run_demo();
+}
+
+#[cfg(feature = "lnss")]
+mod lnss_cli {
+    use std::fs;
+
+    use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap};
+    use lnss_hooks::TransformerLensPlanImport;
+    use lnss_mechint::JsonlMechIntWriter;
+    use lnss_rig::LoggingRigClient;
+    use lnss_runtime::{Limits, LnssRuntime, StubHookProvider, StubLlmBackend};
+    use lnss_sae::StubSaeBackend;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct MapEntry {
+        feature_id: u32,
+        target: BrainTarget,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct MapFile {
+        map_version: u32,
+        entries: Vec<MapEntry>,
+    }
+
+    pub fn run_lnss(session_id: &str, steps: u64, tap_plan: &str, map_path: &str) {
+        let plan = TransformerLensPlanImport::from_path(tap_plan)
+            .unwrap_or_else(|err| panic!("tap plan load failed: {err}"));
+
+        let map_bytes =
+            fs::read_to_string(map_path).unwrap_or_else(|err| panic!("map load failed: {err}"));
+        let map_file: MapFile = serde_json::from_str(&map_bytes)
+            .unwrap_or_else(|err| panic!("map parse failed: {err}"));
+        let entries = map_file
+            .entries
+            .into_iter()
+            .map(|entry| (entry.feature_id, entry.target))
+            .collect();
+        let mapper = FeatureToBrainMap::new(map_file.map_version, entries);
+
+        let mechint = JsonlMechIntWriter::new("experimental/lnss/out/mechint.jsonl", Some(8192))
+            .expect("mechint writer");
+        let rig =
+            LoggingRigClient::new("experimental/lnss/out/rig.jsonl", 8192).expect("rig writer");
+
+        let mut runtime = LnssRuntime {
+            llm: Box::new(StubLlmBackend),
+            hooks: Box::new(StubHookProvider { taps: Vec::new() }),
+            sae: Box::new(StubSaeBackend::new(8)),
+            mechint: Box::new(mechint),
+            rig: Box::new(rig),
+            mapper,
+            limits: Limits::default(),
+        };
+
+        let mods = EmotionFieldSnapshot::new(
+            "calm",
+            "low",
+            "shallow",
+            "baseline",
+            "stable",
+            vec!["overlay".to_string()],
+            vec!["reason".to_string()],
+        );
+
+        for step in 0..steps {
+            let input = format!("lnss-step-{step}").into_bytes();
+            runtime
+                .run_step(
+                    session_id,
+                    &format!("step-{step}"),
+                    &input,
+                    &mods,
+                    &plan.specs,
+                )
+                .expect("lnss step");
+        }
+    }
 }
 
 fn run_inspect_dump(session_id: &str) {

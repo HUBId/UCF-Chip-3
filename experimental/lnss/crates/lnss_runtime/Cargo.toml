@@ -1,0 +1,22 @@
+[package]
+name = "lnss_runtime"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+lnss-burn = []
+
+[dependencies]
+lnss_core = { path = "../lnss_core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+lnss_hooks = { path = "../lnss_hooks" }
+lnss_sae = { path = "../lnss_sae" }
+lnss_mechint = { path = "../lnss_mechint" }
+lnss_rig = { path = "../lnss_rig" }

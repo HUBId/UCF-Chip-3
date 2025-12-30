@@ -19,8 +19,29 @@ scheduler = { path = "../scheduler" }
 ed25519-dalek = "2"
 trm = { path = "../trm" }
 ckm_orchestrator = { path = "../ckm_orchestrator" }
+lnss_runtime = { path = "../../experimental/lnss/crates/lnss_runtime", optional = true }
+lnss_sae = { path = "../../experimental/lnss/crates/lnss_sae", optional = true }
+lnss_hooks = { path = "../../experimental/lnss/crates/lnss_hooks", optional = true }
+lnss_mechint = { path = "../../experimental/lnss/crates/lnss_mechint", optional = true }
+lnss_rig = { path = "../../experimental/lnss/crates/lnss_rig", optional = true }
+lnss_core = { path = "../../experimental/lnss/crates/lnss_core", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 chip4-pvgs = { path = "../../tests/chip4-pvgs" }
 ucf-test-utils = { path = "../test-utils" }
 walkdir = "2"
+
+[features]
+default = []
+lnss = [
+    "lnss_runtime",
+    "lnss_sae",
+    "lnss_hooks",
+    "lnss_mechint",
+    "lnss_rig",
+    "lnss_core",
+    "serde",
+    "serde_json",
+]
