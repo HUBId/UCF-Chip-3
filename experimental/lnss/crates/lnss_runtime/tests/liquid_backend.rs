@@ -43,8 +43,8 @@ mod liquid_backend_tests {
         assert_eq!(output_a, output_b);
 
         let spec = TapSpec::new("liquid-state", TapKind::LiquidState, 0, "state");
-        let taps_a = hooks_a.collect_taps(&[spec.clone()]);
-        let taps_b = hooks_b.collect_taps(&[spec]);
+        let taps_a = hooks_a.collect_taps(std::slice::from_ref(&spec));
+        let taps_b = hooks_b.collect_taps(std::slice::from_ref(&spec));
         assert_eq!(taps_a.len(), 1);
         assert_eq!(taps_a[0].activation_digest, taps_b[0].activation_digest);
         assert_eq!(taps_a[0].activation_bytes, taps_b[0].activation_bytes);
@@ -102,8 +102,8 @@ mod liquid_backend_tests {
         backend_high.infer_step(b"mods", &mods_high);
         backend_low.infer_step(b"mods", &mods_low);
         let spec = TapSpec::new("liquid-state", TapKind::LiquidState, 0, "state");
-        let taps_high = hooks_high.collect_taps(&[spec.clone()]);
-        let taps_low = hooks_low.collect_taps(&[spec]);
+        let taps_high = hooks_high.collect_taps(std::slice::from_ref(&spec));
+        let taps_low = hooks_low.collect_taps(std::slice::from_ref(&spec));
         let high_val = i16::from_le_bytes([
             taps_high[0].activation_bytes[0],
             taps_high[0].activation_bytes[1],
@@ -126,8 +126,8 @@ mod liquid_backend_tests {
             input_proj_dim: 6,
             mods_gain_q: 100,
         };
-        let mut backend_a = LiquidOdeBackend::new(cfg.clone());
-        let mut backend_b = LiquidOdeBackend::new(cfg);
+        let backend_a = LiquidOdeBackend::new(cfg.clone());
+        let backend_b = LiquidOdeBackend::new(cfg);
         let hooks_a = backend_a.tap_provider();
         let hooks_b = backend_b.tap_provider();
         let tap_specs = vec![TapSpec::new(
