@@ -145,8 +145,7 @@ impl ProposalInbox {
             let record = MechIntRecord::new(parts);
             mechint.write_step(&record)?;
 
-            let base_evidence_digest =
-                eval_ctx.latest_feedback_digest.unwrap_or([0u8; 32]);
+            let base_evidence_digest = eval_ctx.latest_feedback_digest.unwrap_or([0u8; 32]);
             let mut reason_codes = eval.reason_codes.clone();
             if base_evidence_digest == [0u8; 32] {
                 reason_codes.push("RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string());
@@ -168,9 +167,7 @@ impl ProposalInbox {
 
             let accepted = match pvgs.as_deref_mut() {
                 Some(client) => match client.commit_proposal_evidence(payload_bytes) {
-                    Ok(receipt) => {
-                        receipt.status == ucf::v1::ReceiptStatus::Accepted as i32
-                    }
+                    Ok(receipt) => receipt.status == ucf::v1::ReceiptStatus::Accepted as i32,
                     Err(_) => false,
                 },
                 None => true,
