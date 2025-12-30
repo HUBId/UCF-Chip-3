@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use lnss_core::{FeatureEvent, TapFrame, MAX_TOP_FEATURES};
+use lnss_core::{digest, FeatureEvent, TapFrame, MAX_TOP_FEATURES};
 use lnss_runtime::SaeBackend;
 #[derive(Debug, Clone)]
 pub struct SaeWeightsRef {
@@ -32,7 +32,12 @@ impl StubSaeBackend {
 
 impl SaeBackend for StubSaeBackend {
     fn infer_features(&mut self, tap: &TapFrame) -> FeatureEvent {
-        let features = self.pseudo_features(&tap.activation_digest);
+        let digest_bytes = if tap.activation_bytes.is_empty() {
+            tap.activation_digest
+        } else {
+            digest("lnss.sae.stub.v1", &tap.activation_bytes)
+        };
+        let features = self.pseudo_features(&digest_bytes);
         FeatureEvent::new(
             "session-stub",
             "step-stub",

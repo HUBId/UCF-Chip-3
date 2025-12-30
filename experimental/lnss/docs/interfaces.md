@@ -47,7 +47,7 @@ struct FeatureEvent {
 ### TapSpec / TapFrame
 
 ```
-enum TapKind { ResidualStream, MlpPost, AttnOut, Embedding }
+enum TapKind { ResidualStream, MlpPost, AttnOut, Embedding, LiquidState }
 
 struct TapSpec {
   hook_id: String

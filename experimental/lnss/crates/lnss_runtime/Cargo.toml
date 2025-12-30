@@ -7,8 +7,9 @@ publish = false
 
 [features]
 default = []
-lnss-burn = []
+lnss-burn = ["burn", "bincode"]
 lnss-candle = []
+lnss-liquid-ode = ["lnss-burn"]
 
 [dependencies]
 lnss_core = { path = "../lnss_core" }
@@ -16,6 +17,8 @@ lnss_hooks = { path = "../lnss_hooks" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+burn = { version = "0.12", default-features = false, optional = true }
+bincode = { version = "=2.0.0-rc.3", features = ["serde"], optional = true }
 
 [dev-dependencies]
 lnss_hooks = { path = "../lnss_hooks" }

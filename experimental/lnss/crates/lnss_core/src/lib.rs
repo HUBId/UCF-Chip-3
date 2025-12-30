@@ -145,6 +145,7 @@ pub enum TapKind {
     MlpPost,
     AttnOut,
     Embedding,
+    LiquidState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
