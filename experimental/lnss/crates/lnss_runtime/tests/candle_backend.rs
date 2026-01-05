@@ -9,8 +9,8 @@ use lnss_core::{
 };
 use lnss_hooks::TapRegistry;
 use lnss_mechint::JsonlMechIntWriter;
-use lnss_rlm::RlmController;
 use lnss_rig::InMemoryRigClient;
+use lnss_rlm::RlmController;
 use lnss_runtime::{
     CandleConfig, CandleLlmBackend, FeedbackConsumer, HookProvider, Limits, LlmBackend,
     LnssRuntime, MappingAdaptationConfig, TapRegistryProvider,

@@ -6,8 +6,8 @@ use lnss_core::{
 };
 use lnss_hooks::TapPlan;
 use lnss_mechint::JsonlMechIntWriter;
-use lnss_rlm::RlmController;
 use lnss_rig::InMemoryRigClient;
+use lnss_rlm::RlmController;
 use lnss_runtime::{
     map_features_to_spikes, BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime,
     MappingAdaptationConfig, MappingAdaptationSuggestion, MechIntRecord, MechIntRecordParts,
@@ -265,10 +265,13 @@ fn core_outputs_are_deterministic() {
         rlm: Box::new(RlmController::default()),
         orchestrator: lnss_core::CoreOrchestrator::default(),
         sae: Box::new(StubSaeBackend::new(4)),
-        mechint: Box::new(JsonlMechIntWriter::new(
-            std::env::temp_dir().join("lnss_core_det_a.jsonl"),
-            Some(1024),
-        ).expect("jsonl writer")),
+        mechint: Box::new(
+            JsonlMechIntWriter::new(
+                std::env::temp_dir().join("lnss_core_det_a.jsonl"),
+                Some(1024),
+            )
+            .expect("jsonl writer"),
+        ),
         pvgs: None,
         rig: Box::new(InMemoryRigClient::default()),
         mapper: mapper.clone(),
@@ -306,10 +309,13 @@ fn core_outputs_are_deterministic() {
         rlm: Box::new(RlmController::default()),
         orchestrator: lnss_core::CoreOrchestrator::default(),
         sae: Box::new(StubSaeBackend::new(4)),
-        mechint: Box::new(JsonlMechIntWriter::new(
-            std::env::temp_dir().join("lnss_core_det_b.jsonl"),
-            Some(1024),
-        ).expect("jsonl writer")),
+        mechint: Box::new(
+            JsonlMechIntWriter::new(
+                std::env::temp_dir().join("lnss_core_det_b.jsonl"),
+                Some(1024),
+            )
+            .expect("jsonl writer"),
+        ),
         pvgs: None,
         rig: Box::new(InMemoryRigClient::default()),
         mapper,

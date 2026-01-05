@@ -12,8 +12,8 @@ mod real_sae_backend_tests {
         RecursionPolicy, TapKind, TapSpec,
     };
     use lnss_mechint::JsonlMechIntWriter;
-    use lnss_rlm::RlmController;
     use lnss_rig::InMemoryRigClient;
+    use lnss_rlm::RlmController;
     use lnss_runtime::{
         FeedbackConsumer, Limits, LiquidOdeBackend, LiquidOdeConfig, LnssRuntime,
         MappingAdaptationConfig,

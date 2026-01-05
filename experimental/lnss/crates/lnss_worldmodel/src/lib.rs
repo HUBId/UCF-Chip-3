@@ -12,8 +12,8 @@ impl WorldModelCore for WorldModelCoreStub {
             digest_concat("WM:ENC", &[&input.input_digest, &input.prev_world_digest]);
         let pred_world_digest =
             digest_concat("WM:PRED", &[&world_state_digest, &input.action_digest]);
-        let prediction_error_score = hamming_distance(&world_state_digest, &pred_world_digest)
-            .min(1024) as i32;
+        let prediction_error_score =
+            hamming_distance(&world_state_digest, &pred_world_digest).min(1024) as i32;
         WorldModelOutput {
             world_state_digest,
             prediction_error_score,

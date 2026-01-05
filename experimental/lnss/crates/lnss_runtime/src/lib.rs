@@ -17,7 +17,7 @@ pub use lnss_core::BiophysFeedbackSnapshot;
 use lnss_core::TapKind;
 use lnss_core::{
     digest, BrainTarget, CognitiveCore, ContextBundle, ControlIntentClass, CoreOrchestrator,
-    CoreStepOutput, EmotionFieldSnapshot, FeedbackAnomalyFlags, FeatureEvent, FeatureToBrainMap,
+    CoreStepOutput, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, FeedbackAnomalyFlags,
     PolicyMode, RecursionDirective, RecursionDirectiveKind, RecursionPolicy, RlmCore, RlmInput,
     TapFrame, TapSpec, WorldModelCore, WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES,
     MAX_REASON_CODES, MAX_RLM_DIRECTIVES, MAX_STRING_LEN, MAX_TOP_FEATURES,
@@ -2081,9 +2081,7 @@ fn emotion_snapshot_digest(snapshot: &EmotionFieldSnapshot) -> [u8; 32] {
     digest("lnss.emotion_snapshot.v1", &buf)
 }
 
-fn feedback_anomaly_flags(
-    snapshot: Option<&BiophysFeedbackSnapshot>,
-) -> FeedbackAnomalyFlags {
+fn feedback_anomaly_flags(snapshot: Option<&BiophysFeedbackSnapshot>) -> FeedbackAnomalyFlags {
     match snapshot {
         Some(snapshot) => FeedbackAnomalyFlags {
             event_queue_overflowed: snapshot.event_queue_overflowed,

@@ -46,8 +46,8 @@ impl RlmCore for RlmController {
             ));
         }
 
-        let allow_followup = input.policy_mode != PolicyMode::Strict
-            && input.current_depth < self.config.max_depth;
+        let allow_followup =
+            input.policy_mode != PolicyMode::Strict && input.current_depth < self.config.max_depth;
         if allow_followup
             && matches!(
                 input.control_intent,
