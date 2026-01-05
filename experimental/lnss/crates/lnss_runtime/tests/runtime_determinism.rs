@@ -193,6 +193,8 @@ fn end_to_end_stub_pipeline() {
         event_sink: None,
         shadow: lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = EmotionFieldSnapshot::new(

@@ -130,6 +130,8 @@ mod real_sae_backend_tests {
             event_sink: None,
             shadow: lnss_runtime::ShadowConfig::default(),
             shadow_rig: None,
+            trace_state: None,
+            seen_trace_digests: std::collections::BTreeSet::new(),
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -156,6 +158,8 @@ mod real_sae_backend_tests {
             event_sink: None,
             shadow: lnss_runtime::ShadowConfig::default(),
             shadow_rig: None,
+            trace_state: None,
+            seen_trace_digests: std::collections::BTreeSet::new(),
         };
 
         let mods = base_mods();

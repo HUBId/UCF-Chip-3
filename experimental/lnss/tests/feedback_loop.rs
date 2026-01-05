@@ -130,6 +130,8 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         event_sink: None,
         shadow: lnss::lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = EmotionFieldSnapshot::new(

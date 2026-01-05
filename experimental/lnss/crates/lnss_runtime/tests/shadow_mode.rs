@@ -148,6 +148,8 @@ fn shadow_mapping_reduces_amplitude_and_improves_score() {
             shadow_injection_limits: None,
         },
         shadow_rig: Some(Box::new(Chip2RigClient::new(11))),
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = EmotionFieldSnapshot::new(
