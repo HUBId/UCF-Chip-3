@@ -9,6 +9,7 @@ publish = false
 members = [
     "crates/chip2",
     "crates/lnss_core",
+    "crates/lnss_worldmodulation",
     "crates/lnss_worldmodel",
     "crates/lnss_rlm",
     "crates/lnss_runtime",
@@ -26,6 +27,7 @@ resolver = "2"
 default = []
 lnss = [
     "lnss_core",
+    "lnss_worldmodulation",
     "lnss_worldmodel",
     "lnss_rlm",
     "lnss_runtime",
@@ -52,6 +54,7 @@ lnss-chip2-bridge = ["lnss_bluebridge/lnss-chip2-bridge"]
 
 [dependencies]
 lnss_core = { path = "crates/lnss_core", optional = true }
+lnss_worldmodulation = { path = "crates/lnss_worldmodulation", optional = true }
 lnss_worldmodel = { path = "crates/lnss_worldmodel", optional = true }
 lnss_rlm = { path = "crates/lnss_rlm", optional = true }
 lnss_runtime = { path = "crates/lnss_runtime", optional = true }

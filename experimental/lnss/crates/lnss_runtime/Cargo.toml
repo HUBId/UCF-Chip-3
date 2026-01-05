@@ -13,6 +13,7 @@ lnss-liquid-ode = ["lnss-burn"]
 
 [dependencies]
 lnss_core = { path = "../lnss_core" }
+lnss_worldmodulation = { path = "../lnss_worldmodulation" }
 lnss_worldmodel = { path = "../lnss_worldmodel" }
 lnss_rlm = { path = "../lnss_rlm" }
 lnss_approval = { path = "../lnss_approval" }

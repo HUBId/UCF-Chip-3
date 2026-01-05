@@ -11,12 +11,14 @@ pub use lnss_hooks;
 #[cfg(feature = "lnss")]
 pub use lnss_mechint;
 #[cfg(feature = "lnss")]
-pub use lnss_rlm;
-#[cfg(feature = "lnss")]
 pub use lnss_rig;
+#[cfg(feature = "lnss")]
+pub use lnss_rlm;
 #[cfg(feature = "lnss")]
 pub use lnss_runtime;
 #[cfg(feature = "lnss")]
 pub use lnss_sae;
 #[cfg(feature = "lnss")]
 pub use lnss_worldmodel;
+#[cfg(feature = "lnss")]
+pub use lnss_worldmodulation;

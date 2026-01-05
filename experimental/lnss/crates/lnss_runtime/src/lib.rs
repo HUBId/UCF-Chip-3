@@ -28,6 +28,10 @@ use lnss_evolve::{
     EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind, TraceVerdict,
 };
 use lnss_hooks::TapRegistry;
+use lnss_worldmodulation::{
+    compute_world_modulation, BaseLimits, WorldModulationPlan, RC_WM_MODULATION_ACTIVE,
+    RC_WM_PRED_ERROR_HIGH,
+};
 use pvgs_client::PvgsClientReader;
 use ucf_protocol::canonical_bytes;
 use ucf_protocol::ucf;
@@ -38,6 +42,7 @@ pub const DEFAULT_MAX_TAPS: usize = 128;
 pub const DEFAULT_MAX_MECHINT_BYTES: usize = 8192;
 pub const MAX_TAP_SAMPLE_BYTES: usize = 4096;
 pub const DEFAULT_MAX_TARGETS_PER_SPIKE: u32 = 64;
+pub const DEFAULT_AMPLITUDE_CAP_Q: u16 = 1000;
 pub const DEFAULT_PROPOSAL_SCAN_TICKS: u64 = 50;
 pub const DEFAULT_PROPOSAL_MAX_PER_TICK: usize = 5;
 pub const DEFAULT_APPROVAL_SCAN_TICKS: u64 = 10;
@@ -56,7 +61,6 @@ const RC_TRACE_PROMISING: &str = "RC.GV.TRACE.PROMISING";
 const RC_TRACE_NEUTRAL: &str = "RC.GV.TRACE.NEUTRAL";
 const RC_TRACE_RISKY: &str = "RC.GV.TRACE.RISKY";
 const RC_AAP_BLOCKED_BY_TRACE: &str = "RC.GV.AAP.BLOCKED_BY_TRACE";
-const RC_WM_PRED_ERROR_HIGH: &str = "RC.GV.WM.PRED_ERROR_HIGH";
 const RC_RLM_RECURSION_STEP: &str = "RC.GV.RLM.RECURSION_STEP";
 const RC_RLM_RECURSION_BLOCKED_BY_POLICY: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_POLICY";
 
@@ -238,6 +242,13 @@ impl Default for InjectionLimits {
             max_targets_per_spike: DEFAULT_MAX_TARGETS_PER_SPIKE,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveWorldLimits {
+    pub max_spikes_per_tick: u32,
+    pub amplitude_cap_q: u16,
+    pub fanout_cap: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -631,6 +642,13 @@ pub struct MechIntRecord {
     pub mapping_digest: [u8; 32],
     pub world_state_digest: [u8; 32],
     pub prediction_error_score: i32,
+    pub wm_prediction_error_score: i32,
+    pub wm_modulation_plan: WorldModulationPlan,
+    pub wm_modulation_reason_codes: Vec<String>,
+    pub max_spikes_eff: u32,
+    pub top_k_eff: u16,
+    pub amp_cap_eff: u16,
+    pub fanout_eff: u32,
     pub rlm_directives: Vec<RecursionDirective>,
     pub self_state_digest: [u8; 32],
     pub reason_codes: Vec<String>,
@@ -664,6 +682,13 @@ pub struct MechIntRecordParts {
     pub mapping_digest: [u8; 32],
     pub world_state_digest: [u8; 32],
     pub prediction_error_score: i32,
+    pub wm_prediction_error_score: i32,
+    pub wm_modulation_plan: WorldModulationPlan,
+    pub wm_modulation_reason_codes: Vec<String>,
+    pub max_spikes_eff: u32,
+    pub top_k_eff: u16,
+    pub amp_cap_eff: u16,
+    pub fanout_eff: u32,
     pub rlm_directives: Vec<RecursionDirective>,
     pub self_state_digest: [u8; 32],
     pub reason_codes: Vec<String>,
@@ -795,6 +820,15 @@ impl MechIntRecord {
         parts.reason_codes.sort();
         parts.reason_codes.dedup();
         parts.reason_codes.truncate(MAX_REASON_CODES);
+        parts
+            .wm_modulation_reason_codes
+            .iter_mut()
+            .for_each(|code| {
+                *code = bound_string(code);
+            });
+        parts.wm_modulation_reason_codes.sort();
+        parts.wm_modulation_reason_codes.dedup();
+        parts.wm_modulation_reason_codes.truncate(MAX_REASON_CODES);
         if parts.rlm_directives.len() > MAX_RLM_DIRECTIVES {
             parts.rlm_directives.truncate(MAX_RLM_DIRECTIVES);
         }
@@ -816,6 +850,13 @@ impl MechIntRecord {
             mapping_digest: parts.mapping_digest,
             world_state_digest: parts.world_state_digest,
             prediction_error_score: parts.prediction_error_score,
+            wm_prediction_error_score: parts.wm_prediction_error_score,
+            wm_modulation_plan: parts.wm_modulation_plan,
+            wm_modulation_reason_codes: parts.wm_modulation_reason_codes,
+            max_spikes_eff: parts.max_spikes_eff,
+            top_k_eff: parts.top_k_eff,
+            amp_cap_eff: parts.amp_cap_eff,
+            fanout_eff: parts.fanout_eff,
             rlm_directives: parts.rlm_directives,
             self_state_digest: parts.self_state_digest,
             reason_codes: parts.reason_codes,
@@ -851,6 +892,19 @@ fn record_digest(parts: &MechIntRecordParts) -> [u8; 32] {
     buf.extend_from_slice(&parts.mapping_digest);
     buf.extend_from_slice(&parts.world_state_digest);
     write_i32(&mut buf, parts.prediction_error_score);
+    write_i32(&mut buf, parts.wm_prediction_error_score);
+    write_u16(&mut buf, parts.wm_modulation_plan.feature_top_k_scale_q);
+    write_u16(&mut buf, parts.wm_modulation_plan.spike_budget_scale_q);
+    write_u16(&mut buf, parts.wm_modulation_plan.amplitude_cap_scale_q);
+    write_u16(&mut buf, parts.wm_modulation_plan.fanout_cap_scale_q);
+    buf.extend_from_slice(&(parts.wm_modulation_reason_codes.len() as u32).to_le_bytes());
+    for code in &parts.wm_modulation_reason_codes {
+        write_string(&mut buf, code);
+    }
+    write_u32(&mut buf, parts.max_spikes_eff);
+    write_u16(&mut buf, parts.top_k_eff);
+    write_u16(&mut buf, parts.amp_cap_eff);
+    write_u32(&mut buf, parts.fanout_eff);
     buf.extend_from_slice(&parts.self_state_digest);
     buf.extend_from_slice(&(parts.rlm_directives.len() as u32).to_le_bytes());
     for directive in &parts.rlm_directives {
@@ -997,6 +1051,15 @@ impl LnssRuntime {
         self.last_action_digest = digest("lnss.action_bytes.v1", &action_bytes);
         let prediction_error_score = orchestration.world_output.prediction_error_score;
         let rlm_directives = orchestration.rlm_output.recursion_directives;
+        let base_limits_for_plan = BaseLimits {
+            top_k_base: MAX_TOP_FEATURES,
+            max_spikes_per_tick: self.injection_limits.max_spikes_per_tick,
+            amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+            fanout_cap: self.injection_limits.max_targets_per_spike,
+        };
+        let world_modulation_plan =
+            compute_world_modulation(prediction_error_score, &base_limits_for_plan);
+        let wm_modulation_reason_codes = world_modulation_plan.reason_codes.clone();
         let mut reason_codes = Vec::new();
         if prediction_error_score > self.pred_error_threshold {
             reason_codes.push(RC_WM_PRED_ERROR_HIGH.to_string());
@@ -1007,15 +1070,42 @@ impl LnssRuntime {
         if orchestration.recursion_blocked {
             reason_codes.push(RC_RLM_RECURSION_BLOCKED_BY_POLICY.to_string());
         }
+        if wm_modulation_reason_codes
+            .iter()
+            .any(|code| code == RC_WM_MODULATION_ACTIVE)
+        {
+            reason_codes.push(RC_WM_MODULATION_ACTIVE.to_string());
+        }
 
         let mut feature_events = Vec::new();
+        let mut top_k_eff = 1usize;
         for tap in &taps {
-            let event = self.sae.infer_features(tap);
+            let mut event = self.sae.infer_features(tap);
+            let event_top_k_base = event.top_features.len().max(1);
+            let event_top_k_eff = effective_top_k(
+                event_top_k_base,
+                world_modulation_plan.feature_top_k_scale_q,
+            );
+            top_k_eff = top_k_eff.max(event_top_k_eff);
+            event.top_features.truncate(event_top_k_eff);
             feature_events.push(event);
         }
 
-        let mut spikes = map_features_to_spikes(&self.mapper, &feature_events);
-        spikes.truncate(self.limits.max_spikes);
+        let effective_limits = apply_world_modulation_limits(
+            &self.injection_limits,
+            DEFAULT_AMPLITUDE_CAP_Q,
+            &world_modulation_plan,
+        );
+        let max_spikes_eff = effective_limits
+            .max_spikes_per_tick
+            .min(self.limits.max_spikes as u32);
+        let spike_result = map_features_to_spikes_with_limits(
+            &self.mapper,
+            &feature_events,
+            &effective_limits,
+            max_spikes_eff as usize,
+        );
+        let spikes = spike_result.spikes;
         self.rig.send_spikes(&spikes)?;
         if let Some(snapshot) = self.rig.poll_feedback() {
             self.feedback.ingest(snapshot);
@@ -1040,6 +1130,13 @@ impl LnssRuntime {
             mapping_digest: self.mapper.map_digest,
             world_state_digest: orchestration.world_output.world_state_digest,
             prediction_error_score,
+            wm_prediction_error_score: prediction_error_score,
+            wm_modulation_plan: world_modulation_plan.clone(),
+            wm_modulation_reason_codes: wm_modulation_reason_codes.clone(),
+            max_spikes_eff,
+            top_k_eff: top_k_eff as u16,
+            amp_cap_eff: effective_limits.amplitude_cap_q,
+            fanout_eff: effective_limits.fanout_cap,
             rlm_directives: rlm_directives.clone(),
             self_state_digest: orchestration.rlm_output.self_state_digest,
             reason_codes,
@@ -1062,6 +1159,10 @@ impl LnssRuntime {
             shadow_evidence: None,
         };
 
+        let effective_injection_limits = InjectionLimits {
+            max_spikes_per_tick: max_spikes_eff,
+            max_targets_per_spike: effective_limits.fanout_cap,
+        };
         let shadow_output = if self.shadow.enabled {
             self.shadow.validate(
                 &self.mapper,
@@ -1075,20 +1176,42 @@ impl LnssRuntime {
                 .shadow_injection_limits
                 .as_ref()
                 .unwrap_or(&self.injection_limits);
-            let mut shadow_spikes = map_features_to_spikes(shadow_mapping, &feature_events);
-            shadow_spikes.truncate(self.limits.max_spikes);
-            apply_injection_limits(&mut shadow_spikes, shadow_limits);
+            let shadow_effective_limits = apply_world_modulation_limits(
+                shadow_limits,
+                DEFAULT_AMPLITUDE_CAP_Q,
+                &world_modulation_plan,
+            );
+            let shadow_max_spikes_eff = shadow_effective_limits
+                .max_spikes_per_tick
+                .min(self.limits.max_spikes as u32);
+            let shadow_spike_result = map_features_to_spikes_with_limits(
+                shadow_mapping,
+                &feature_events,
+                &shadow_effective_limits,
+                shadow_max_spikes_eff as usize,
+            );
+            let shadow_spikes = shadow_spike_result.spikes;
 
             let shadow_feedback_snapshot = if let Some(shadow_rig) = self.shadow_rig.as_mut() {
                 shadow_rig.send_spikes(&shadow_spikes)?;
                 shadow_rig.poll_feedback()
             } else {
-                Some(predict_feedback_snapshot(&shadow_spikes, shadow_limits))
+                let shadow_injection_limits = InjectionLimits {
+                    max_spikes_per_tick: shadow_max_spikes_eff,
+                    max_targets_per_spike: shadow_effective_limits.fanout_cap,
+                };
+                Some(predict_feedback_snapshot(
+                    &shadow_spikes,
+                    &shadow_injection_limits,
+                ))
             };
 
-            let active_feedback_snapshot = feedback_snapshot
-                .clone()
-                .or_else(|| Some(predict_feedback_snapshot(&spikes, &self.injection_limits)));
+            let active_feedback_snapshot = feedback_snapshot.clone().or_else(|| {
+                Some(predict_feedback_snapshot(
+                    &spikes,
+                    &effective_injection_limits,
+                ))
+            });
 
             if let (Some(active_feedback), Some(shadow_feedback)) = (
                 active_feedback_snapshot.as_ref(),
@@ -1503,27 +1626,113 @@ impl ProposalApplier for LnssRuntime {
     }
 }
 
-pub fn map_features_to_spikes(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpikeBudgetResult {
+    pub spikes: Vec<BrainSpike>,
+    pub dropped: usize,
+}
+
+pub fn effective_top_k(base_top_k: usize, scale_q: u16) -> usize {
+    let base_top_k = base_top_k.max(1);
+    let scaled = ((base_top_k as u32) * (scale_q as u32) / 1000) as usize;
+    scaled.clamp(1, base_top_k)
+}
+
+pub fn apply_world_modulation_limits(
+    base_limits: &InjectionLimits,
+    amplitude_cap_q: u16,
+    plan: &WorldModulationPlan,
+) -> EffectiveWorldLimits {
+    EffectiveWorldLimits {
+        max_spikes_per_tick: scaled_u32(base_limits.max_spikes_per_tick, plan.spike_budget_scale_q)
+            .max(1)
+            .min(base_limits.max_spikes_per_tick),
+        amplitude_cap_q: scaled_u16(amplitude_cap_q, plan.amplitude_cap_scale_q)
+            .max(1)
+            .min(amplitude_cap_q),
+        fanout_cap: scaled_u32(base_limits.max_targets_per_spike, plan.fanout_cap_scale_q)
+            .max(1)
+            .min(base_limits.max_targets_per_spike),
+    }
+}
+
+pub fn map_features_to_spikes_with_limits(
     mapper: &FeatureToBrainMap,
     feature_events: &[FeatureEvent],
-) -> Vec<BrainSpike> {
-    let mut spikes = Vec::new();
+    limits: &EffectiveWorldLimits,
+    max_spikes_cap: usize,
+) -> SpikeBudgetResult {
+    let mut candidates = Vec::new();
     let mut entries = mapper.entries.clone();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by(|(feature_a, target_a), (feature_b, target_b)| {
+        feature_a
+            .cmp(feature_b)
+            .then_with(|| target_a.region.cmp(&target_b.region))
+            .then_with(|| target_a.population.cmp(&target_b.population))
+            .then_with(|| target_a.neuron_group.cmp(&target_b.neuron_group))
+            .then_with(|| target_a.syn_kind.cmp(&target_b.syn_kind))
+            .then_with(|| target_a.amplitude_q.cmp(&target_b.amplitude_q))
+    });
     entries.truncate(MAX_MAPPING_ENTRIES);
 
     for event in feature_events {
         for (feature_id, strength_q) in event.top_features.iter().take(MAX_TOP_FEATURES) {
+            let mut fanout = 0u32;
             for (_, target) in entries.iter().filter(|(id, _)| id == feature_id) {
+                if fanout >= limits.fanout_cap {
+                    break;
+                }
                 let scaled = ((*strength_q as u32) * (target.amplitude_q as u32) / 1000) as u16;
-                if scaled > 0 {
-                    spikes.push(BrainSpike::new(target.clone(), 0, scaled));
+                let capped = scaled.min(limits.amplitude_cap_q);
+                if capped > 0 {
+                    candidates.push(SpikeCandidate {
+                        spike: BrainSpike::new(target.clone(), 0, capped),
+                        priority_q: *strength_q,
+                        feature_id: *feature_id,
+                    });
+                    fanout = fanout.saturating_add(1);
                 }
             }
         }
     }
 
-    spikes
+    candidates.sort_by(|a, b| {
+        b.priority_q
+            .cmp(&a.priority_q)
+            .then_with(|| b.spike.amplitude_q.cmp(&a.spike.amplitude_q))
+            .then_with(|| a.feature_id.cmp(&b.feature_id))
+            .then_with(|| a.spike.target.region.cmp(&b.spike.target.region))
+            .then_with(|| a.spike.target.population.cmp(&b.spike.target.population))
+            .then_with(|| {
+                a.spike
+                    .target
+                    .neuron_group
+                    .cmp(&b.spike.target.neuron_group)
+            })
+            .then_with(|| a.spike.target.syn_kind.cmp(&b.spike.target.syn_kind))
+            .then_with(|| a.spike.target.amplitude_q.cmp(&b.spike.target.amplitude_q))
+    });
+
+    let max_spikes_eff = limits.max_spikes_per_tick.max(1).min(max_spikes_cap as u32) as usize;
+    let dropped = candidates.len().saturating_sub(max_spikes_eff);
+    let spikes = candidates
+        .into_iter()
+        .take(max_spikes_eff)
+        .map(|candidate| candidate.spike)
+        .collect();
+    SpikeBudgetResult { spikes, dropped }
+}
+
+pub fn map_features_to_spikes(
+    mapper: &FeatureToBrainMap,
+    feature_events: &[FeatureEvent],
+) -> Vec<BrainSpike> {
+    let limits = EffectiveWorldLimits {
+        max_spikes_per_tick: u32::MAX,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        fanout_cap: u32::MAX,
+    };
+    map_features_to_spikes_with_limits(mapper, feature_events, &limits, usize::MAX).spikes
 }
 
 pub fn apply_injection_limits(spikes: &mut Vec<BrainSpike>, limits: &InjectionLimits) {
@@ -1531,6 +1740,21 @@ pub fn apply_injection_limits(spikes: &mut Vec<BrainSpike>, limits: &InjectionLi
     if spikes.len() > max_spikes {
         spikes.truncate(max_spikes);
     }
+}
+
+#[derive(Debug, Clone)]
+struct SpikeCandidate {
+    spike: BrainSpike,
+    priority_q: u16,
+    feature_id: u32,
+}
+
+fn scaled_u32(base: u32, scale_q: u16) -> u32 {
+    ((base as u64) * (scale_q as u64) / 1000) as u32
+}
+
+fn scaled_u16(base: u16, scale_q: u16) -> u16 {
+    ((base as u32) * (scale_q as u32) / 1000) as u16
 }
 
 fn score_shadow(

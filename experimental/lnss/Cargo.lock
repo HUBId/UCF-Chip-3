@@ -913,6 +913,7 @@ dependencies = [
  "lnss_runtime",
  "lnss_sae",
  "lnss_worldmodel",
+ "lnss_worldmodulation",
  "serde_json",
 ]
 
@@ -1018,6 +1019,7 @@ dependencies = [
  "lnss_rlm",
  "lnss_sae",
  "lnss_worldmodel",
+ "lnss_worldmodulation",
  "prost",
  "pvgs_client",
  "serde",
@@ -1044,6 +1046,14 @@ name = "lnss_worldmodel"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "lnss_core",
+ "serde",
+]
+
+[[package]]
+name = "lnss_worldmodulation"
+version = "0.1.0"
+dependencies = [
  "lnss_core",
  "serde",
 ]
