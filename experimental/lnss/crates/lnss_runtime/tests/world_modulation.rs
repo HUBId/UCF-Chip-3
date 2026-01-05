@@ -73,7 +73,7 @@ fn build_runtime(prediction_error_score: i32, mapper: FeatureToBrainMap) -> Lnss
         rlm: Box::new(RlmController::default()),
         orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(FixedSaeBackend::new(vec![(1, 900), (2, 800), (3, 700)])),
-        mechint: Box::new(RecordingWriter::default()),
+        mechint: Box::new(RecordingWriter),
         pvgs: None,
         rig: Box::new(lnss_runtime::StubRigClient::default()),
         mapper,
@@ -135,7 +135,7 @@ fn modulation_is_deterministic_for_same_inputs() {
     );
 
     let SpikeBudgetResult { spikes: first, .. } =
-        map_features_to_spikes_with_limits(&mapper, &[event.clone()], &effective, 12);
+        map_features_to_spikes_with_limits(&mapper, std::slice::from_ref(&event), &effective, 12);
     let SpikeBudgetResult { spikes: second, .. } =
         map_features_to_spikes_with_limits(&mapper, &[event], &effective, 12);
 
@@ -183,10 +183,14 @@ fn high_prediction_error_reduces_spike_budget() {
         &high_plan,
     );
 
-    let low_spikes =
-        map_features_to_spikes_with_limits(&mapper, &[event.clone()], &low_effective, 10)
-            .spikes
-            .len();
+    let low_spikes = map_features_to_spikes_with_limits(
+        &mapper,
+        std::slice::from_ref(&event),
+        &low_effective,
+        10,
+    )
+    .spikes
+    .len();
     let high_spikes = map_features_to_spikes_with_limits(&mapper, &[event], &high_effective, 10)
         .spikes
         .len();
