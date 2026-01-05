@@ -3,14 +3,16 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use lnss_approval::{
-    approval_artifact_package_digest, build_aap_for_proposal, load_approval_decisions,
-    ApprovalContext,
+    approval_artifact_package_digest, build_aap_for_proposal, compute_activation_digest,
+    encode_activation, load_approval_decisions, ActivationInjectionLimits, ActivationStatus,
+    ApprovalContext, ProposalActivationEvidenceLocal,
 };
 pub use lnss_core::BiophysFeedbackSnapshot;
 #[cfg(feature = "lnss-liquid-ode")]
@@ -39,6 +41,9 @@ pub const DEFAULT_APPROVAL_SCAN_TICKS: u64 = 10;
 pub const DEFAULT_APPROVAL_MAX_PER_TICK: usize = 1;
 pub const FILE_DIGEST_DOMAIN: &str = "lnss.file.bytes.v1";
 pub const LIQUID_PARAMS_DOMAIN: &str = "lnss.liquid.params.v1";
+const ACTIVATION_ID_PREFIX_LEN: usize = 8;
+const RC_PROPOSAL_ACTIVATED: &str = "RC.GV.PROPOSAL.ACTIVATED";
+const RC_PROPOSAL_REJECTED: &str = "RC.GV.PROPOSAL.REJECTED";
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -290,6 +295,7 @@ pub struct ApprovalInbox {
     pub max_per_tick: usize,
     tick_counter: u64,
     seen_approval_digests: BTreeSet<[u8; 32]>,
+    seen_activation_digests: BTreeSet<[u8; 32]>,
     state_path: PathBuf,
     state: ActivationState,
 }
@@ -349,6 +355,7 @@ impl ApprovalInbox {
             max_per_tick: DEFAULT_APPROVAL_MAX_PER_TICK,
             tick_counter: 0,
             seen_approval_digests: BTreeSet::new(),
+            seen_activation_digests: BTreeSet::new(),
             state_path,
             state,
         })
@@ -367,6 +374,14 @@ impl ApprovalInbox {
         self.state = state;
         persist_activation_state(&self.state_path, &self.state)?;
         Ok(())
+    }
+
+    fn has_seen_activation(&self, digest: &[u8; 32]) -> bool {
+        self.seen_activation_digests.contains(digest)
+    }
+
+    fn mark_activation_seen(&mut self, digest: [u8; 32]) {
+        self.seen_activation_digests.insert(digest);
     }
 
     fn next_activation(&mut self) -> Result<Option<ActivationPlan>, LnssRuntimeError> {
@@ -417,25 +432,12 @@ impl ApprovalInbox {
             });
         }
 
-        let priorities = [
-            ProposalKind::MappingUpdate,
-            ProposalKind::SaePackUpdate,
-            ProposalKind::LiquidParamsUpdate,
-            ProposalKind::InjectionLimitsUpdate,
-        ];
-
-        for kind in priorities {
-            if let Some(plan) = candidates
-                .iter()
-                .find(|plan| plan.proposal.kind == kind)
-                .cloned()
-            {
-                self.seen_approval_digests.insert(plan.approval_digest);
-                return Ok(Some(plan));
-            }
+        candidates.sort_by(|a, b| a.approval_digest.cmp(&b.approval_digest));
+        let plan = candidates.into_iter().next();
+        if let Some(ref plan) = plan {
+            self.seen_approval_digests.insert(plan.approval_digest);
         }
-
-        Ok(None)
+        Ok(plan)
     }
 }
 
@@ -455,6 +457,7 @@ pub struct LnssRuntime {
     pub adaptation: MappingAdaptationConfig,
     pub proposal_inbox: Option<ProposalInbox>,
     pub approval_inbox: Option<ApprovalInbox>,
+    pub activation_now_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,6 +500,8 @@ pub struct MechIntRecord {
     pub active_sae_pack_digest: Option<[u8; 32]>,
     pub active_liquid_params_digest: Option<[u8; 32]>,
     pub active_injection_limits: Option<InjectionLimits>,
+    pub activation_digest: Option<[u8; 32]>,
+    pub committed_to_pvgs: Option<bool>,
     pub record_digest: [u8; 32],
 }
 
@@ -522,6 +527,8 @@ pub struct MechIntRecordParts {
     pub active_sae_pack_digest: Option<[u8; 32]>,
     pub active_liquid_params_digest: Option<[u8; 32]>,
     pub active_injection_limits: Option<InjectionLimits>,
+    pub activation_digest: Option<[u8; 32]>,
+    pub committed_to_pvgs: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +664,8 @@ impl MechIntRecord {
             active_sae_pack_digest: parts.active_sae_pack_digest,
             active_liquid_params_digest: parts.active_liquid_params_digest,
             active_injection_limits: parts.active_injection_limits,
+            activation_digest: parts.activation_digest,
+            committed_to_pvgs: parts.committed_to_pvgs,
             record_digest,
         }
     }
@@ -763,6 +772,8 @@ impl LnssRuntime {
             active_sae_pack_digest: None,
             active_liquid_params_digest: None,
             active_injection_limits: None,
+            activation_digest: None,
+            committed_to_pvgs: None,
         };
         let mechint_record = MechIntRecord::new(mechint_parts.clone());
         self.mechint.write_step(&mechint_record)?;
@@ -837,6 +848,53 @@ impl LnssRuntime {
         };
 
         let outcome = self.apply_activation_plan(&plan, &current_state);
+        let activation_status = match outcome.result {
+            ActivationResult::Applied => ActivationStatus::Applied,
+            ActivationResult::Rejected => ActivationStatus::Rejected,
+        };
+        let activation_id = activation_id_for(plan.proposal.proposal_digest, plan.approval_digest);
+        let mut activation =
+            ProposalActivationEvidenceLocal {
+                activation_id,
+                proposal_digest: plan.proposal.proposal_digest,
+                approval_digest: plan.approval_digest,
+                status: activation_status,
+                active_mapping_digest: outcome.state.active_mapping_digest,
+                active_sae_pack_digest: outcome.state.active_sae_pack_digest,
+                active_liquid_params_digest: outcome.state.active_liquid_params_digest,
+                active_injection_limits: outcome.state.active_injection_limits.as_ref().map(
+                    |limits| ActivationInjectionLimits {
+                        max_spikes_per_tick: limits.max_spikes_per_tick,
+                        max_targets_per_spike: limits.max_targets_per_spike,
+                    },
+                ),
+                created_at_ms: self.activation_now_ms.unwrap_or_else(current_time_ms),
+                reason_codes: vec![match outcome.result {
+                    ActivationResult::Applied => RC_PROPOSAL_ACTIVATED.to_string(),
+                    ActivationResult::Rejected => RC_PROPOSAL_REJECTED.to_string(),
+                }],
+                activation_digest: [0u8; 32],
+            };
+        compute_activation_digest(&mut activation);
+        let activation_payload = encode_activation(&activation);
+        let mut committed_to_pvgs = None;
+        let mut activation_digest = None;
+        if let Some(inbox) = self.approval_inbox.as_mut() {
+            activation_digest = Some(activation.activation_digest);
+            if inbox.has_seen_activation(&activation.activation_digest) {
+                committed_to_pvgs = Some(false);
+            } else {
+                let committed = match self.pvgs.as_deref_mut() {
+                    Some(client) => match client.commit_proposal_activation(activation_payload) {
+                        Ok(receipt) => receipt.status == ucf::v1::ReceiptStatus::Accepted as i32,
+                        Err(_) => false,
+                    },
+                    None => false,
+                };
+                committed_to_pvgs = Some(committed);
+                inbox.mark_activation_seen(activation.activation_digest);
+            }
+        }
 
         let mut activation_parts = base_parts.clone();
         activation_parts.proposal_digest = Some(plan.proposal.proposal_digest);
@@ -848,10 +906,11 @@ impl LnssRuntime {
         activation_parts.active_sae_pack_digest = outcome.state.active_sae_pack_digest;
         activation_parts.active_liquid_params_digest = outcome.state.active_liquid_params_digest;
         activation_parts.active_injection_limits = outcome.state.active_injection_limits.clone();
+        activation_parts.activation_digest = activation_digest;
+        activation_parts.committed_to_pvgs = committed_to_pvgs;
         let activation_record = MechIntRecord::new(activation_parts);
         self.mechint.write_step(&activation_record)?;
 
-        // TODO: emit PVGS activation evidence once ProposalActivationAppend is available.
         if let Some(inbox) = self.approval_inbox.as_mut() {
             inbox.set_state(outcome.state)?;
         }
@@ -1137,6 +1196,19 @@ fn is_tightening_constraint(entry: &str) -> bool {
         || lower.contains("increase simulate")
 }
 
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn activation_id_for(proposal_digest: [u8; 32], approval_digest: [u8; 32]) -> String {
+    let proposal_prefix = hex::encode(&proposal_digest[..ACTIVATION_ID_PREFIX_LEN]);
+    let approval_prefix = hex::encode(&approval_digest[..ACTIVATION_ID_PREFIX_LEN]);
+    format!("act:{proposal_prefix}:{approval_prefix}")
+}
+
 fn load_pending_aaps(
     dir: impl AsRef<Path>,
 ) -> Result<std::collections::BTreeMap<String, PendingAap>, LnssRuntimeError> {
@@ -1309,6 +1381,14 @@ fn write_optional_activation(buf: &mut Vec<u8>, parts: &MechIntRecordParts) {
     if let Some(limits) = &parts.active_injection_limits {
         write_u32(buf, limits.max_spikes_per_tick);
         write_u32(buf, limits.max_targets_per_spike);
+    }
+    write_bool(buf, parts.activation_digest.is_some());
+    if let Some(digest_bytes) = parts.activation_digest {
+        buf.extend_from_slice(&digest_bytes);
+    }
+    write_bool(buf, parts.committed_to_pvgs.is_some());
+    if let Some(committed) = parts.committed_to_pvgs {
+        write_bool(buf, committed);
     }
 }
 

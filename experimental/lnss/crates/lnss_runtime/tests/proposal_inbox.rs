@@ -116,6 +116,16 @@ impl PvgsClient for SharedPvgsClient {
             .commit_proposal_evidence(payload_bytes)
     }
 
+    fn commit_proposal_activation(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_proposal_activation(payload_bytes)
+    }
+
     fn try_commit_next_micro(
         &mut self,
         session_id: &str,
@@ -297,6 +307,7 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 2)),
         approval_inbox: None,
+        activation_now_ms: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -408,6 +419,7 @@ fn proposal_commits_only_once_across_ticks() {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 10)),
         approval_inbox: None,
+        activation_now_ms: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -506,6 +518,7 @@ fn proposal_commits_are_bounded_and_ordered() {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
         approval_inbox: None,
+        activation_now_ms: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -606,6 +619,7 @@ fn local_pvgs_receives_expected_payload() {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
         approval_inbox: None,
+        activation_now_ms: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

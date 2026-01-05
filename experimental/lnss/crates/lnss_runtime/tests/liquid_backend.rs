@@ -167,6 +167,7 @@ mod liquid_backend_tests {
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
             approval_inbox: None,
+            activation_now_ms: None,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -184,6 +185,7 @@ mod liquid_backend_tests {
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
             approval_inbox: None,
+            activation_now_ms: None,
         };
 
         let mods = base_mods();

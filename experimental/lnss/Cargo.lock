@@ -921,7 +921,9 @@ dependencies = [
  "hex",
  "lnss_core",
  "lnss_evolve",
+ "prost",
  "serde_json",
+ "thiserror",
  "ucf-protocol",
 ]
 
@@ -1001,6 +1003,7 @@ dependencies = [
  "lnss_mechint",
  "lnss_rig",
  "lnss_sae",
+ "prost",
  "pvgs_client",
  "serde",
  "serde_json",

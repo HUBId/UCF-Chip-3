@@ -125,6 +125,7 @@ fn candle_end_to_end_is_deterministic() {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
         approval_inbox: None,
+        activation_now_ms: None,
     };
 
     let mods = default_mods();
