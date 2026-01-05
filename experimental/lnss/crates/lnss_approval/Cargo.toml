@@ -10,6 +10,8 @@ lnss_core = { path = "../lnss_core" }
 lnss_evolve = { path = "../lnss_evolve" }
 ucf-protocol = { path = "../../../../crates/ucf-protocol" }
 hex = { workspace = true }
+prost = "0.12"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

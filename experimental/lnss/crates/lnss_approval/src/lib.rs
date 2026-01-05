@@ -1,7 +1,13 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use lnss_core::MAX_STRING_LEN;
 use lnss_evolve::{Proposal, ProposalKind};
+use prost::Message;
+use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
 const AAP_DOMAIN: &str = "UCF:HASH:APPROVAL_ARTIFACT_PACKAGE";
@@ -9,6 +15,14 @@ const AAP_ID_PREFIX_LEN: usize = 8;
 const MAX_EVIDENCE_REFS: usize = 4;
 const MAX_ALTERNATIVES: usize = 3;
 const MAX_CONSTRAINTS: usize = 8;
+
+#[derive(Debug, Error)]
+pub enum ApprovalLoadError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("decode error: {0}")]
+    Decode(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct ApprovalContext {
@@ -91,6 +105,57 @@ pub fn encode_aap(aap: &ucf::v1::ApprovalArtifactPackage) -> Vec<u8> {
     canonical_bytes(aap)
 }
 
+pub fn load_approval_decisions(
+    dir: &Path,
+) -> Result<Vec<ucf::v1::ApprovalDecision>, ApprovalLoadError> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("approval_"))
+                    .unwrap_or(false)
+                && path.extension().map(|ext| ext == "bin").unwrap_or(false)
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        a.file_name()
+            .unwrap_or_default()
+            .cmp(b.file_name().unwrap_or_default())
+    });
+
+    let pending_aap_ids = pending_aap_ids(dir)?;
+    let mut seen_approval_digests = BTreeSet::new();
+    let mut decisions = Vec::new();
+
+    for path in entries {
+        let bytes = fs::read(&path)?;
+        let decision = ucf::v1::ApprovalDecision::decode(bytes.as_slice())
+            .map_err(|err| ApprovalLoadError::Decode(err.to_string()))?;
+        let digest = match decision.approval_decision_digest.as_ref() {
+            Some(digest) => match digest_bytes(digest) {
+                Some(bytes) => bytes,
+                None => continue,
+            },
+            None => continue,
+        };
+        if seen_approval_digests.contains(&digest) {
+            continue;
+        }
+        if decision.aap_id.is_empty() || !pending_aap_ids.contains(&decision.aap_id) {
+            continue;
+        }
+        seen_approval_digests.insert(digest);
+        decisions.push(decision);
+    }
+
+    Ok(decisions)
+}
+
 fn aap_id_for_proposal(proposal: &Proposal) -> String {
     let prefix = hex::encode(&proposal.proposal_digest[..AAP_ID_PREFIX_LEN]);
     format!("aap:proposal:{prefix}")
@@ -151,6 +216,58 @@ fn bound_string(value: &str) -> String {
     let mut out = value.trim().to_string();
     out.truncate(MAX_STRING_LEN);
     out
+}
+
+fn pending_aap_ids(dir: &Path) -> Result<BTreeSet<String>, ApprovalLoadError> {
+    let aap_dir = dir.join("aap");
+    let mut ids = BTreeSet::new();
+    if !aap_dir.exists() {
+        return Ok(ids);
+    }
+
+    let mut entries: Vec<PathBuf> = fs::read_dir(aap_dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("aap_"))
+                    .unwrap_or(false)
+                && path.extension().map(|ext| ext == "bin").unwrap_or(false)
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        a.file_name()
+            .unwrap_or_default()
+            .cmp(b.file_name().unwrap_or_default())
+    });
+
+    for path in entries {
+        let bytes = fs::read(&path)?;
+        let aap = ucf::v1::ApprovalArtifactPackage::decode(bytes.as_slice())
+            .map_err(|err| ApprovalLoadError::Decode(err.to_string()))?;
+        let aap_digest = match aap.aap_digest.as_ref().and_then(digest_bytes) {
+            Some(digest) => digest,
+            None => continue,
+        };
+        let computed = approval_artifact_package_digest(&aap);
+        if computed != aap_digest {
+            continue;
+        }
+        if !aap.aap_id.is_empty() {
+            ids.insert(aap.aap_id);
+        }
+    }
+
+    Ok(ids)
+}
+
+fn digest_bytes(digest: &ucf::v1::Digest32) -> Option<[u8; 32]> {
+    let bytes: [u8; 32] = digest.value.as_slice().try_into().ok()?;
+    Some(bytes)
 }
 
 #[cfg(test)]

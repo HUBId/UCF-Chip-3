@@ -117,9 +117,13 @@ mod real_sae_backend_tests {
             rig: Box::new(rig_a),
             mapper: mapper.clone(),
             limits: Limits::default(),
+            injection_limits: lnss_runtime::InjectionLimits::default(),
+            active_sae_pack_digest: None,
+            active_liquid_params_digest: None,
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
+            approval_inbox: None,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -133,9 +137,13 @@ mod real_sae_backend_tests {
             rig: Box::new(rig_b),
             mapper,
             limits: Limits::default(),
+            injection_limits: lnss_runtime::InjectionLimits::default(),
+            active_sae_pack_digest: None,
+            active_liquid_params_digest: None,
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
+            approval_inbox: None,
         };
 
         let mods = base_mods();
