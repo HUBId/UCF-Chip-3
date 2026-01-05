@@ -13,7 +13,7 @@ use lnss_rig::InMemoryRigClient;
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     CandleConfig, CandleLlmBackend, FeedbackConsumer, HookProvider, Limits, LlmBackend,
-    LnssRuntime, MappingAdaptationConfig, TapRegistryProvider,
+    LnssRuntime, MappingAdaptationConfig, TapRegistryProvider, DEFAULT_MAX_MECHINT_BYTES,
 };
 use lnss_sae::CandleSaeBackend;
 use lnss_worldmodel::WorldModelCoreStub;
@@ -112,7 +112,8 @@ fn candle_end_to_end_is_deterministic() {
     let tmp_path = std::env::temp_dir().join("lnss_mechint_candle.jsonl");
     let _ = fs::remove_file(&tmp_path);
 
-    let mechint = JsonlMechIntWriter::new(&tmp_path, Some(2048)).expect("jsonl writer");
+    let mechint =
+        JsonlMechIntWriter::new(&tmp_path, Some(DEFAULT_MAX_MECHINT_BYTES)).expect("jsonl writer");
     let rig = InMemoryRigClient::default();
     let mut runtime = LnssRuntime {
         llm: Box::new(backend),
