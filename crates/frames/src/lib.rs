@@ -8,8 +8,8 @@ use std::time::Instant;
 
 pub mod emotion;
 
-use pbm::DecisionForm;
 use lnss_frames_bridge::LnssGovEvent;
+use pbm::DecisionForm;
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest32, ucf};

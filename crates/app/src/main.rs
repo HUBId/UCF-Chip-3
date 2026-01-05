@@ -133,12 +133,12 @@ fn main() {
 mod lnss_cli {
     use std::fs;
 
+    use frames::{FramesConfig, WindowEngine};
     use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap};
+    use lnss_frames_bridge::LnssGovEvent;
     use lnss_hooks::TransformerLensPlanImport;
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::LoggingRigClient;
-    use frames::{FramesConfig, WindowEngine};
-    use lnss_frames_bridge::LnssGovEvent;
     use lnss_runtime::{
         ActivationResult, FeedbackConsumer, Limits, LnssEventSink, LnssRuntime,
         MappingAdaptationConfig, SaeBackend, StubHookProvider, StubLlmBackend,
