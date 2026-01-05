@@ -128,7 +128,7 @@ mod liquid_backend_tests {
             mods_gain_q: 100,
         };
         let backend_a = LiquidOdeBackend::new(cfg.clone());
-        let backend_b = LiquidOdeBackend::new(cfg);
+        let backend_b = LiquidOdeBackend::new(cfg.clone());
         let hooks_a = backend_a.tap_provider();
         let hooks_b = backend_b.tap_provider();
         let tap_specs = vec![TapSpec::new(
