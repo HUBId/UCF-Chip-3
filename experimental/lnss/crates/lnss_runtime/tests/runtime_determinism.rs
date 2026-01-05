@@ -187,6 +187,7 @@ fn end_to_end_stub_pipeline() {
         proposal_inbox: None,
         approval_inbox: None,
         activation_now_ms: None,
+        event_sink: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

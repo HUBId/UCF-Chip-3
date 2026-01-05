@@ -126,6 +126,7 @@ fn candle_end_to_end_is_deterministic() {
         proposal_inbox: None,
         approval_inbox: None,
         activation_now_ms: None,
+        event_sink: None,
     };
 
     let mods = default_mods();

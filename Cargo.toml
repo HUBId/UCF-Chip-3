@@ -21,6 +21,7 @@ members = [
     "crates/geist_stub", "crates/suspension",
     "crates/scheduler",
     "crates/rpp_checker",
+    "crates/lnss_frames_bridge",
     "tests",
 ]
 resolver = "2"

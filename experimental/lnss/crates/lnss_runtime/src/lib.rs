@@ -288,6 +288,10 @@ pub enum ActivationResult {
     Rejected,
 }
 
+pub trait LnssEventSink {
+    fn on_activation_event(&mut self, activation_digest: [u8; 32], result: ActivationResult);
+}
+
 #[derive(Debug, Clone)]
 pub struct ApprovalInbox {
     pub dir: PathBuf,
@@ -458,6 +462,7 @@ pub struct LnssRuntime {
     pub proposal_inbox: Option<ProposalInbox>,
     pub approval_inbox: Option<ApprovalInbox>,
     pub activation_now_ms: Option<u64>,
+    pub event_sink: Option<Box<dyn LnssEventSink>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -894,6 +899,10 @@ impl LnssRuntime {
                 committed_to_pvgs = Some(committed);
                 inbox.mark_activation_seen(activation.activation_digest);
             }
+        }
+
+        if let Some(sink) = self.event_sink.as_mut() {
+            sink.on_activation_event(activation.activation_digest, outcome.result.clone());
         }
 
         let mut activation_parts = base_parts.clone();

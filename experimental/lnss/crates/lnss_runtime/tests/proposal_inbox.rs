@@ -308,6 +308,7 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 2)),
         approval_inbox: None,
         activation_now_ms: None,
+        event_sink: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -420,6 +421,7 @@ fn proposal_commits_only_once_across_ticks() {
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 10)),
         approval_inbox: None,
         activation_now_ms: None,
+        event_sink: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -519,6 +521,7 @@ fn proposal_commits_are_bounded_and_ordered() {
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
         approval_inbox: None,
         activation_now_ms: None,
+        event_sink: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -620,6 +623,7 @@ fn local_pvgs_receives_expected_payload() {
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
         approval_inbox: None,
         activation_now_ms: None,
+        event_sink: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

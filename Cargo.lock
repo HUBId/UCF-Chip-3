@@ -38,6 +38,7 @@ dependencies = [
  "gem",
  "hex",
  "lnss_core",
+ "lnss_frames_bridge",
  "lnss_hooks",
  "lnss_mechint",
  "lnss_rig",
@@ -623,6 +624,7 @@ dependencies = [
  "blake3",
  "cdm",
  "chip2_client",
+ "lnss_frames_bridge",
  "pbm",
  "serde",
  "serde_json",
@@ -1083,6 +1085,10 @@ dependencies = [
  "serde_json",
  "thiserror",
 ]
+
+[[package]]
+name = "lnss_frames_bridge"
+version = "0.1.0"
 
 [[package]]
 name = "lnss_hooks"
