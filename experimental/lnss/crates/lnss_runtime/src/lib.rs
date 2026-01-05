@@ -22,8 +22,9 @@ use lnss_core::{
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
-    encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
-    EvalVerdict, Proposal, ProposalEvidence, ProposalKind,
+    encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest,
+    trace_encoding::{compute_trace_digest, encode_trace, TraceRunEvidenceLocal, TraceVerdict},
+    EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind,
 };
 use lnss_hooks::TapRegistry;
 use pvgs_client::PvgsClientReader;
@@ -42,11 +43,17 @@ pub const DEFAULT_APPROVAL_MAX_PER_TICK: usize = 1;
 pub const FILE_DIGEST_DOMAIN: &str = "lnss.file.bytes.v1";
 pub const LIQUID_PARAMS_DOMAIN: &str = "lnss.liquid.params.v1";
 const ACTIVATION_ID_PREFIX_LEN: usize = 8;
+const TRACE_ID_PREFIX_LEN: usize = 8;
+const TRACE_CREATED_AT_MS_MULTIPLIER: u64 = 10;
 const RC_PROPOSAL_ACTIVATED: &str = "RC.GV.PROPOSAL.ACTIVATED";
 const RC_PROPOSAL_REJECTED: &str = "RC.GV.PROPOSAL.REJECTED";
 const RC_SHADOW_BETTER: &str = "RC.GV.SHADOW.BETTER";
 const RC_SHADOW_WORSE: &str = "RC.GV.SHADOW.WORSE";
 const RC_SHADOW_EQUAL: &str = "RC.GV.SHADOW.EQUAL";
+const RC_TRACE_PROMISING: &str = "RC.GV.TRACE.PROMISING";
+const RC_TRACE_NEUTRAL: &str = "RC.GV.TRACE.NEUTRAL";
+const RC_TRACE_RISKY: &str = "RC.GV.TRACE.RISKY";
+const RC_AAP_BLOCKED_BY_TRACE: &str = "RC.GV.AAP.BLOCKED_BY_TRACE";
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -235,6 +242,7 @@ impl ProposalInbox {
         base_parts: &MechIntRecordParts,
         mechint: &mut dyn MechIntWriter,
         mut pvgs: Option<&mut (dyn PvgsClientReader + '_)>,
+        trace_state: Option<&TraceRunState>,
     ) -> Result<usize, LnssRuntimeError> {
         if !self.should_scan() {
             return Ok(0);
@@ -255,28 +263,33 @@ impl ProposalInbox {
             parts.proposal_verdict = Some(eval.verdict.clone());
             parts.proposal_base_evidence_digest = Some(proposal.base_evidence_digest);
             if eval.verdict == EvalVerdict::Promising {
-                let ruleset_digest = pvgs
-                    .as_deref()
-                    .and_then(|client| client.get_current_ruleset_digest());
-                let ctx = ApprovalContext {
-                    session_id: parts.session_id.clone(),
-                    ruleset_digest,
-                    current_mapping_digest: Some(parts.mapping_digest),
-                    current_sae_pack_digest: None,
-                    current_liquid_params_digest: None,
-                    latest_scorecard_digest: None,
-                    requested_operation: ucf::v1::OperationCategory::OpException,
-                };
-                let aap = build_aap_for_proposal(&proposal, &ctx);
-                let aap_digest = approval_artifact_package_digest(&aap);
-                parts.aap_digest = Some(aap_digest);
-                if let Err(err) = fs::create_dir_all(&self.aap_dir) {
-                    return Err(LnssRuntimeError::Proposal(err.to_string()));
-                }
-                let filename = format!("aap_{}.bin", hex::encode(aap_digest));
-                let path = self.aap_dir.join(filename);
-                if let Err(err) = fs::write(path, lnss_approval::encode_aap(&aap)) {
-                    return Err(LnssRuntimeError::Proposal(err.to_string()));
+                let trace_allowed = trace_state
+                    .filter(|state| state.committed && state.verdict == TraceVerdict::Promising);
+                if let Some(trace_state) = trace_allowed {
+                    let ruleset_digest = pvgs
+                        .as_deref()
+                        .and_then(|client| client.get_current_ruleset_digest());
+                    let ctx = ApprovalContext {
+                        session_id: parts.session_id.clone(),
+                        ruleset_digest,
+                        current_mapping_digest: Some(parts.mapping_digest),
+                        current_sae_pack_digest: None,
+                        current_liquid_params_digest: None,
+                        latest_scorecard_digest: None,
+                        trace_digest: Some(trace_state.trace_digest),
+                        requested_operation: ucf::v1::OperationCategory::OpException,
+                    };
+                    let aap = build_aap_for_proposal(&proposal, &ctx);
+                    let aap_digest = approval_artifact_package_digest(&aap);
+                    parts.aap_digest = Some(aap_digest);
+                    if let Err(err) = fs::create_dir_all(&self.aap_dir) {
+                        return Err(LnssRuntimeError::Proposal(err.to_string()));
+                    }
+                    let filename = format!("aap_{}.bin", hex::encode(aap_digest));
+                    let path = self.aap_dir.join(filename);
+                    if let Err(err) = fs::write(path, lnss_approval::encode_aap(&aap)) {
+                        return Err(LnssRuntimeError::Proposal(err.to_string()));
+                    }
                 }
             }
             let record = MechIntRecord::new(parts);
@@ -286,6 +299,13 @@ impl ProposalInbox {
             let mut reason_codes = eval.reason_codes.clone();
             if base_evidence_digest == [0u8; 32] {
                 reason_codes.push("RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string());
+            }
+            if eval.verdict == EvalVerdict::Promising
+                && trace_state
+                    .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
+                    .is_none()
+            {
+                reason_codes.push(RC_AAP_BLOCKED_BY_TRACE.to_string());
             }
             let payload_digest = proposal_payload_digest(&proposal.payload)
                 .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
@@ -516,6 +536,8 @@ pub struct LnssRuntime {
     pub event_sink: Option<Box<dyn LnssEventSink>>,
     pub shadow: ShadowConfig,
     pub shadow_rig: Option<Box<dyn RigClient>>,
+    pub trace_state: Option<TraceRunState>,
+    pub seen_trace_digests: BTreeSet<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -795,6 +817,16 @@ pub struct ShadowRunOutput {
     pub reason_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TraceRunState {
+    pub trace_digest: [u8; 32],
+    pub verdict: TraceVerdict,
+    pub committed: bool,
+    pub active_cfg_digest: [u8; 32],
+    pub shadow_cfg_digest: [u8; 32],
+    pub created_at_ms: u64,
+}
+
 impl LnssRuntime {
     pub fn run_step(
         &mut self,
@@ -918,6 +950,16 @@ impl LnssRuntime {
                 let shadow_record = MechIntRecord::new(shadow_parts);
                 self.mechint.write_step(&shadow_record)?;
 
+                let trace_state = self.commit_trace_run_evidence(
+                    step_id,
+                    &score,
+                    &reason_codes,
+                    active_feedback,
+                    shadow_feedback,
+                    shadow_mapping_digest,
+                );
+                self.trace_state = Some(trace_state);
+
                 Some(ShadowRunOutput {
                     spikes: shadow_spikes,
                     feedback_snapshot: shadow_feedback.clone(),
@@ -935,9 +977,14 @@ impl LnssRuntime {
         self.mechint.write_step(&mechint_record)?;
 
         if let Some(inbox) = self.proposal_inbox.as_mut() {
+            let trace_run_digest = self
+                .trace_state
+                .as_ref()
+                .filter(|state| state.committed)
+                .map(|state| state.trace_digest);
             let eval_ctx = EvalContext {
                 latest_feedback_digest: feedback_snapshot.as_ref().map(|snap| snap.snapshot_digest),
-                trace_run_digest: None,
+                trace_run_digest,
                 metrics: feedback_snapshot
                     .as_ref()
                     .map(|snap| {
@@ -958,6 +1005,7 @@ impl LnssRuntime {
                 &mechint_parts,
                 self.mechint.as_mut(),
                 self.pvgs.as_deref_mut(),
+                self.trace_state.as_ref(),
             )?;
         }
 
@@ -1077,6 +1125,73 @@ impl LnssRuntime {
         }
 
         Ok(())
+    }
+
+    fn commit_trace_run_evidence(
+        &mut self,
+        step_id: &str,
+        score: &ShadowScore,
+        reason_codes: &[String],
+        active_feedback: &BiophysFeedbackSnapshot,
+        shadow_feedback: &BiophysFeedbackSnapshot,
+        shadow_mapping_digest: [u8; 32],
+    ) -> TraceRunState {
+        let verdict = trace_verdict_from_delta(score.delta);
+        let created_at_ms = active_feedback
+            .tick
+            .saturating_mul(TRACE_CREATED_AT_MS_MULTIPLIER);
+        let trace_id = trace_id_for(
+            self.mapper.map_digest,
+            shadow_mapping_digest,
+            active_feedback.tick,
+        );
+        let mut trace_reason_codes = reason_codes.to_vec();
+        trace_reason_codes.push(trace_verdict_reason_code(&verdict).to_string());
+
+        let mut trace_evidence = TraceRunEvidenceLocal {
+            trace_id,
+            active_cfg_digest: self.mapper.map_digest,
+            shadow_cfg_digest: shadow_mapping_digest,
+            active_feedback_digest: active_feedback.snapshot_digest,
+            shadow_feedback_digest: shadow_feedback.snapshot_digest,
+            score_active: score.active,
+            score_shadow: score.shadow,
+            delta: score.delta,
+            verdict: verdict.clone(),
+            created_at_ms,
+            reason_codes: trace_reason_codes,
+            trace_digest: [0u8; 32],
+        };
+        let trace_digest = compute_trace_digest(&mut trace_evidence);
+        let payload_bytes = encode_trace(&trace_evidence);
+
+        let committed = if self.seen_trace_digests.contains(&trace_digest) {
+            true
+        } else {
+            let committed = match self.pvgs.as_deref_mut() {
+                Some(client) => match client.commit_trace_run_evidence(payload_bytes) {
+                    Ok(receipt) => receipt.status == ucf::v1::ReceiptStatus::Accepted as i32,
+                    Err(err) => {
+                        eprintln!("trace run commit failed for {step_id}: {err}");
+                        false
+                    }
+                },
+                None => true,
+            };
+            if committed {
+                self.seen_trace_digests.insert(trace_digest);
+            }
+            committed
+        };
+
+        TraceRunState {
+            trace_digest,
+            verdict,
+            committed,
+            active_cfg_digest: self.mapper.map_digest,
+            shadow_cfg_digest: shadow_mapping_digest,
+            created_at_ms,
+        }
     }
 
     fn apply_activation_plan(
@@ -1259,6 +1374,24 @@ fn score_shadow(
         },
         reason_codes,
     )
+}
+
+fn trace_verdict_from_delta(delta: i32) -> TraceVerdict {
+    if delta >= 5 {
+        TraceVerdict::Promising
+    } else if delta <= -5 {
+        TraceVerdict::Risky
+    } else {
+        TraceVerdict::Neutral
+    }
+}
+
+fn trace_verdict_reason_code(verdict: &TraceVerdict) -> &'static str {
+    match verdict {
+        TraceVerdict::Promising => RC_TRACE_PROMISING,
+        TraceVerdict::Neutral => RC_TRACE_NEUTRAL,
+        TraceVerdict::Risky => RC_TRACE_RISKY,
+    }
 }
 
 fn score_feedback_snapshot(snapshot: &BiophysFeedbackSnapshot) -> i32 {
@@ -1532,6 +1665,12 @@ fn activation_id_for(proposal_digest: [u8; 32], approval_digest: [u8; 32]) -> St
     let proposal_prefix = hex::encode(&proposal_digest[..ACTIVATION_ID_PREFIX_LEN]);
     let approval_prefix = hex::encode(&approval_digest[..ACTIVATION_ID_PREFIX_LEN]);
     format!("act:{proposal_prefix}:{approval_prefix}")
+}
+
+fn trace_id_for(active_cfg_digest: [u8; 32], shadow_cfg_digest: [u8; 32], tick: u64) -> String {
+    let active_prefix = hex::encode(&active_cfg_digest[..TRACE_ID_PREFIX_LEN]);
+    let shadow_prefix = hex::encode(&shadow_cfg_digest[..TRACE_ID_PREFIX_LEN]);
+    format!("trace:{active_prefix}:{shadow_prefix}:{tick}")
 }
 
 fn load_pending_aaps(

@@ -126,6 +126,16 @@ impl PvgsClient for SharedPvgsClient {
             .commit_proposal_activation(payload_bytes)
     }
 
+    fn commit_trace_run_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_trace_run_evidence(payload_bytes)
+    }
+
     fn try_commit_next_micro(
         &mut self,
         session_id: &str,
@@ -313,6 +323,8 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         event_sink: None,
         shadow: lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -430,6 +442,8 @@ fn proposal_commits_only_once_across_ticks() {
         event_sink: None,
         shadow: lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -534,6 +548,8 @@ fn proposal_commits_are_bounded_and_ordered() {
         event_sink: None,
         shadow: lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -640,6 +656,8 @@ fn local_pvgs_receives_expected_payload() {
         event_sink: None,
         shadow: lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = EmotionFieldSnapshot::new(

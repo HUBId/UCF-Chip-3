@@ -10,6 +10,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use lnss_core::{MAX_REASON_CODES, MAX_STRING_LEN};
+pub mod trace_encoding;
+pub use trace_encoding::{compute_trace_digest, encode_trace, TraceRunEvidenceLocal, TraceVerdict};
 
 const MAX_CHANGE_SUMMARY: usize = 32;
 const MAX_PARAM_ENTRIES: usize = 64;
@@ -203,7 +205,7 @@ pub fn evaluate(proposal: &Proposal, ctx: &EvalContext) -> EvalResult {
         }
     }
 
-    let verdict = if score >= 10 {
+    let verdict = if score >= 8 {
         EvalVerdict::Promising
     } else if score >= 0 {
         EvalVerdict::Neutral

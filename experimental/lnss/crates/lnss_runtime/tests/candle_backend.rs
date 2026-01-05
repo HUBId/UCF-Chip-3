@@ -131,6 +131,8 @@ fn candle_end_to_end_is_deterministic() {
         event_sink: None,
         shadow: lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     };
 
     let mods = default_mods();

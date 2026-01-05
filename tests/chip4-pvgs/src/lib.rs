@@ -66,6 +66,7 @@ struct LocalPvgsState {
     micro_milestones: Vec<ucf::v1::MicroMilestone>,
     consistency_feedback: Vec<ucf::v1::ConsistencyFeedback>,
     proposal_evidence: Vec<Vec<u8>>,
+    trace_run_evidence: Vec<Vec<u8>>,
     replay_plans: Vec<ucf::v1::ReplayPlan>,
     latest_trace_run: Option<TraceRunSummary>,
     sealed_sessions: HashMap<String, Option<[u8; 32]>>,
@@ -109,6 +110,7 @@ impl LocalPvgs {
                 micro_milestones: Vec::new(),
                 consistency_feedback: Vec::new(),
                 proposal_evidence: Vec::new(),
+                trace_run_evidence: Vec::new(),
                 replay_plans: Vec::new(),
                 latest_trace_run: None,
                 sealed_sessions: HashMap::new(),
@@ -427,6 +429,42 @@ impl LocalPvgs {
                 value: digest.to_vec(),
             }),
             grant_id: "grant-proposal".to_string(),
+            charter_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![1u8; 32],
+            }),
+            policy_version_digest: Some(ucf::v1::Digest32 {
+                value: vec![2u8; 32],
+            }),
+            prev_record_digest: guard
+                .head_record_digest
+                .as_ref()
+                .map(|digest| ucf::v1::Digest32 {
+                    value: digest.to_vec(),
+                }),
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: Vec::new(),
+            signer: None,
+        }
+    }
+
+    pub fn append_trace_run_evidence(&self, payload_bytes: Vec<u8>) -> ucf::v1::PvgsReceipt {
+        let mut guard = self.inner.lock().expect("pvgs state lock");
+        let digest = digest_proto("UCF:HASH:TRACE_RUN_EVIDENCE", &payload_bytes);
+        guard.trace_run_evidence.push(payload_bytes);
+
+        ucf::v1::PvgsReceipt {
+            receipt_epoch: format!("epoch-trace-{}", guard.trace_run_evidence.len()),
+            receipt_id: format!("trace-{}", guard.trace_run_evidence.len()),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            status: ucf::v1::ReceiptStatus::Accepted.into(),
+            action_digest: None,
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            grant_id: "grant-trace".to_string(),
             charter_version_digest: Some(ucf::v1::Digest32 {
                 value: vec![1u8; 32],
             }),

@@ -194,6 +194,16 @@ pub trait PvgsClient: Send + Sync {
         ))
     }
 
+    fn commit_trace_run_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let _ = payload_bytes;
+        Err(PvgsClientError::CommitFailed(
+            "trace run evidence not supported".to_string(),
+        ))
+    }
+
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError>;
 
     fn try_commit_next_meso(&mut self) -> Result<bool, PvgsClientError>;
@@ -554,6 +564,13 @@ impl PvgsClient for Chip4LocalPvgsClient {
         Ok(self.pvgs.append_proposal_evidence(payload_bytes))
     }
 
+    fn commit_trace_run_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        Ok(self.pvgs.append_trace_run_evidence(payload_bytes))
+    }
+
     fn try_commit_next_micro(&mut self, _session_id: &str) -> Result<bool, PvgsClientError> {
         Ok(false)
     }
@@ -786,6 +803,7 @@ pub struct LocalPvgsClient {
     pub committed_consistency_bytes: Vec<Vec<u8>>,
     pub committed_proposal_evidence_bytes: Vec<Vec<u8>>,
     pub committed_proposal_activation_bytes: Vec<Vec<u8>>,
+    pub committed_trace_run_bytes: Vec<Vec<u8>>,
     pub micro_chunk_size: u64,
     pub micro_last_end: u64,
     pub try_commit_meso_outcome: Option<bool>,
@@ -827,6 +845,7 @@ impl Default for LocalPvgsClient {
             committed_consistency_bytes: Vec::new(),
             committed_proposal_evidence_bytes: Vec::new(),
             committed_proposal_activation_bytes: Vec::new(),
+            committed_trace_run_bytes: Vec::new(),
             micro_chunk_size: 256,
             micro_last_end: 0,
             try_commit_meso_outcome: None,
@@ -1308,6 +1327,44 @@ impl PvgsClient for LocalPvgsClient {
         Ok(receipt)
     }
 
+    fn commit_trace_run_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        let digest = ucf_protocol::digest_proto("UCF:HASH:TRACE_RUN_EVIDENCE", &payload_bytes);
+        self.committed_trace_run_bytes.push(payload_bytes);
+
+        let receipt = ucf::v1::PvgsReceipt {
+            receipt_epoch: self.receipt_epoch.clone(),
+            receipt_id: format!(
+                "pvgs-local-trace-run-{}",
+                self.committed_trace_run_bytes.len()
+            ),
+            receipt_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            status: self.default_status.into(),
+            action_digest: None,
+            decision_digest: Some(ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }),
+            grant_id: self.grant_id.clone(),
+            charter_version_digest: None,
+            policy_version_digest: None,
+            prev_record_digest: None,
+            profile_digest: None,
+            tool_profile_digest: None,
+            reject_reason_codes: if self.default_status == ucf::v1::ReceiptStatus::Rejected {
+                self.reject_reason_codes.clone()
+            } else {
+                Vec::new()
+            },
+            signer: None,
+        };
+
+        Ok(receipt)
+    }
+
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError> {
         if self.micro_chunk_size == 0 {
             return Ok(false);
@@ -1584,6 +1641,7 @@ pub struct MockPvgsClient {
     pub scorecard_session_calls: u64,
     pub spotcheck_calls: u64,
     pub trace_run_summary: Option<TraceRunSummary>,
+    pub committed_trace_run_bytes: Vec<Vec<u8>>,
 }
 
 impl MockPvgsClient {
@@ -1946,6 +2004,14 @@ impl PvgsClient for MockPvgsClient {
         payload_bytes: Vec<u8>,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         self.local.commit_proposal_activation(payload_bytes)
+    }
+
+    fn commit_trace_run_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
+        self.committed_trace_run_bytes.push(payload_bytes.clone());
+        self.local.commit_trace_run_evidence(payload_bytes)
     }
 
     fn try_commit_next_micro(&mut self, session_id: &str) -> Result<bool, PvgsClientError> {

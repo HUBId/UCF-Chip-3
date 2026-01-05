@@ -127,6 +127,16 @@ impl PvgsClient for SharedPvgsClient {
             .commit_proposal_activation(payload_bytes)
     }
 
+    fn commit_trace_run_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_trace_run_evidence(payload_bytes)
+    }
+
     fn try_commit_next_micro(
         &mut self,
         session_id: &str,
@@ -359,6 +369,7 @@ fn aap_fixture(dir: &Path, proposal: &lnss_evolve::Proposal) -> ucf::v1::Approva
         current_sae_pack_digest: None,
         current_liquid_params_digest: None,
         latest_scorecard_digest: None,
+        trace_digest: None,
         requested_operation: ucf::v1::OperationCategory::OpException,
     };
     let aap = build_aap_for_proposal(proposal, &ctx);
@@ -439,6 +450,8 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         event_sink: None,
         shadow: lnss_runtime::ShadowConfig::default(),
         shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
     }
 }
 

@@ -104,6 +104,7 @@ pub struct ApprovalContext {
     pub current_sae_pack_digest: Option<[u8; 32]>,
     pub current_liquid_params_digest: Option<[u8; 32]>,
     pub latest_scorecard_digest: Option<[u8; 32]>,
+    pub trace_digest: Option<[u8; 32]>,
     pub requested_operation: ucf::v1::OperationCategory,
 }
 
@@ -118,6 +119,9 @@ pub fn build_aap_for_proposal(
         "base_evidence_digest",
         proposal.base_evidence_digest,
     ));
+    if let Some(trace_digest) = ctx.trace_digest {
+        evidence_refs.push(related_ref("trace_digest", trace_digest));
+    }
     if let Some(scorecard) = ctx.latest_scorecard_digest {
         evidence_refs.push(related_ref("scorecard_digest", scorecard));
     }
@@ -422,6 +426,7 @@ mod tests {
             current_sae_pack_digest: None,
             current_liquid_params_digest: None,
             latest_scorecard_digest: Some([1u8; 32]),
+            trace_digest: Some([9u8; 32]),
             requested_operation: ucf::v1::OperationCategory::OpException,
         }
     }
@@ -480,6 +485,13 @@ mod tests {
             base_ref.digest.as_ref().unwrap().value,
             proposal.base_evidence_digest
         );
+
+        let trace_ref = aap
+            .evidence_refs
+            .iter()
+            .find(|item| item.id == "trace_digest")
+            .expect("trace digest ref");
+        assert_eq!(trace_ref.digest.as_ref().unwrap().value, [9u8; 32]);
     }
 
     #[test]
