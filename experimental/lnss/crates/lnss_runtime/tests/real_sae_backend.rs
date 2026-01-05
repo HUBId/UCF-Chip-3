@@ -7,14 +7,19 @@ mod real_sae_backend_tests {
         path::{Path, PathBuf},
     };
 
-    use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapKind, TapSpec};
+    use lnss_core::{
+        BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
+        RecursionPolicy, TapKind, TapSpec,
+    };
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
+    use lnss_rlm::RlmController;
     use lnss_runtime::{
         FeedbackConsumer, Limits, LiquidOdeBackend, LiquidOdeConfig, LnssRuntime,
         MappingAdaptationConfig,
     };
     use lnss_sae::{RealSaeBackend, SaeNonlinearity};
+    use lnss_worldmodel::WorldModelCoreStub;
 
     fn write_pack(dir: &Path) -> PathBuf {
         fs::create_dir_all(dir).expect("create pack dir");
@@ -108,6 +113,9 @@ mod real_sae_backend_tests {
         let mut runtime_a = LnssRuntime {
             llm: Box::new(backend_a),
             hooks: Box::new(hooks_a),
+            worldmodel: Box::new(WorldModelCoreStub),
+            rlm: Box::new(RlmController::default()),
+            orchestrator: lnss_core::CoreOrchestrator,
             sae: Box::new(RealSaeBackend::new(
                 write_pack(&pack_dir_a),
                 SaeNonlinearity::Relu,
@@ -132,10 +140,20 @@ mod real_sae_backend_tests {
             shadow_rig: None,
             trace_state: None,
             seen_trace_digests: std::collections::BTreeSet::new(),
+            policy_mode: PolicyMode::Open,
+            control_intent_class: ControlIntentClass::Monitor,
+            recursion_policy: RecursionPolicy::default(),
+            world_state_digest: [0; 32],
+            last_action_digest: [0; 32],
+            last_self_state_digest: [0; 32],
+            pred_error_threshold: 128,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
             hooks: Box::new(hooks_b),
+            worldmodel: Box::new(WorldModelCoreStub),
+            rlm: Box::new(RlmController::default()),
+            orchestrator: lnss_core::CoreOrchestrator,
             sae: Box::new(RealSaeBackend::new(
                 write_pack(&pack_dir_b),
                 SaeNonlinearity::Relu,
@@ -160,6 +178,13 @@ mod real_sae_backend_tests {
             shadow_rig: None,
             trace_state: None,
             seen_trace_digests: std::collections::BTreeSet::new(),
+            policy_mode: PolicyMode::Open,
+            control_intent_class: ControlIntentClass::Monitor,
+            recursion_policy: RecursionPolicy::default(),
+            world_state_digest: [0; 32],
+            last_action_digest: [0; 32],
+            last_self_state_digest: [0; 32],
+            pred_error_threshold: 128,
         };
 
         let mods = base_mods();

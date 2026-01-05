@@ -6,14 +6,19 @@ use lnss_approval::{
     build_aap_for_proposal, build_activation_evidence_pb, ActivationInjectionLimits,
     ActivationStatus, ApprovalContext, ProposalActivationEvidenceLocal,
 };
-use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapFrame, TapKind, TapSpec};
+use lnss_core::{
+    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
+    RecursionPolicy, TapFrame, TapKind, TapSpec,
+};
 use lnss_evolve::load_proposals;
+use lnss_rlm::RlmController;
 use lnss_runtime::{
     ApprovalInbox, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
     MechIntRecord, MechIntWriter, StubHookProvider, StubLlmBackend, StubRigClient,
     FILE_DIGEST_DOMAIN,
 };
 use lnss_sae::StubSaeBackend;
+use lnss_worldmodel::WorldModelCoreStub;
 use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
@@ -428,6 +433,9 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
+        worldmodel: Box::new(WorldModelCoreStub),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(writer),
         pvgs: None,
@@ -452,6 +460,13 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     }
 }
 

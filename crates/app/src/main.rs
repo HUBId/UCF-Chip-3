@@ -134,16 +134,21 @@ mod lnss_cli {
     use std::fs;
 
     use frames::{FramesConfig, WindowEngine};
-    use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap};
+    use lnss_core::{
+        BrainTarget, ControlIntentClass, CoreOrchestrator, EmotionFieldSnapshot, FeatureToBrainMap,
+        PolicyMode, RecursionPolicy,
+    };
     use lnss_frames_bridge::LnssGovEvent;
     use lnss_hooks::TransformerLensPlanImport;
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::LoggingRigClient;
+    use lnss_rlm::RlmController;
     use lnss_runtime::{
         ActivationResult, FeedbackConsumer, Limits, LnssEventSink, LnssRuntime,
         MappingAdaptationConfig, SaeBackend, StubHookProvider, StubLlmBackend,
     };
     use lnss_sae::StubSaeBackend;
+    use lnss_worldmodel::WorldModelCoreStub;
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -232,6 +237,9 @@ mod lnss_cli {
         let mut runtime = LnssRuntime {
             llm: Box::new(StubLlmBackend),
             hooks: Box::new(StubHookProvider { taps: Vec::new() }),
+            worldmodel: Box::new(WorldModelCoreStub),
+            rlm: Box::new(RlmController::default()),
+            orchestrator: CoreOrchestrator,
             sae,
             mechint: Box::new(mechint),
             pvgs: None,
@@ -252,6 +260,13 @@ mod lnss_cli {
             shadow_rig: None,
             trace_state: None,
             seen_trace_digests: std::collections::BTreeSet::new(),
+            policy_mode: PolicyMode::Open,
+            control_intent_class: ControlIntentClass::Monitor,
+            recursion_policy: RecursionPolicy::default(),
+            world_state_digest: [0; 32],
+            last_action_digest: [0; 32],
+            last_self_state_digest: [0; 32],
+            pred_error_threshold: 128,
         };
 
         let mods = EmotionFieldSnapshot::new(

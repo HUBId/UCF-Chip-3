@@ -3,16 +3,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapFrame, TapKind, TapSpec};
+use lnss_core::{
+    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
+    RecursionPolicy, TapFrame, TapKind, TapSpec,
+};
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest, EvalContext,
     ProposalEvidence, ProposalKind,
 };
+use lnss_rlm::RlmController;
 use lnss_runtime::{
     FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter,
     ProposalInbox, StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_sae::StubSaeBackend;
+use lnss_worldmodel::WorldModelCoreStub;
 use prost::Message;
 use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
 use ucf_protocol::canonical_bytes;
@@ -304,6 +309,9 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
+        worldmodel: Box::new(WorldModelCoreStub),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(writer),
         pvgs: None,
@@ -325,6 +333,13 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -423,6 +438,9 @@ fn proposal_commits_only_once_across_ticks() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
+        worldmodel: Box::new(WorldModelCoreStub),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(RecordingWriter::default()),
         pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
@@ -444,6 +462,13 @@ fn proposal_commits_only_once_across_ticks() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -529,6 +554,9 @@ fn proposal_commits_are_bounded_and_ordered() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
+        worldmodel: Box::new(WorldModelCoreStub),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(RecordingWriter::default()),
         pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
@@ -550,6 +578,13 @@ fn proposal_commits_are_bounded_and_ordered() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -637,6 +672,9 @@ fn local_pvgs_receives_expected_payload() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
+        worldmodel: Box::new(WorldModelCoreStub),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(RecordingWriter::default()),
         pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
@@ -658,6 +696,13 @@ fn local_pvgs_receives_expected_payload() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = EmotionFieldSnapshot::new(

@@ -3,15 +3,20 @@
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use lnss_core::{BrainTarget, EmotionFieldSnapshot, TapKind, TapSpec};
+use lnss_core::{
+    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, PolicyMode, RecursionPolicy, TapKind,
+    TapSpec,
+};
 use lnss_hooks::TapRegistry;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
+use lnss_rlm::RlmController;
 use lnss_runtime::{
     CandleConfig, CandleLlmBackend, FeedbackConsumer, HookProvider, Limits, LlmBackend,
     LnssRuntime, MappingAdaptationConfig, TapRegistryProvider,
 };
 use lnss_sae::CandleSaeBackend;
+use lnss_worldmodel::WorldModelCoreStub;
 
 fn create_loaded_model_dir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("lnss_candle_test_{}", std::process::id()));
@@ -112,6 +117,9 @@ fn candle_end_to_end_is_deterministic() {
     let mut runtime = LnssRuntime {
         llm: Box::new(backend),
         hooks: Box::new(TapRegistryProvider::new(registry.clone(), true)),
+        worldmodel: Box::new(WorldModelCoreStub),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(CandleSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
@@ -133,6 +141,13 @@ fn candle_end_to_end_is_deterministic() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = default_mods();

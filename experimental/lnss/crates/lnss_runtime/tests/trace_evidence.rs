@@ -3,17 +3,19 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_core::{
-    digest, BiophysFeedbackSnapshot, BrainTarget, EmotionFieldSnapshot, FeatureEvent,
-    FeatureToBrainMap, TapFrame, TapKind, TapSpec,
+    digest, BiophysFeedbackSnapshot, BrainTarget, ControlIntentClass, EmotionFieldSnapshot,
+    FeatureEvent, FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
 };
 use lnss_evolve::trace_encoding::{
     build_trace_run_evidence_pb, TraceRunEvidenceLocal, TraceVerdict,
 };
+use lnss_rlm::RlmController;
 use lnss_runtime::{
     BrainSpike, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
     MechIntRecord, MechIntWriter, ProposalInbox, RigClient, SaeBackend, ShadowConfig,
     StubHookProvider, StubLlmBackend, StubRigClient,
 };
+use lnss_worldmodel::WorldModelCoreStub;
 use prost::Message;
 use pvgs_client::{LocalPvgsClient, MockPvgsClient, PvgsClient, PvgsClientReader, PvgsReader};
 use ucf_protocol::canonical_bytes;
@@ -435,6 +437,9 @@ fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
         hooks: Box::new(StubHookProvider {
             taps: vec![TapFrame::new("hook-a", vec![1, 2, 3])],
         }),
+        worldmodel: Box::new(WorldModelCoreStub),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: fixture.sae,
         mechint: Box::new(RecordingWriter::default()),
         pvgs: fixture.pvgs,
@@ -456,6 +461,13 @@ fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
         shadow_rig: fixture.shadow_rig,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     }
 }
 

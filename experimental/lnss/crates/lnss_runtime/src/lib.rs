@@ -16,8 +16,11 @@ pub use lnss_core::BiophysFeedbackSnapshot;
 #[cfg(feature = "lnss-liquid-ode")]
 use lnss_core::TapKind;
 use lnss_core::{
-    digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
-    MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES, MAX_TOP_FEATURES,
+    digest, BrainTarget, CognitiveCore, ContextBundle, ControlIntentClass, CoreOrchestrator,
+    CoreStepOutput, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, FeedbackAnomalyFlags,
+    PolicyMode, RecursionDirective, RecursionDirectiveKind, RecursionPolicy, RlmCore, RlmInput,
+    TapFrame, TapSpec, WorldModelCore, WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES,
+    MAX_REASON_CODES, MAX_RLM_DIRECTIVES, MAX_STRING_LEN, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
@@ -53,6 +56,9 @@ const RC_TRACE_PROMISING: &str = "RC.GV.TRACE.PROMISING";
 const RC_TRACE_NEUTRAL: &str = "RC.GV.TRACE.NEUTRAL";
 const RC_TRACE_RISKY: &str = "RC.GV.TRACE.RISKY";
 const RC_AAP_BLOCKED_BY_TRACE: &str = "RC.GV.AAP.BLOCKED_BY_TRACE";
+const RC_WM_PRED_ERROR_HIGH: &str = "RC.GV.WM.PRED_ERROR_HIGH";
+const RC_RLM_RECURSION_STEP: &str = "RC.GV.RLM.RECURSION_STEP";
+const RC_RLM_RECURSION_BLOCKED_BY_POLICY: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_POLICY";
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -75,6 +81,47 @@ pub trait LlmBackend {
 
 pub trait HookProvider {
     fn collect_taps(&mut self, specs: &[TapSpec]) -> Vec<TapFrame>;
+}
+
+pub struct LanguageCore<'a> {
+    llm: &'a mut dyn LlmBackend,
+    hooks: &'a mut dyn HookProvider,
+    mods: &'a EmotionFieldSnapshot,
+    tap_specs: &'a [TapSpec],
+    limits: Limits,
+}
+
+impl<'a> LanguageCore<'a> {
+    pub fn new(
+        llm: &'a mut dyn LlmBackend,
+        hooks: &'a mut dyn HookProvider,
+        mods: &'a EmotionFieldSnapshot,
+        tap_specs: &'a [TapSpec],
+        limits: Limits,
+    ) -> Self {
+        Self {
+            llm,
+            hooks,
+            mods,
+            tap_specs,
+            limits,
+        }
+    }
+}
+
+impl<'a> CognitiveCore for LanguageCore<'a> {
+    fn step(&mut self, input: &[u8], _context: &ContextBundle) -> CoreStepOutput {
+        let mut output_bytes = self.llm.infer_step(input, self.mods);
+        output_bytes.truncate(self.limits.max_output_bytes);
+        let taps = if self.llm.supports_hooks() {
+            let mut frames = self.hooks.collect_taps(self.tap_specs);
+            frames.truncate(self.limits.max_taps);
+            frames
+        } else {
+            Vec::new()
+        };
+        CoreStepOutput { output_bytes, taps }
+    }
 }
 
 pub trait SaeBackend {
@@ -523,6 +570,9 @@ impl ApprovalInbox {
 pub struct LnssRuntime {
     pub llm: Box<dyn LlmBackend>,
     pub hooks: Box<dyn HookProvider>,
+    pub worldmodel: Box<dyn WorldModelCore>,
+    pub rlm: Box<dyn RlmCore>,
+    pub orchestrator: CoreOrchestrator,
     pub sae: Box<dyn SaeBackend>,
     pub mechint: Box<dyn MechIntWriter>,
     pub pvgs: Option<Box<dyn PvgsClientReader>>,
@@ -544,6 +594,13 @@ pub struct LnssRuntime {
     pub shadow_rig: Option<Box<dyn RigClient>>,
     pub trace_state: Option<TraceRunState>,
     pub seen_trace_digests: BTreeSet<[u8; 32]>,
+    pub policy_mode: PolicyMode,
+    pub control_intent_class: ControlIntentClass,
+    pub recursion_policy: RecursionPolicy,
+    pub world_state_digest: [u8; 32],
+    pub last_action_digest: [u8; 32],
+    pub last_self_state_digest: [u8; 32],
+    pub pred_error_threshold: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -572,6 +629,11 @@ pub struct MechIntRecord {
     pub tap_summaries: Vec<TapSummary>,
     pub feature_event_digests: Vec<[u8; 32]>,
     pub mapping_digest: [u8; 32],
+    pub world_state_digest: [u8; 32],
+    pub prediction_error_score: i32,
+    pub rlm_directives: Vec<RecursionDirective>,
+    pub self_state_digest: [u8; 32],
+    pub reason_codes: Vec<String>,
     pub feedback: Option<FeedbackSummary>,
     pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
     pub proposal_digest: Option<[u8; 32]>,
@@ -600,6 +662,11 @@ pub struct MechIntRecordParts {
     pub tap_summaries: Vec<TapSummary>,
     pub feature_event_digests: Vec<[u8; 32]>,
     pub mapping_digest: [u8; 32],
+    pub world_state_digest: [u8; 32],
+    pub prediction_error_score: i32,
+    pub rlm_directives: Vec<RecursionDirective>,
+    pub self_state_digest: [u8; 32],
+    pub reason_codes: Vec<String>,
     pub feedback: Option<FeedbackSummary>,
     pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
     pub proposal_digest: Option<[u8; 32]>,
@@ -722,6 +789,15 @@ impl MechIntRecord {
                 .cmp(&b.hook_id)
                 .then_with(|| a.activation_digest.cmp(&b.activation_digest))
         });
+        parts.reason_codes.iter_mut().for_each(|code| {
+            *code = bound_string(code);
+        });
+        parts.reason_codes.sort();
+        parts.reason_codes.dedup();
+        parts.reason_codes.truncate(MAX_REASON_CODES);
+        if parts.rlm_directives.len() > MAX_RLM_DIRECTIVES {
+            parts.rlm_directives.truncate(MAX_RLM_DIRECTIVES);
+        }
         let mut tap_digests: Vec<[u8; 32]> = parts
             .tap_summaries
             .iter()
@@ -738,6 +814,11 @@ impl MechIntRecord {
             tap_summaries: parts.tap_summaries,
             feature_event_digests: parts.feature_event_digests,
             mapping_digest: parts.mapping_digest,
+            world_state_digest: parts.world_state_digest,
+            prediction_error_score: parts.prediction_error_score,
+            rlm_directives: parts.rlm_directives,
+            self_state_digest: parts.self_state_digest,
+            reason_codes: parts.reason_codes,
             feedback: parts.feedback,
             mapping_suggestion: parts.mapping_suggestion,
             proposal_digest: parts.proposal_digest,
@@ -768,6 +849,22 @@ fn record_digest(parts: &MechIntRecordParts) -> [u8; 32] {
     buf.push(0);
     buf.extend_from_slice(&parts.token_digest);
     buf.extend_from_slice(&parts.mapping_digest);
+    buf.extend_from_slice(&parts.world_state_digest);
+    write_i32(&mut buf, parts.prediction_error_score);
+    buf.extend_from_slice(&parts.self_state_digest);
+    buf.extend_from_slice(&(parts.rlm_directives.len() as u32).to_le_bytes());
+    for directive in &parts.rlm_directives {
+        buf.push(match directive.kind {
+            RecursionDirectiveKind::Followup => 1,
+            RecursionDirectiveKind::Reflect => 2,
+            RecursionDirectiveKind::Hold => 3,
+        });
+        write_string(&mut buf, &directive.description);
+    }
+    buf.extend_from_slice(&(parts.reason_codes.len() as u32).to_le_bytes());
+    for code in &parts.reason_codes {
+        write_string(&mut buf, code);
+    }
     buf.extend_from_slice(&(parts.tap_summaries.len() as u32).to_le_bytes());
     for summary in &parts.tap_summaries {
         write_string(&mut buf, &summary.hook_id);
@@ -842,17 +939,74 @@ impl LnssRuntime {
         mods: &EmotionFieldSnapshot,
         tap_specs: &[TapSpec],
     ) -> Result<RuntimeOutput, LnssRuntimeError> {
-        let mut output_bytes = self.llm.infer_step(input, mods);
-        output_bytes.truncate(self.limits.max_output_bytes);
-        let token_digest = digest("lnss.token_bytes.v1", &output_bytes);
-
-        let taps = if self.llm.supports_hooks() {
-            let mut frames = self.hooks.collect_taps(tap_specs);
-            frames.truncate(self.limits.max_taps);
-            frames
-        } else {
-            Vec::new()
+        let control_frame_digest = digest("lnss.control_frame.v1", input);
+        let emotion_snapshot_digest = Some(emotion_snapshot_digest(mods));
+        let world_input = WorldModelInput {
+            input_digest: control_frame_digest,
+            prev_world_digest: self.world_state_digest,
+            action_digest: self.last_action_digest,
         };
+        let feedback_flags = feedback_anomaly_flags(self.feedback.last.as_ref());
+        let rlm_input = RlmInput {
+            control_frame_digest,
+            policy_mode: self.policy_mode,
+            control_intent: self.control_intent_class,
+            feedback_flags,
+            current_depth: 0,
+        };
+        let context = ContextBundle::new(
+            control_frame_digest,
+            None,
+            None,
+            self.world_state_digest,
+            self.last_self_state_digest,
+            emotion_snapshot_digest,
+        );
+        let mut language = LanguageCore::new(
+            self.llm.as_mut(),
+            self.hooks.as_mut(),
+            mods,
+            tap_specs,
+            self.limits.clone(),
+        );
+        let orchestration = self.orchestrator.run_tick(
+            self.worldmodel.as_mut(),
+            &mut language,
+            self.rlm.as_mut(),
+            input,
+            context,
+            &world_input,
+            &rlm_input,
+            self.recursion_policy,
+        );
+
+        let CoreStepOutput {
+            output_bytes: primary_output_bytes,
+            taps,
+        } = orchestration.language_output;
+        let followup_output_bytes = orchestration
+            .followup_output
+            .map(|output| output.output_bytes);
+        let output_bytes = followup_output_bytes
+            .clone()
+            .unwrap_or_else(|| primary_output_bytes.clone());
+        let token_digest = digest("lnss.token_bytes.v1", &output_bytes);
+        self.world_state_digest = orchestration.world_output.world_state_digest;
+        self.last_self_state_digest = orchestration.rlm_output.self_state_digest;
+        let action_bytes = followup_output_bytes.unwrap_or(primary_output_bytes.clone());
+        self.last_action_digest = digest("lnss.action_bytes.v1", &action_bytes);
+        let prediction_error_score = orchestration.world_output.prediction_error_score;
+        let rlm_directives = orchestration.rlm_output.recursion_directives;
+        let mut reason_codes = Vec::new();
+        if prediction_error_score > self.pred_error_threshold {
+            reason_codes.push(RC_WM_PRED_ERROR_HIGH.to_string());
+        }
+        if orchestration.recursion_used {
+            reason_codes.push(RC_RLM_RECURSION_STEP.to_string());
+        }
+        if orchestration.recursion_blocked {
+            reason_codes.push(RC_RLM_RECURSION_BLOCKED_BY_POLICY.to_string());
+        }
 
         let mut feature_events = Vec::new();
         for tap in &taps {
@@ -884,6 +1038,11 @@ impl LnssRuntime {
             tap_summaries,
             feature_event_digests,
             mapping_digest: self.mapper.map_digest,
+            world_state_digest: orchestration.world_output.world_state_digest,
+            prediction_error_score,
+            rlm_directives: rlm_directives.clone(),
+            self_state_digest: orchestration.rlm_output.self_state_digest,
+            reason_codes,
             feedback: feedback_summary,
             mapping_suggestion: mapping_suggestion.clone(),
             proposal_digest: None,
@@ -1755,6 +1914,12 @@ fn digest_bytes(digest: &ucf::v1::Digest32) -> Option<[u8; 32]> {
     Some(bytes)
 }
 
+fn bound_string(value: &str) -> String {
+    let mut out = value.to_string();
+    out.truncate(MAX_STRING_LEN);
+    out
+}
+
 fn write_string(buf: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     let len = bytes.len() as u32;
@@ -1895,6 +2060,34 @@ fn write_optional_shadow(buf: &mut Vec<u8>, shadow: Option<&ShadowEvidence>) {
             }
         }
         None => write_bool(buf, false),
+    }
+}
+
+fn emotion_snapshot_digest(snapshot: &EmotionFieldSnapshot) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_string(&mut buf, &snapshot.noise);
+    write_string(&mut buf, &snapshot.priority);
+    write_string(&mut buf, &snapshot.recursion_depth);
+    write_string(&mut buf, &snapshot.dwm);
+    write_string(&mut buf, &snapshot.profile);
+    buf.extend_from_slice(&(snapshot.overlays.len() as u32).to_le_bytes());
+    for overlay in &snapshot.overlays {
+        write_string(&mut buf, overlay);
+    }
+    buf.extend_from_slice(&(snapshot.top_reason_codes.len() as u32).to_le_bytes());
+    for reason in &snapshot.top_reason_codes {
+        write_string(&mut buf, reason);
+    }
+    digest("lnss.emotion_snapshot.v1", &buf)
+}
+
+fn feedback_anomaly_flags(snapshot: Option<&BiophysFeedbackSnapshot>) -> FeedbackAnomalyFlags {
+    match snapshot {
+        Some(snapshot) => FeedbackAnomalyFlags {
+            event_queue_overflowed: snapshot.event_queue_overflowed,
+            events_dropped: snapshot.events_dropped > 0,
+        },
+        None => FeedbackAnomalyFlags::default(),
     }
 }
 

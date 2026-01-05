@@ -2,14 +2,19 @@
 mod liquid_backend_tests {
     use std::fs;
 
-    use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapKind, TapSpec};
+    use lnss_core::{
+        BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
+        RecursionPolicy, TapKind, TapSpec,
+    };
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
+    use lnss_rlm::RlmController;
     use lnss_runtime::{
         FeedbackConsumer, HookProvider, Limits, LiquidOdeBackend, LiquidOdeConfig, LlmBackend,
         LnssRuntime, MappingAdaptationConfig,
     };
     use lnss_sae::StubSaeBackend;
+    use lnss_worldmodel::WorldModelCoreStub;
 
     fn base_mods() -> EmotionFieldSnapshot {
         EmotionFieldSnapshot::new(
@@ -154,6 +159,9 @@ mod liquid_backend_tests {
         let mut runtime_a = LnssRuntime {
             llm: Box::new(backend_a),
             hooks: Box::new(hooks_a),
+            worldmodel: Box::new(WorldModelCoreStub),
+            rlm: Box::new(RlmController::default()),
+            orchestrator: lnss_core::CoreOrchestrator,
             sae: Box::new(StubSaeBackend::new(4)),
             mechint: Box::new(mechint_a),
             pvgs: None,
@@ -174,10 +182,20 @@ mod liquid_backend_tests {
             shadow_rig: None,
             trace_state: None,
             seen_trace_digests: std::collections::BTreeSet::new(),
+            policy_mode: PolicyMode::Open,
+            control_intent_class: ControlIntentClass::Monitor,
+            recursion_policy: RecursionPolicy::default(),
+            world_state_digest: [0; 32],
+            last_action_digest: [0; 32],
+            last_self_state_digest: [0; 32],
+            pred_error_threshold: 128,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
             hooks: Box::new(hooks_b),
+            worldmodel: Box::new(WorldModelCoreStub),
+            rlm: Box::new(RlmController::default()),
+            orchestrator: lnss_core::CoreOrchestrator,
             sae: Box::new(StubSaeBackend::new(4)),
             mechint: Box::new(mechint_b),
             pvgs: None,
@@ -198,6 +216,13 @@ mod liquid_backend_tests {
             shadow_rig: None,
             trace_state: None,
             seen_trace_digests: std::collections::BTreeSet::new(),
+            policy_mode: PolicyMode::Open,
+            control_intent_class: ControlIntentClass::Monitor,
+            recursion_policy: RecursionPolicy::default(),
+            world_state_digest: [0; 32],
+            last_action_digest: [0; 32],
+            last_self_state_digest: [0; 32],
+            pred_error_threshold: 128,
         };
 
         let mods = base_mods();

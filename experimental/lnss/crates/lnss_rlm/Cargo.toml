@@ -1,0 +1,11 @@
+[package]
+name = "lnss_rlm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+blake3 = { workspace = true }
+lnss_core = { path = "../lnss_core" }
+serde = { workspace = true }
