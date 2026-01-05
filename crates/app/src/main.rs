@@ -250,6 +250,8 @@ mod lnss_cli {
             event_sink: Some(sink),
             shadow: lnss_runtime::ShadowConfig::default(),
             shadow_rig: None,
+            trace_state: None,
+            seen_trace_digests: std::collections::BTreeSet::new(),
         };
 
         let mods = EmotionFieldSnapshot::new(
