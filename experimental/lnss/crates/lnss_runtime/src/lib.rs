@@ -77,10 +77,16 @@ pub trait RigClient {
 }
 
 pub trait ProposalApplier {
-    fn apply_mapping_update(&mut self, path: &Path, digest: [u8; 32])
-        -> Result<(), LnssRuntimeError>;
-    fn apply_sae_pack_update(&mut self, path: &Path, digest: [u8; 32])
-        -> Result<(), LnssRuntimeError>;
+    fn apply_mapping_update(
+        &mut self,
+        path: &Path,
+        digest: [u8; 32],
+    ) -> Result<(), LnssRuntimeError>;
+    fn apply_sae_pack_update(
+        &mut self,
+        path: &Path,
+        digest: [u8; 32],
+    ) -> Result<(), LnssRuntimeError>;
     fn apply_liquid_params_update(
         &mut self,
         params_digest: [u8; 32],
@@ -367,8 +373,8 @@ impl ApprovalInbox {
         if !self.should_scan() {
             return Ok(None);
         }
-        let approvals =
-            load_approval_decisions(&self.dir).map_err(|err| LnssRuntimeError::Approval(err.to_string()))?;
+        let approvals = load_approval_decisions(&self.dir)
+            .map_err(|err| LnssRuntimeError::Approval(err.to_string()))?;
         if approvals.is_empty() {
             return Ok(None);
         }
@@ -384,7 +390,11 @@ impl ApprovalInbox {
 
         let mut candidates = Vec::new();
         for approval in approvals {
-            let approval_digest = match approval.approval_decision_digest.as_ref().and_then(digest_bytes) {
+            let approval_digest = match approval
+                .approval_decision_digest
+                .as_ref()
+                .and_then(digest_bytes)
+            {
                 Some(digest) => digest,
                 None => continue,
             };
@@ -926,8 +936,8 @@ impl ProposalApplier for LnssRuntime {
                 "mapping digest mismatch".to_string(),
             ));
         }
-        let map: FeatureToBrainMap =
-            serde_json::from_slice(&bytes).map_err(|err| LnssRuntimeError::Approval(err.to_string()))?;
+        let map: FeatureToBrainMap = serde_json::from_slice(&bytes)
+            .map_err(|err| LnssRuntimeError::Approval(err.to_string()))?;
         self.mapper = map;
         Ok(())
     }
@@ -1081,9 +1091,7 @@ fn digest_file_bytes(bytes: &[u8]) -> [u8; 32] {
 
 fn liquid_params_digest(kv_pairs: &[(String, String)]) -> [u8; 32] {
     let mut pairs = kv_pairs.to_vec();
-    pairs.sort_by(|(a_key, a_val), (b_key, b_val)| {
-        a_key.cmp(b_key).then_with(|| a_val.cmp(b_val))
-    });
+    pairs.sort_by(|(a_key, a_val), (b_key, b_val)| a_key.cmp(b_key).then_with(|| a_val.cmp(b_val)));
     let mut buf = Vec::new();
     write_u32(&mut buf, pairs.len() as u32);
     for (key, value) in pairs {

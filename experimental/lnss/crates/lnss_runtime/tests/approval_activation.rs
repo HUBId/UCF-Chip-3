@@ -113,10 +113,7 @@ fn approval_fixture(
         constraints,
         approval_decision_digest: None,
     };
-    let digest = digest_proto(
-        "UCF:HASH:APPROVAL_DECISION",
-        &canonical_bytes(&decision),
-    );
+    let digest = digest_proto("UCF:HASH:APPROVAL_DECISION", &canonical_bytes(&decision));
     decision.approval_decision_digest = Some(ucf::v1::Digest32 {
         value: digest.to_vec(),
     });
@@ -142,7 +139,9 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
 
     LnssRuntime {
         llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider { taps: vec![tap_frame] }),
+        hooks: Box::new(StubHookProvider {
+            taps: vec![tap_frame],
+        }),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(writer),
         pvgs: None,
@@ -156,8 +155,7 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
         approval_inbox: Some(
-            ApprovalInbox::with_state_path(dir, dir.join("state.json"), 1)
-                .expect("approval inbox"),
+            ApprovalInbox::with_state_path(dir, dir.join("state.json"), 1).expect("approval inbox"),
         ),
     }
 }
