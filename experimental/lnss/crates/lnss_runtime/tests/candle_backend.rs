@@ -117,9 +117,9 @@ fn candle_end_to_end_is_deterministic() {
     let mut runtime = LnssRuntime {
         llm: Box::new(backend),
         hooks: Box::new(TapRegistryProvider::new(registry.clone(), true)),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(CandleSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,

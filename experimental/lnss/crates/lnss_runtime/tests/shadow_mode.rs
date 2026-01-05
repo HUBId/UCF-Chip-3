@@ -126,9 +126,9 @@ fn shadow_mapping_reduces_amplitude_and_improves_score() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(sae),
         mechint: Box::new(writer),
         pvgs: None,

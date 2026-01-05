@@ -433,9 +433,9 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(writer),
         pvgs: None,

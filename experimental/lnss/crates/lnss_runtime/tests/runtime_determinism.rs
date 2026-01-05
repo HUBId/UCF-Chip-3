@@ -181,9 +181,9 @@ fn end_to_end_stub_pipeline() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame.clone()],
         }),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
@@ -261,9 +261,9 @@ fn core_outputs_are_deterministic() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame.clone()],
         }),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(
             JsonlMechIntWriter::new(
@@ -305,9 +305,9 @@ fn core_outputs_are_deterministic() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(
             JsonlMechIntWriter::new(

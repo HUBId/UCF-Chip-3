@@ -114,9 +114,9 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss::lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss::lnss_core::CoreOrchestrator,
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,

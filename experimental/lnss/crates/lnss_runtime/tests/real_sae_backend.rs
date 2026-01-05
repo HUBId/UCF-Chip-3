@@ -113,9 +113,9 @@ mod real_sae_backend_tests {
         let mut runtime_a = LnssRuntime {
             llm: Box::new(backend_a),
             hooks: Box::new(hooks_a),
-            worldmodel: Box::new(WorldModelCoreStub::default()),
+            worldmodel: Box::new(WorldModelCoreStub),
             rlm: Box::new(RlmController::default()),
-            orchestrator: lnss_core::CoreOrchestrator::default(),
+            orchestrator: lnss_core::CoreOrchestrator,
             sae: Box::new(RealSaeBackend::new(
                 write_pack(&pack_dir_a),
                 SaeNonlinearity::Relu,
@@ -151,9 +151,9 @@ mod real_sae_backend_tests {
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
             hooks: Box::new(hooks_b),
-            worldmodel: Box::new(WorldModelCoreStub::default()),
+            worldmodel: Box::new(WorldModelCoreStub),
             rlm: Box::new(RlmController::default()),
-            orchestrator: lnss_core::CoreOrchestrator::default(),
+            orchestrator: lnss_core::CoreOrchestrator,
             sae: Box::new(RealSaeBackend::new(
                 write_pack(&pack_dir_b),
                 SaeNonlinearity::Relu,

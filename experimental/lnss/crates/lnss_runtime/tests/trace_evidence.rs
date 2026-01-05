@@ -437,9 +437,9 @@ fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
         hooks: Box::new(StubHookProvider {
             taps: vec![TapFrame::new("hook-a", vec![1, 2, 3])],
         }),
-        worldmodel: Box::new(WorldModelCoreStub::default()),
+        worldmodel: Box::new(WorldModelCoreStub),
         rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator::default(),
+        orchestrator: lnss_core::CoreOrchestrator,
         sae: fixture.sae,
         mechint: Box::new(RecordingWriter::default()),
         pvgs: fixture.pvgs,

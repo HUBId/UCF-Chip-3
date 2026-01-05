@@ -473,6 +473,38 @@ impl CoreOrchestrator {
     }
 }
 
+impl EmotionFieldSnapshot {
+    pub fn new(
+        noise: &str,
+        priority: &str,
+        recursion_depth: &str,
+        dwm: &str,
+        profile: &str,
+        overlays: Vec<String>,
+        top_reason_codes: Vec<String>,
+    ) -> Self {
+        let mut overlays = overlays;
+        overlays.iter_mut().for_each(|s| *s = bound_string(s));
+        overlays.truncate(MAX_OVERLAYS);
+
+        let mut reasons = top_reason_codes;
+        reasons.iter_mut().for_each(|s| *s = bound_string(s));
+        reasons.sort();
+        reasons.dedup();
+        reasons.truncate(MAX_REASON_CODES);
+
+        Self {
+            noise: bound_string(noise),
+            priority: bound_string(priority),
+            recursion_depth: bound_string(recursion_depth),
+            dwm: bound_string(dwm),
+            profile: bound_string(profile),
+            overlays,
+            top_reason_codes: reasons,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,7 +566,7 @@ mod tests {
                 "hold",
             )],
         };
-        let mut orchestrator = CoreOrchestrator::default();
+        let mut orchestrator = CoreOrchestrator;
         let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
         let world_input = WorldModelInput {
             input_digest: [0; 32],
@@ -575,7 +607,7 @@ mod tests {
                 "FOLLOWUP",
             )],
         };
-        let mut orchestrator = CoreOrchestrator::default();
+        let mut orchestrator = CoreOrchestrator;
         let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
         let world_input = WorldModelInput {
             input_digest: [0; 32],
@@ -605,37 +637,5 @@ mod tests {
 
         assert!(output.followup_output.is_none());
         assert!(output.recursion_blocked);
-    }
-}
-
-impl EmotionFieldSnapshot {
-    pub fn new(
-        noise: &str,
-        priority: &str,
-        recursion_depth: &str,
-        dwm: &str,
-        profile: &str,
-        overlays: Vec<String>,
-        top_reason_codes: Vec<String>,
-    ) -> Self {
-        let mut overlays = overlays;
-        overlays.iter_mut().for_each(|s| *s = bound_string(s));
-        overlays.truncate(MAX_OVERLAYS);
-
-        let mut reasons = top_reason_codes;
-        reasons.iter_mut().for_each(|s| *s = bound_string(s));
-        reasons.sort();
-        reasons.dedup();
-        reasons.truncate(MAX_REASON_CODES);
-
-        Self {
-            noise: bound_string(noise),
-            priority: bound_string(priority),
-            recursion_depth: bound_string(recursion_depth),
-            dwm: bound_string(dwm),
-            profile: bound_string(profile),
-            overlays,
-            top_reason_codes: reasons,
-        }
     }
 }
