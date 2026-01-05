@@ -1,11 +1,12 @@
 use std::fs;
 
 use lnss_core::{
-    BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapKind, TapSpec,
-    MAX_TOP_FEATURES,
+    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
+    PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec, MAX_TOP_FEATURES,
 };
 use lnss_hooks::TapPlan;
 use lnss_mechint::JsonlMechIntWriter;
+use lnss_rlm::RlmController;
 use lnss_rig::InMemoryRigClient;
 use lnss_runtime::{
     map_features_to_spikes, BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime,
@@ -13,6 +14,7 @@ use lnss_runtime::{
     StubHookProvider, StubLlmBackend, TapSummary,
 };
 use lnss_sae::StubSaeBackend;
+use lnss_worldmodel::WorldModelCoreStub;
 
 #[test]
 fn deterministic_feature_event_ordering() {
@@ -70,6 +72,11 @@ fn boundedness_caps_are_enforced() {
         tap_summaries: summaries,
         feature_event_digests: vec![],
         mapping_digest: [3; 32],
+        world_state_digest: [4; 32],
+        prediction_error_score: 12,
+        rlm_directives: vec![],
+        self_state_digest: [5; 32],
+        reason_codes: vec![],
         feedback: None,
         mapping_suggestion: None,
         proposal_digest: None,
@@ -174,6 +181,9 @@ fn end_to_end_stub_pipeline() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame.clone()],
         }),
+        worldmodel: Box::new(WorldModelCoreStub::default()),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator::default(),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
@@ -195,6 +205,13 @@ fn end_to_end_stub_pipeline() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -215,4 +232,139 @@ fn end_to_end_stub_pipeline() {
     assert!(line.contains("session-1"));
     assert!(line.contains("step-1"));
     assert_eq!(output.taps.len(), 1);
+}
+
+#[test]
+fn core_outputs_are_deterministic() {
+    let tap_specs = TapPlan::new(vec![TapSpec::new(
+        "hook-a",
+        TapKind::ResidualStream,
+        0,
+        "resid",
+    )]);
+    let tap_frame = TapFrame::new("hook-a", vec![9, 9, 9]);
+    let mapper = FeatureToBrainMap::new(
+        1,
+        vec![(
+            u32::from_le_bytes([
+                tap_frame.activation_digest[0],
+                tap_frame.activation_digest[1],
+                tap_frame.activation_digest[2],
+                tap_frame.activation_digest[3],
+            ]),
+            BrainTarget::new("v1", "pop", 1, "syn", 800),
+        )],
+    );
+
+    let mut runtime_a = LnssRuntime {
+        llm: Box::new(StubLlmBackend),
+        hooks: Box::new(StubHookProvider {
+            taps: vec![tap_frame.clone()],
+        }),
+        worldmodel: Box::new(WorldModelCoreStub::default()),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator::default(),
+        sae: Box::new(StubSaeBackend::new(4)),
+        mechint: Box::new(JsonlMechIntWriter::new(
+            std::env::temp_dir().join("lnss_core_det_a.jsonl"),
+            Some(1024),
+        ).expect("jsonl writer")),
+        pvgs: None,
+        rig: Box::new(InMemoryRigClient::default()),
+        mapper: mapper.clone(),
+        limits: Limits::default(),
+        injection_limits: lnss_runtime::InjectionLimits::default(),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
+        feedback: FeedbackConsumer::default(),
+        adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: None,
+        approval_inbox: None,
+        activation_now_ms: None,
+        event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
+    };
+
+    let mut runtime_b = LnssRuntime {
+        llm: Box::new(StubLlmBackend),
+        hooks: Box::new(StubHookProvider {
+            taps: vec![tap_frame],
+        }),
+        worldmodel: Box::new(WorldModelCoreStub::default()),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator::default(),
+        sae: Box::new(StubSaeBackend::new(4)),
+        mechint: Box::new(JsonlMechIntWriter::new(
+            std::env::temp_dir().join("lnss_core_det_b.jsonl"),
+            Some(1024),
+        ).expect("jsonl writer")),
+        pvgs: None,
+        rig: Box::new(InMemoryRigClient::default()),
+        mapper,
+        limits: Limits::default(),
+        injection_limits: lnss_runtime::InjectionLimits::default(),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
+        feedback: FeedbackConsumer::default(),
+        adaptation: MappingAdaptationConfig::default(),
+        proposal_inbox: None,
+        approval_inbox: None,
+        activation_now_ms: None,
+        event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
+        trace_state: None,
+        seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
+    };
+
+    let mods = EmotionFieldSnapshot::new(
+        "calm",
+        "low",
+        "shallow",
+        "baseline",
+        "stable",
+        vec![],
+        vec![],
+    );
+
+    let output_a = runtime_a
+        .run_step("session-1", "step-1", b"input", &mods, &tap_specs.specs)
+        .expect("runtime step");
+    let output_b = runtime_b
+        .run_step("session-1", "step-1", b"input", &mods, &tap_specs.specs)
+        .expect("runtime step");
+
+    assert_eq!(
+        output_a.mechint_record.world_state_digest,
+        output_b.mechint_record.world_state_digest
+    );
+    assert_eq!(
+        output_a.mechint_record.rlm_directives,
+        output_b.mechint_record.rlm_directives
+    );
+    assert_eq!(
+        output_a.mechint_record.self_state_digest,
+        output_b.mechint_record.self_state_digest
+    );
 }

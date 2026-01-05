@@ -909,8 +909,10 @@ dependencies = [
  "lnss_hooks",
  "lnss_mechint",
  "lnss_rig",
+ "lnss_rlm",
  "lnss_runtime",
  "lnss_sae",
+ "lnss_worldmodel",
  "serde_json",
 ]
 
@@ -991,6 +993,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnss_rlm"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "lnss_core",
+ "serde",
+]
+
+[[package]]
 name = "lnss_runtime"
 version = "0.1.0"
 dependencies = [
@@ -1004,7 +1015,9 @@ dependencies = [
  "lnss_hooks",
  "lnss_mechint",
  "lnss_rig",
+ "lnss_rlm",
  "lnss_sae",
+ "lnss_worldmodel",
  "prost",
  "pvgs_client",
  "serde",
@@ -1024,6 +1037,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "lnss_worldmodel"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "lnss_core",
+ "serde",
 ]
 
 [[package]]

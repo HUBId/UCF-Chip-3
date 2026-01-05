@@ -11,6 +11,7 @@ pub const MAX_TAP_SPECS: usize = 128;
 pub const MAX_ACTIVATION_BYTES: usize = 1024 * 1024;
 pub const MAX_MAPPING_ENTRIES: usize = 4096;
 pub const MAX_OVERLAYS: usize = 16;
+pub const MAX_RLM_DIRECTIVES: usize = 3;
 
 #[derive(Debug, Error)]
 pub enum LnssCoreError {
@@ -268,6 +269,342 @@ pub struct EmotionFieldSnapshot {
     pub profile: String,
     pub overlays: Vec<String>,
     pub top_reason_codes: Vec<String>,
+}
+
+pub type CoreTapFrame = TapFrame;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreStepOutput {
+    pub output_bytes: Vec<u8>,
+    pub taps: Vec<CoreTapFrame>,
+}
+
+pub trait CognitiveCore {
+    fn step(&mut self, input: &[u8], context: &ContextBundle) -> CoreStepOutput;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextBundle {
+    pub control_frame_digest: [u8; 32],
+    pub policy_digest: Option<[u8; 32]>,
+    pub constraints_digest: Option<[u8; 32]>,
+    pub world_state_digest: [u8; 32],
+    pub last_self_state_digest: [u8; 32],
+    pub emotion_snapshot_digest: Option<[u8; 32]>,
+}
+
+impl ContextBundle {
+    pub fn new(
+        control_frame_digest: [u8; 32],
+        policy_digest: Option<[u8; 32]>,
+        constraints_digest: Option<[u8; 32]>,
+        world_state_digest: [u8; 32],
+        last_self_state_digest: [u8; 32],
+        emotion_snapshot_digest: Option<[u8; 32]>,
+    ) -> Self {
+        Self {
+            control_frame_digest,
+            policy_digest,
+            constraints_digest,
+            world_state_digest,
+            last_self_state_digest,
+            emotion_snapshot_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlIntentClass {
+    Monitor,
+    Explore,
+    Execute,
+    Reflect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyMode {
+    Open,
+    Guarded,
+    Strict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FeedbackAnomalyFlags {
+    pub event_queue_overflowed: bool,
+    pub events_dropped: bool,
+}
+
+impl FeedbackAnomalyFlags {
+    pub fn any(&self) -> bool {
+        self.event_queue_overflowed || self.events_dropped
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldModelInput {
+    pub input_digest: [u8; 32],
+    pub prev_world_digest: [u8; 32],
+    pub action_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldModelOutput {
+    pub world_state_digest: [u8; 32],
+    pub prediction_error_score: i32,
+    pub world_taps: Option<Vec<CoreTapFrame>>,
+}
+
+pub trait WorldModelCore {
+    fn step(&mut self, input: &WorldModelInput) -> WorldModelOutput;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecursionDirectiveKind {
+    Followup,
+    Reflect,
+    Hold,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursionDirective {
+    pub kind: RecursionDirectiveKind,
+    pub description: String,
+}
+
+impl RecursionDirective {
+    pub fn new(kind: RecursionDirectiveKind, description: &str) -> Self {
+        Self {
+            kind,
+            description: bound_string(description),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RlmInput {
+    pub control_frame_digest: [u8; 32],
+    pub policy_mode: PolicyMode,
+    pub control_intent: ControlIntentClass,
+    pub feedback_flags: FeedbackAnomalyFlags,
+    pub current_depth: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RlmOutput {
+    pub recursion_directives: Vec<RecursionDirective>,
+    pub self_state_digest: [u8; 32],
+}
+
+pub trait RlmCore {
+    fn step(&mut self, input: &RlmInput) -> RlmOutput;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursionPolicy {
+    pub allow_followup: bool,
+    pub max_depth: u8,
+}
+
+impl Default for RecursionPolicy {
+    fn default() -> Self {
+        Self {
+            allow_followup: true,
+            max_depth: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrchestratorOutput {
+    pub world_output: WorldModelOutput,
+    pub language_output: CoreStepOutput,
+    pub rlm_output: RlmOutput,
+    pub followup_output: Option<CoreStepOutput>,
+    pub recursion_used: bool,
+    pub recursion_blocked: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct CoreOrchestrator;
+
+impl CoreOrchestrator {
+    pub fn run_tick<W, L, R>(
+        &mut self,
+        worldmodel: &mut W,
+        language: &mut L,
+        rlm: &mut R,
+        input: &[u8],
+        mut context: ContextBundle,
+        world_input: &WorldModelInput,
+        rlm_input: &RlmInput,
+        policy: RecursionPolicy,
+    ) -> OrchestratorOutput
+    where
+        W: WorldModelCore + ?Sized,
+        L: CognitiveCore + ?Sized,
+        R: RlmCore + ?Sized,
+    {
+        let world_output = worldmodel.step(world_input);
+        context.world_state_digest = world_output.world_state_digest;
+        let language_output = language.step(input, &context);
+        let rlm_output = rlm.step(rlm_input);
+
+        let wants_followup = rlm_output
+            .recursion_directives
+            .iter()
+            .any(|directive| directive.kind == RecursionDirectiveKind::Followup);
+        let depth_ok = rlm_input.current_depth < policy.max_depth;
+        let allow_followup = policy.allow_followup && depth_ok;
+        let followup_output = if wants_followup && allow_followup {
+            context.last_self_state_digest = rlm_output.self_state_digest;
+            Some(language.step(input, &context))
+        } else {
+            None
+        };
+        OrchestratorOutput {
+            world_output,
+            language_output,
+            rlm_output,
+            followup_output,
+            recursion_used: wants_followup && allow_followup,
+            recursion_blocked: wants_followup && !allow_followup,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct TestWorldModel {
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl WorldModelCore for TestWorldModel {
+        fn step(&mut self, _input: &WorldModelInput) -> WorldModelOutput {
+            self.log.lock().expect("log lock").push("world");
+            WorldModelOutput {
+                world_state_digest: [1; 32],
+                prediction_error_score: 0,
+                world_taps: None,
+            }
+        }
+    }
+
+    struct TestLanguage {
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl CognitiveCore for TestLanguage {
+        fn step(&mut self, _input: &[u8], _context: &ContextBundle) -> CoreStepOutput {
+            self.log.lock().expect("log lock").push("language");
+            CoreStepOutput {
+                output_bytes: vec![1],
+                taps: Vec::new(),
+            }
+        }
+    }
+
+    struct TestRlm {
+        log: Arc<Mutex<Vec<&'static str>>>,
+        directives: Vec<RecursionDirective>,
+    }
+
+    impl RlmCore for TestRlm {
+        fn step(&mut self, _input: &RlmInput) -> RlmOutput {
+            self.log.lock().expect("log lock").push("rlm");
+            RlmOutput {
+                recursion_directives: self.directives.clone(),
+                self_state_digest: [2; 32],
+            }
+        }
+    }
+
+    #[test]
+    fn orchestrator_order_is_fixed() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut world = TestWorldModel { log: log.clone() };
+        let mut language = TestLanguage { log: log.clone() };
+        let mut rlm = TestRlm {
+            log: log.clone(),
+            directives: vec![RecursionDirective::new(
+                RecursionDirectiveKind::Hold,
+                "hold",
+            )],
+        };
+        let mut orchestrator = CoreOrchestrator::default();
+        let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
+        let world_input = WorldModelInput {
+            input_digest: [0; 32],
+            prev_world_digest: [0; 32],
+            action_digest: [0; 32],
+        };
+        let rlm_input = RlmInput {
+            control_frame_digest: [0; 32],
+            policy_mode: PolicyMode::Open,
+            control_intent: ControlIntentClass::Monitor,
+            feedback_flags: FeedbackAnomalyFlags::default(),
+            current_depth: 0,
+        };
+        orchestrator.run_tick(
+            &mut world,
+            &mut language,
+            &mut rlm,
+            b"input",
+            context,
+            &world_input,
+            &rlm_input,
+            RecursionPolicy::default(),
+        );
+
+        let steps = log.lock().expect("log lock").clone();
+        assert_eq!(steps, vec!["world", "language", "rlm"]);
+    }
+
+    #[test]
+    fn recursion_is_blocked_when_depth_exceeds_policy() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut world = TestWorldModel { log: log.clone() };
+        let mut language = TestLanguage { log: log.clone() };
+        let mut rlm = TestRlm {
+            log: log.clone(),
+            directives: vec![RecursionDirective::new(
+                RecursionDirectiveKind::Followup,
+                "FOLLOWUP",
+            )],
+        };
+        let mut orchestrator = CoreOrchestrator::default();
+        let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
+        let world_input = WorldModelInput {
+            input_digest: [0; 32],
+            prev_world_digest: [0; 32],
+            action_digest: [0; 32],
+        };
+        let rlm_input = RlmInput {
+            control_frame_digest: [0; 32],
+            policy_mode: PolicyMode::Open,
+            control_intent: ControlIntentClass::Explore,
+            feedback_flags: FeedbackAnomalyFlags::default(),
+            current_depth: 2,
+        };
+        let output = orchestrator.run_tick(
+            &mut world,
+            &mut language,
+            &mut rlm,
+            b"input",
+            context,
+            &world_input,
+            &rlm_input,
+            RecursionPolicy {
+                allow_followup: true,
+                max_depth: 2,
+            },
+        );
+
+        assert!(output.followup_output.is_none());
+        assert!(output.recursion_blocked);
+    }
 }
 
 impl EmotionFieldSnapshot {

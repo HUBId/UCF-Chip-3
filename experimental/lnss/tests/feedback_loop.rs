@@ -9,14 +9,17 @@ use lnss::lnss_bluebridge::{
     Chip2InjectClient, Chip2RouterAdapter, Chip2RouterError, ExternalSpike, InjectionReport,
 };
 use lnss::lnss_core::{
-    BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapFrame, TapKind, TapSpec,
+    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
+    RecursionPolicy, TapFrame, TapKind, TapSpec,
 };
 use lnss::lnss_mechint::JsonlMechIntWriter;
+use lnss::lnss_rlm::RlmController;
 use lnss::lnss_runtime::{
     BiophysFeedbackSnapshot, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime,
     MappingAdaptationConfig, MechIntRecord, StubHookProvider, StubLlmBackend,
 };
 use lnss::lnss_sae::StubSaeBackend;
+use lnss::lnss_worldmodel::WorldModelCoreStub;
 
 #[derive(Clone)]
 struct Chip2RouterBridge {
@@ -111,6 +114,9 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
+        worldmodel: Box::new(WorldModelCoreStub::default()),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss::lnss_core::CoreOrchestrator::default(),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
@@ -132,6 +138,13 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = EmotionFieldSnapshot::new(

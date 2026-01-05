@@ -1,12 +1,15 @@
 use chip2::{Chip2Runtime, DefaultRouter, L4Circuit};
 use lnss_core::{
-    BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapKind, TapSpec,
+    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
+    PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
 };
+use lnss_rlm::RlmController;
 use lnss_runtime::{
     BiophysFeedbackSnapshot, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime,
     MappingAdaptationConfig, MechIntRecord, MechIntWriter, RigClient, SaeBackend, ShadowConfig,
     StubHookProvider, StubLlmBackend,
 };
+use lnss_worldmodel::WorldModelCoreStub;
 
 #[derive(Clone, Default)]
 struct RecordingWriter {
@@ -123,6 +126,9 @@ fn shadow_mapping_reduces_amplitude_and_improves_score() {
         hooks: Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
+        worldmodel: Box::new(WorldModelCoreStub::default()),
+        rlm: Box::new(RlmController::default()),
+        orchestrator: lnss_core::CoreOrchestrator::default(),
         sae: Box::new(sae),
         mechint: Box::new(writer),
         pvgs: None,
@@ -150,6 +156,13 @@ fn shadow_mapping_reduces_amplitude_and_improves_score() {
         shadow_rig: Some(Box::new(Chip2RigClient::new(11))),
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        policy_mode: PolicyMode::Open,
+        control_intent_class: ControlIntentClass::Monitor,
+        recursion_policy: RecursionPolicy::default(),
+        world_state_digest: [0; 32],
+        last_action_digest: [0; 32],
+        last_self_state_digest: [0; 32],
+        pred_error_threshold: 128,
     };
 
     let mods = EmotionFieldSnapshot::new(
