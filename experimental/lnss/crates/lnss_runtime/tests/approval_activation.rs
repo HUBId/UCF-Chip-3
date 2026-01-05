@@ -471,8 +471,8 @@ fn activation_id_for(proposal_digest: [u8; 32], approval_digest: [u8; 32]) -> St
     format!("act:{proposal_prefix}:{approval_prefix}")
 }
 
-fn expected_activation_evidence(
-    proposal: &lnss_evolve::Proposal,
+struct ExpectedActivationInput<'a> {
+    proposal: &'a lnss_evolve::Proposal,
     approval_digest: [u8; 32],
     status: ActivationStatus,
     active_mapping_digest: Option<[u8; 32]>,
@@ -480,24 +480,30 @@ fn expected_activation_evidence(
     active_liquid_params_digest: Option<[u8; 32]>,
     active_injection_limits: Option<InjectionLimits>,
     created_at_ms: u64,
+}
+
+fn expected_activation_evidence(
+    input: ExpectedActivationInput<'_>,
 ) -> ProposalActivationEvidenceLocal {
-    let reason_code = match &status {
+    let reason_code = match &input.status {
         ActivationStatus::Applied => "RC.GV.PROPOSAL.ACTIVATED".to_string(),
         ActivationStatus::Rejected => "RC.GV.PROPOSAL.REJECTED".to_string(),
     };
     ProposalActivationEvidenceLocal {
-        activation_id: activation_id_for(proposal.proposal_digest, approval_digest),
-        proposal_digest: proposal.proposal_digest,
-        approval_digest,
-        status,
-        active_mapping_digest,
-        active_sae_pack_digest,
-        active_liquid_params_digest,
-        active_injection_limits: active_injection_limits.map(|limits| ActivationInjectionLimits {
-            max_spikes_per_tick: limits.max_spikes_per_tick,
-            max_targets_per_spike: limits.max_targets_per_spike,
+        activation_id: activation_id_for(input.proposal.proposal_digest, input.approval_digest),
+        proposal_digest: input.proposal.proposal_digest,
+        approval_digest: input.approval_digest,
+        status: input.status,
+        active_mapping_digest: input.active_mapping_digest,
+        active_sae_pack_digest: input.active_sae_pack_digest,
+        active_liquid_params_digest: input.active_liquid_params_digest,
+        active_injection_limits: input.active_injection_limits.map(|limits| {
+            ActivationInjectionLimits {
+                max_spikes_per_tick: limits.max_spikes_per_tick,
+                max_targets_per_spike: limits.max_targets_per_spike,
+            }
         }),
-        created_at_ms,
+        created_at_ms: input.created_at_ms,
         reason_codes: vec![reason_code],
         activation_digest: [0u8; 32],
     }
@@ -623,16 +629,16 @@ fn activation_commit_on_apply() {
         .clone();
     assert_eq!(committed.len(), 1);
 
-    let mut expected = expected_activation_evidence(
-        &proposal,
+    let mut expected = expected_activation_evidence(ExpectedActivationInput {
+        proposal: &proposal,
         approval_digest,
-        ActivationStatus::Applied,
-        Some(map.map_digest),
-        None,
-        None,
-        Some(InjectionLimits::default()),
-        123,
-    );
+        status: ActivationStatus::Applied,
+        active_mapping_digest: Some(map.map_digest),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
+        active_injection_limits: Some(InjectionLimits::default()),
+        created_at_ms: 123,
+    });
     compute_activation_digest(&mut expected);
     let expected_bytes = encode_activation(&expected);
     assert_eq!(committed[0], expected_bytes);
@@ -724,27 +730,27 @@ fn activation_commit_ordering_is_deterministic() {
             )
         };
 
-    let mut expected_first = expected_activation_evidence(
-        first_proposal,
-        first_approval,
-        ActivationStatus::Applied,
-        Some(first_map),
-        None,
-        None,
-        Some(InjectionLimits::default()),
-        123,
-    );
+    let mut expected_first = expected_activation_evidence(ExpectedActivationInput {
+        proposal: first_proposal,
+        approval_digest: first_approval,
+        status: ActivationStatus::Applied,
+        active_mapping_digest: Some(first_map),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
+        active_injection_limits: Some(InjectionLimits::default()),
+        created_at_ms: 123,
+    });
     compute_activation_digest(&mut expected_first);
-    let mut expected_second = expected_activation_evidence(
-        second_proposal,
-        second_approval,
-        ActivationStatus::Applied,
-        Some(second_map),
-        None,
-        None,
-        Some(InjectionLimits::default()),
-        123,
-    );
+    let mut expected_second = expected_activation_evidence(ExpectedActivationInput {
+        proposal: second_proposal,
+        approval_digest: second_approval,
+        status: ActivationStatus::Applied,
+        active_mapping_digest: Some(second_map),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
+        active_injection_limits: Some(InjectionLimits::default()),
+        created_at_ms: 123,
+    });
     compute_activation_digest(&mut expected_second);
 
     assert_eq!(committed[0], encode_activation(&expected_first));
@@ -775,16 +781,16 @@ fn activation_commit_on_reject() {
         .clone();
     assert_eq!(committed.len(), 1);
 
-    let mut expected = expected_activation_evidence(
-        &proposal,
+    let mut expected = expected_activation_evidence(ExpectedActivationInput {
+        proposal: &proposal,
         approval_digest,
-        ActivationStatus::Rejected,
-        Some(baseline_mapping),
-        None,
-        None,
-        Some(InjectionLimits::default()),
-        123,
-    );
+        status: ActivationStatus::Rejected,
+        active_mapping_digest: Some(baseline_mapping),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
+        active_injection_limits: Some(InjectionLimits::default()),
+        created_at_ms: 123,
+    });
     compute_activation_digest(&mut expected);
     assert_eq!(committed[0], encode_activation(&expected));
 }
