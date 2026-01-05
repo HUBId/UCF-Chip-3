@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn deterministic_world_model_outputs() {
-        let mut core = WorldModelCoreStub::default();
+        let mut core = WorldModelCoreStub;
         let input = WorldModelInput {
             input_digest: [1; 32],
             prev_world_digest: [2; 32],
