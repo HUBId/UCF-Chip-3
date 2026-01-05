@@ -86,6 +86,7 @@ fn boundedness_caps_are_enforced() {
         active_injection_limits: None,
         activation_digest: None,
         committed_to_pvgs: None,
+        shadow_evidence: None,
     });
     assert_eq!(record.tap_digests.len(), 4);
 }
@@ -182,12 +183,16 @@ fn end_to_end_stub_pipeline() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

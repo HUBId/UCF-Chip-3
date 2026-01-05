@@ -19,7 +19,7 @@ pub use lnss_core::BiophysFeedbackSnapshot;
 use lnss_core::TapKind;
 use lnss_core::{
     digest, BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapSpec,
-    MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_TOP_FEATURES,
+    MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
     encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
@@ -44,6 +44,9 @@ pub const LIQUID_PARAMS_DOMAIN: &str = "lnss.liquid.params.v1";
 const ACTIVATION_ID_PREFIX_LEN: usize = 8;
 const RC_PROPOSAL_ACTIVATED: &str = "RC.GV.PROPOSAL.ACTIVATED";
 const RC_PROPOSAL_REJECTED: &str = "RC.GV.PROPOSAL.REJECTED";
+const RC_SHADOW_BETTER: &str = "RC.GV.SHADOW.BETTER";
+const RC_SHADOW_WORSE: &str = "RC.GV.SHADOW.WORSE";
+const RC_SHADOW_EQUAL: &str = "RC.GV.SHADOW.EQUAL";
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -55,6 +58,8 @@ pub enum LnssRuntimeError {
     Proposal(String),
     #[error("approval inbox error: {0}")]
     Approval(String),
+    #[error("shadow config error: {0}")]
+    Shadow(String),
 }
 
 pub trait LlmBackend {
@@ -120,6 +125,50 @@ impl Default for Limits {
             max_spikes: DEFAULT_MAX_SPIKES,
             max_mechint_bytes: DEFAULT_MAX_MECHINT_BYTES,
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ShadowConfig {
+    pub enabled: bool,
+    pub shadow_mapping: Option<FeatureToBrainMap>,
+    #[cfg(feature = "lnss-liquid-ode")]
+    pub shadow_liquid_params: Option<LiquidOdeConfig>,
+    pub shadow_injection_limits: Option<InjectionLimits>,
+}
+
+impl ShadowConfig {
+    pub fn validate(
+        &self,
+        active_mapping: &FeatureToBrainMap,
+        #[cfg(feature = "lnss-liquid-ode")] active_liquid_params: Option<&LiquidOdeConfig>,
+        active_injection_limits: &InjectionLimits,
+    ) -> Result<(), LnssRuntimeError> {
+        if let Some(shadow_mapping) = &self.shadow_mapping {
+            validate_shadow_mapping(active_mapping, shadow_mapping)?;
+        }
+        if let Some(shadow_limits) = &self.shadow_injection_limits {
+            if shadow_limits.max_spikes_per_tick > active_injection_limits.max_spikes_per_tick {
+                return Err(LnssRuntimeError::Shadow(
+                    "shadow max_spikes_per_tick must tighten limits".to_string(),
+                ));
+            }
+            if shadow_limits.max_targets_per_spike > active_injection_limits.max_targets_per_spike {
+                return Err(LnssRuntimeError::Shadow(
+                    "shadow max_targets_per_spike must tighten limits".to_string(),
+                ));
+            }
+        }
+        #[cfg(feature = "lnss-liquid-ode")]
+        if let Some(shadow_params) = &self.shadow_liquid_params {
+            let active = active_liquid_params.ok_or_else(|| {
+                LnssRuntimeError::Shadow(
+                    "shadow liquid params require active liquid params".to_string(),
+                )
+            })?;
+            validate_shadow_liquid_params(active, shadow_params)?;
+        }
+        Ok(())
     }
 }
 
@@ -457,12 +506,16 @@ pub struct LnssRuntime {
     pub injection_limits: InjectionLimits,
     pub active_sae_pack_digest: Option<[u8; 32]>,
     pub active_liquid_params_digest: Option<[u8; 32]>,
+    #[cfg(feature = "lnss-liquid-ode")]
+    pub active_liquid_params: Option<LiquidOdeConfig>,
     pub feedback: FeedbackConsumer,
     pub adaptation: MappingAdaptationConfig,
     pub proposal_inbox: Option<ProposalInbox>,
     pub approval_inbox: Option<ApprovalInbox>,
     pub activation_now_ms: Option<u64>,
     pub event_sink: Option<Box<dyn LnssEventSink>>,
+    pub shadow: ShadowConfig,
+    pub shadow_rig: Option<Box<dyn RigClient>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,6 +560,7 @@ pub struct MechIntRecord {
     pub active_injection_limits: Option<InjectionLimits>,
     pub activation_digest: Option<[u8; 32]>,
     pub committed_to_pvgs: Option<bool>,
+    pub shadow_evidence: Option<ShadowEvidence>,
     pub record_digest: [u8; 32],
 }
 
@@ -534,6 +588,7 @@ pub struct MechIntRecordParts {
     pub active_injection_limits: Option<InjectionLimits>,
     pub activation_digest: Option<[u8; 32]>,
     pub committed_to_pvgs: Option<bool>,
+    pub shadow_evidence: Option<ShadowEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +726,7 @@ impl MechIntRecord {
             active_injection_limits: parts.active_injection_limits,
             activation_digest: parts.activation_digest,
             committed_to_pvgs: parts.committed_to_pvgs,
+            shadow_evidence: parts.shadow_evidence,
             record_digest,
         }
     }
@@ -698,6 +754,7 @@ fn record_digest(parts: &MechIntRecordParts) -> [u8; 32] {
     write_optional_suggestion(&mut buf, parts.mapping_suggestion.as_ref());
     write_optional_proposal(&mut buf, parts);
     write_optional_activation(&mut buf, parts);
+    write_optional_shadow(&mut buf, parts.shadow_evidence.as_ref());
     digest("lnss.mechint.record.v1", &buf)
 }
 
@@ -710,6 +767,32 @@ pub struct RuntimeOutput {
     pub feedback_snapshot: Option<BiophysFeedbackSnapshot>,
     pub mapping_suggestion: Option<MappingAdaptationSuggestion>,
     pub mechint_record: MechIntRecord,
+    pub shadow: Option<ShadowRunOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowScore {
+    pub active: i32,
+    pub shadow: i32,
+    pub delta: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowEvidence {
+    pub shadow_mapping_digest: [u8; 32],
+    pub shadow_liquid_params_digest: Option<[u8; 32]>,
+    pub active_feedback_digest: [u8; 32],
+    pub shadow_feedback_digest: [u8; 32],
+    pub score: ShadowScore,
+    pub reason_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShadowRunOutput {
+    pub spikes: Vec<BrainSpike>,
+    pub feedback_snapshot: BiophysFeedbackSnapshot,
+    pub score: ShadowScore,
+    pub reason_codes: Vec<String>,
 }
 
 impl LnssRuntime {
@@ -779,7 +862,79 @@ impl LnssRuntime {
             active_injection_limits: None,
             activation_digest: None,
             committed_to_pvgs: None,
+            shadow_evidence: None,
         };
+
+        let shadow_output = if self.shadow.enabled {
+            self.shadow.validate(
+                &self.mapper,
+                #[cfg(feature = "lnss-liquid-ode")]
+                self.active_liquid_params.as_ref(),
+                &self.injection_limits,
+            )?;
+            let shadow_mapping = self
+                .shadow
+                .shadow_mapping
+                .as_ref()
+                .unwrap_or(&self.mapper);
+            let shadow_limits = self
+                .shadow
+                .shadow_injection_limits
+                .as_ref()
+                .unwrap_or(&self.injection_limits);
+            let mut shadow_spikes = map_features_to_spikes(shadow_mapping, &feature_events);
+            shadow_spikes.truncate(self.limits.max_spikes);
+            apply_injection_limits(&mut shadow_spikes, shadow_limits);
+
+            let shadow_feedback_snapshot = if let Some(shadow_rig) = self.shadow_rig.as_mut() {
+                shadow_rig.send_spikes(&shadow_spikes)?;
+                shadow_rig.poll_feedback()
+            } else {
+                Some(predict_feedback_snapshot(&shadow_spikes, shadow_limits))
+            };
+
+            let active_feedback_snapshot = feedback_snapshot
+                .clone()
+                .or_else(|| Some(predict_feedback_snapshot(&spikes, &self.injection_limits)));
+
+            if let (Some(active_feedback), Some(shadow_feedback)) = (
+                active_feedback_snapshot.as_ref(),
+                shadow_feedback_snapshot.as_ref(),
+            ) {
+                let (score, reason_codes) = score_shadow(active_feedback, shadow_feedback);
+                let shadow_mapping_digest = shadow_mapping.map_digest;
+                #[cfg(feature = "lnss-liquid-ode")]
+                let shadow_params_digest =
+                    shadow_liquid_params_digest(self.shadow.shadow_liquid_params.as_ref());
+                #[cfg(not(feature = "lnss-liquid-ode"))]
+                let shadow_params_digest = None;
+                let shadow_evidence = ShadowEvidence {
+                    shadow_mapping_digest,
+                    shadow_liquid_params_digest: shadow_params_digest,
+                    active_feedback_digest: active_feedback.snapshot_digest,
+                    shadow_feedback_digest: shadow_feedback.snapshot_digest,
+                    score: score.clone(),
+                    reason_codes: reason_codes.clone(),
+                };
+                let mut shadow_parts = mechint_parts.clone();
+                shadow_parts.step_id = format!("{step_id}:shadow");
+                shadow_parts.shadow_evidence = Some(shadow_evidence);
+                let shadow_record = MechIntRecord::new(shadow_parts);
+                self.mechint.write_step(&shadow_record)?;
+
+                Some(ShadowRunOutput {
+                    spikes: shadow_spikes,
+                    feedback_snapshot: shadow_feedback.clone(),
+                    score,
+                    reason_codes,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mechint_record = MechIntRecord::new(mechint_parts.clone());
         self.mechint.write_step(&mechint_record)?;
 
@@ -820,6 +975,7 @@ impl LnssRuntime {
             feedback_snapshot,
             mapping_suggestion,
             mechint_record,
+            shadow: shadow_output,
         })
     }
 
@@ -1066,14 +1222,178 @@ pub fn map_features_to_spikes(
 
     for event in feature_events {
         for (feature_id, strength_q) in event.top_features.iter().take(MAX_TOP_FEATURES) {
-            if let Some((_, target)) = entries.iter().find(|(id, _)| id == feature_id) {
+            for (_, target) in entries.iter().filter(|(id, _)| id == feature_id) {
                 let scaled = ((*strength_q as u32) * (target.amplitude_q as u32) / 1000) as u16;
-                spikes.push(BrainSpike::new(target.clone(), 0, scaled));
+                if scaled > 0 {
+                    spikes.push(BrainSpike::new(target.clone(), 0, scaled));
+                }
             }
         }
     }
 
     spikes
+}
+
+pub fn apply_injection_limits(spikes: &mut Vec<BrainSpike>, limits: &InjectionLimits) {
+    let max_spikes = limits.max_spikes_per_tick as usize;
+    if spikes.len() > max_spikes {
+        spikes.truncate(max_spikes);
+    }
+}
+
+fn score_shadow(
+    active: &BiophysFeedbackSnapshot,
+    shadow: &BiophysFeedbackSnapshot,
+) -> (ShadowScore, Vec<String>) {
+    let active_score = score_feedback_snapshot(active);
+    let shadow_score = score_feedback_snapshot(shadow);
+    let delta = shadow_score - active_score;
+    let reason_codes = if delta > 0 {
+        vec![RC_SHADOW_BETTER.to_string()]
+    } else if delta < 0 {
+        vec![RC_SHADOW_WORSE.to_string()]
+    } else {
+        vec![RC_SHADOW_EQUAL.to_string()]
+    };
+    (
+        ShadowScore {
+            active: active_score,
+            shadow: shadow_score,
+            delta,
+        },
+        reason_codes,
+    )
+}
+
+fn score_feedback_snapshot(snapshot: &BiophysFeedbackSnapshot) -> i32 {
+    if !snapshot.event_queue_overflowed && snapshot.events_dropped == 0 {
+        return 10;
+    }
+    let mut score = 0i32;
+    if snapshot.event_queue_overflowed {
+        score -= 5;
+    }
+    let drop_penalty = (snapshot.events_dropped / 10).min(10) as i32;
+    score -= drop_penalty;
+    score
+}
+
+fn predict_feedback_snapshot(
+    spikes: &[BrainSpike],
+    limits: &InjectionLimits,
+) -> BiophysFeedbackSnapshot {
+    let max_spikes = limits.max_spikes_per_tick as usize;
+    let dropped = spikes.len().saturating_sub(max_spikes);
+    let injected = spikes.len().saturating_sub(dropped);
+    let mut buf = Vec::new();
+    write_u32(&mut buf, spikes.len() as u32);
+    write_u32(&mut buf, limits.max_spikes_per_tick);
+    write_u32(&mut buf, limits.max_targets_per_spike);
+    for spike in spikes {
+        write_string(&mut buf, &spike.target.region);
+        write_string(&mut buf, &spike.target.population);
+        write_u32(&mut buf, spike.target.neuron_group);
+        write_string(&mut buf, &spike.target.syn_kind);
+        write_u16(&mut buf, spike.amplitude_q);
+    }
+    let snapshot_digest = digest("lnss.shadow.feedback.predicted.v1", &buf);
+    BiophysFeedbackSnapshot {
+        tick: 0,
+        snapshot_digest,
+        event_queue_overflowed: dropped > 0,
+        events_dropped: dropped as u64,
+        events_injected: injected.min(u32::MAX as usize) as u32,
+        injected_total: injected as u64,
+    }
+}
+
+fn validate_shadow_mapping(
+    active: &FeatureToBrainMap,
+    shadow: &FeatureToBrainMap,
+) -> Result<(), LnssRuntimeError> {
+    let mut active_targets: std::collections::BTreeMap<u32, Vec<BrainTarget>> =
+        std::collections::BTreeMap::new();
+    let mut active_counts: std::collections::BTreeMap<u32, usize> =
+        std::collections::BTreeMap::new();
+    for (feature_id, target) in &active.entries {
+        active_targets
+            .entry(*feature_id)
+            .or_default()
+            .push(target.clone());
+        *active_counts.entry(*feature_id).or_default() += 1;
+    }
+
+    let mut shadow_counts: std::collections::BTreeMap<u32, usize> =
+        std::collections::BTreeMap::new();
+    for (feature_id, shadow_target) in &shadow.entries {
+        *shadow_counts.entry(*feature_id).or_default() += 1;
+        let targets = active_targets.get_mut(feature_id).ok_or_else(|| {
+            LnssRuntimeError::Shadow(format!(
+                "shadow mapping introduces new feature {feature_id}"
+            ))
+        })?;
+        let idx = targets.iter().position(|active_target| {
+            active_target.region == shadow_target.region
+                && active_target.population == shadow_target.population
+                && active_target.neuron_group == shadow_target.neuron_group
+                && active_target.syn_kind == shadow_target.syn_kind
+        });
+        let Some(active_target) = idx.and_then(|index| targets.get(index)) else {
+            return Err(LnssRuntimeError::Shadow(format!(
+                "shadow mapping introduces new target for feature {feature_id}"
+            )));
+        };
+        if shadow_target.amplitude_q > active_target.amplitude_q {
+            return Err(LnssRuntimeError::Shadow(format!(
+                "shadow amplitude exceeds active for feature {feature_id}"
+            )));
+        }
+    }
+
+    for (feature_id, count) in shadow_counts {
+        let active_count = active_counts.get(&feature_id).copied().unwrap_or(0);
+        if count > active_count {
+            return Err(LnssRuntimeError::Shadow(format!(
+                "shadow mapping increases fan-out for feature {feature_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn validate_shadow_liquid_params(
+    active: &LiquidOdeConfig,
+    shadow: &LiquidOdeConfig,
+) -> Result<(), LnssRuntimeError> {
+    if shadow.state_dim != active.state_dim
+        || shadow.input_proj_dim != active.input_proj_dim
+        || shadow.mods_gain_q != active.mods_gain_q
+        || shadow.seed != active.seed
+    {
+        return Err(LnssRuntimeError::Shadow(
+            "shadow liquid params must match active non-step fields".to_string(),
+        ));
+    }
+    if shadow.dt_ms_q > active.dt_ms_q || shadow.steps_per_call > active.steps_per_call {
+        return Err(LnssRuntimeError::Shadow(
+            "shadow liquid params must tighten dt/steps".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "lnss-liquid-ode")]
+fn shadow_liquid_params_digest(params: Option<&LiquidOdeConfig>) -> Option<[u8; 32]> {
+    let params = params?;
+    let mut buf = Vec::new();
+    write_u32(&mut buf, params.state_dim);
+    write_u16(&mut buf, params.dt_ms_q);
+    write_u16(&mut buf, params.steps_per_call);
+    write_u64(&mut buf, params.seed);
+    write_u32(&mut buf, params.input_proj_dim);
+    write_u16(&mut buf, params.mods_gain_q);
+    Some(digest("lnss.shadow.liquid_ode.v1", &buf))
 }
 
 pub struct StubLlmBackend;
@@ -1398,6 +1718,33 @@ fn write_optional_activation(buf: &mut Vec<u8>, parts: &MechIntRecordParts) {
     write_bool(buf, parts.committed_to_pvgs.is_some());
     if let Some(committed) = parts.committed_to_pvgs {
         write_bool(buf, committed);
+    }
+}
+
+fn write_optional_shadow(buf: &mut Vec<u8>, shadow: Option<&ShadowEvidence>) {
+    match shadow {
+        Some(evidence) => {
+            write_bool(buf, true);
+            buf.extend_from_slice(&evidence.shadow_mapping_digest);
+            write_bool(buf, evidence.shadow_liquid_params_digest.is_some());
+            if let Some(digest_bytes) = evidence.shadow_liquid_params_digest {
+                buf.extend_from_slice(&digest_bytes);
+            }
+            buf.extend_from_slice(&evidence.active_feedback_digest);
+            buf.extend_from_slice(&evidence.shadow_feedback_digest);
+            write_i32(buf, evidence.score.active);
+            write_i32(buf, evidence.score.shadow);
+            write_i32(buf, evidence.score.delta);
+            let mut reason_codes = evidence.reason_codes.clone();
+            reason_codes.sort();
+            reason_codes.dedup();
+            reason_codes.truncate(MAX_REASON_CODES);
+            write_u32(buf, reason_codes.len() as u32);
+            for code in reason_codes {
+                write_string(buf, &code);
+            }
+        }
+        None => write_bool(buf, false),
     }
 }
 

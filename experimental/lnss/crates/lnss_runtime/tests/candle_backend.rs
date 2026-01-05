@@ -121,12 +121,16 @@ fn candle_end_to_end_is_deterministic() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     };
 
     let mods = default_mods();
