@@ -125,6 +125,7 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         proposal_inbox: None,
         approval_inbox: None,
         activation_now_ms: None,
+        event_sink: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

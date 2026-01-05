@@ -434,6 +434,7 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
                 .expect("approval inbox"),
         ),
         activation_now_ms: None,
+        event_sink: None,
     }
 }
 

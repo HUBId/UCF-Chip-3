@@ -11,6 +11,7 @@ ucf-protocol = { workspace = true }
 pbm = { path = "../pbm" }
 cdm = { path = "../cdm" }
 chip2_client = { path = "../chip2_client" }
+lnss_frames_bridge = { path = "../lnss_frames_bridge" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 

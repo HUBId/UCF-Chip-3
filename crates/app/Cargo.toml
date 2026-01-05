@@ -13,6 +13,7 @@ ucf-protocol = { workspace = true }
 frames = { path = "../frames" }
 control = { path = "../control" }
 hex = "0.4"
+lnss_frames_bridge = { path = "../lnss_frames_bridge" }
 pvgs_verify = { path = "../pvgs_verify" }
 pvgs_client = { path = "../pvgs_client" }
 scheduler = { path = "../scheduler" }

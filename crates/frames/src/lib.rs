@@ -9,6 +9,7 @@ use std::time::Instant;
 pub mod emotion;
 
 use pbm::DecisionForm;
+use lnss_frames_bridge::LnssGovEvent;
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest32, ucf};
@@ -525,6 +526,17 @@ impl<C: Clock> WindowEngine<C> {
         });
     }
 
+    pub fn ingest_lnss_event(&mut self, ev: LnssGovEvent) {
+        let reason_code = ev.reason_code().map(str::to_string);
+        self.apply_to_windows(|state| {
+            if let Some(code) = reason_code.clone() {
+                state.integrity_reasons.record([code]);
+                state.integrity_counts.issues += 1;
+            }
+            state.record_event();
+        });
+    }
+
     pub fn on_suspension(&mut self, reason_codes: &[String]) {
         self.apply_to_windows(|state| {
             state.exec_counts.tool_unavailable += 1;
@@ -727,6 +739,7 @@ fn compute_signal_digest(frame: &ucf::v1::SignalFrame) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lnss_frames_bridge::LnssGovEvent;
     use std::fs;
     use tempfile::tempdir;
 
@@ -939,5 +952,76 @@ windows:
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].window.as_ref().unwrap().window_type, "short");
         assert_eq!(frames[0].window.as_ref().unwrap().event_count, 32);
+    }
+
+    #[test]
+    fn ingest_lnss_event_activation_applied_records_reason() {
+        let mut engine = engine_with_config(FramesConfig::fallback());
+        engine.ingest_lnss_event(LnssGovEvent::ActivationApplied {
+            activation_digest: [9u8; 32],
+        });
+
+        let frames = engine.force_flush();
+        assert!(!frames.is_empty());
+        assert!(frames.iter().any(|frame| {
+            frame
+                .integrity_stats
+                .as_ref()
+                .expect("integrity stats")
+                .top_reason_codes
+                .iter()
+                .any(|code| code.code == "RC.GV.PROPOSAL.ACTIVATED")
+        }));
+    }
+
+    #[test]
+    fn ingest_lnss_event_is_bounded() {
+        let mut config = FramesConfig::fallback();
+        config.windowing.top_reason_limit = 1;
+        let mut engine = engine_with_config(config);
+        engine.ingest_lnss_event(LnssGovEvent::ActivationApplied {
+            activation_digest: [1u8; 32],
+        });
+        engine.ingest_lnss_event(LnssGovEvent::ActivationRejected {
+            activation_digest: [2u8; 32],
+        });
+        engine.ingest_lnss_event(LnssGovEvent::SaePackUpdated {
+            new_digest: [3u8; 32],
+        });
+
+        let frames = engine.force_flush();
+        for frame in frames {
+            let integrity = frame.integrity_stats.as_ref().expect("integrity stats");
+            assert!(integrity.top_reason_codes.len() <= 1);
+        }
+    }
+
+    #[test]
+    fn ingest_lnss_event_is_deterministic() {
+        let config = FramesConfig::fallback();
+        let mut engine_a = engine_with_config(config.clone());
+        let mut engine_b = engine_with_config(config);
+        let sequence = vec![
+            LnssGovEvent::ActivationApplied {
+                activation_digest: [4u8; 32],
+            },
+            LnssGovEvent::ActivationRejected {
+                activation_digest: [5u8; 32],
+            },
+            LnssGovEvent::SaePackUpdated {
+                new_digest: [6u8; 32],
+            },
+        ];
+
+        for event in sequence.clone() {
+            engine_a.ingest_lnss_event(event);
+        }
+        for event in sequence {
+            engine_b.ingest_lnss_event(event);
+        }
+
+        let frames_a = engine_a.force_flush();
+        let frames_b = engine_b.force_flush();
+        assert_eq!(frames_a, frames_b);
     }
 }

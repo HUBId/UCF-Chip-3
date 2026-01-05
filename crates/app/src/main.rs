@@ -137,9 +137,11 @@ mod lnss_cli {
     use lnss_hooks::TransformerLensPlanImport;
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::LoggingRigClient;
+    use frames::{FramesConfig, WindowEngine};
+    use lnss_frames_bridge::LnssGovEvent;
     use lnss_runtime::{
-        FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig, SaeBackend,
-        StubHookProvider, StubLlmBackend,
+        ActivationResult, FeedbackConsumer, Limits, LnssEventSink, LnssRuntime,
+        MappingAdaptationConfig, SaeBackend, StubHookProvider, StubLlmBackend,
     };
     use lnss_sae::StubSaeBackend;
     use serde::Deserialize;
@@ -154,6 +156,28 @@ mod lnss_cli {
     struct MapFile {
         map_version: u32,
         entries: Vec<MapEntry>,
+    }
+
+    struct FramesLnssEventSink {
+        frames: WindowEngine,
+    }
+
+    impl FramesLnssEventSink {
+        fn new(frames: WindowEngine) -> Self {
+            Self { frames }
+        }
+    }
+
+    impl LnssEventSink for FramesLnssEventSink {
+        fn on_activation_event(&mut self, activation_digest: [u8; 32], result: ActivationResult) {
+            let event = match result {
+                ActivationResult::Applied => LnssGovEvent::ActivationApplied { activation_digest },
+                ActivationResult::Rejected => {
+                    LnssGovEvent::ActivationRejected { activation_digest }
+                }
+            };
+            self.frames.ingest_lnss_event(event);
+        }
     }
 
     pub fn run_lnss(
@@ -198,6 +222,13 @@ mod lnss_cli {
             None => Box::new(StubSaeBackend::new(8)),
         };
 
+        let frames_config = FramesConfig::load_from_dir(".").unwrap_or_else(|err| {
+            eprintln!("using fallback frames config: {err}");
+            FramesConfig::fallback()
+        });
+        let frames = WindowEngine::new(frames_config).expect("window engine");
+        let sink: Box<dyn LnssEventSink> = Box::new(FramesLnssEventSink::new(frames));
+
         let mut runtime = LnssRuntime {
             llm: Box::new(StubLlmBackend),
             hooks: Box::new(StubHookProvider { taps: Vec::new() }),
@@ -215,6 +246,7 @@ mod lnss_cli {
             proposal_inbox: None,
             approval_inbox: None,
             activation_now_ms: None,
+            event_sink: Some(sink),
         };
 
         let mods = EmotionFieldSnapshot::new(

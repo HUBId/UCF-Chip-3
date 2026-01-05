@@ -125,6 +125,7 @@ mod real_sae_backend_tests {
             proposal_inbox: None,
             approval_inbox: None,
             activation_now_ms: None,
+            event_sink: None,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -146,6 +147,7 @@ mod real_sae_backend_tests {
             proposal_inbox: None,
             approval_inbox: None,
             activation_now_ms: None,
+            event_sink: None,
         };
 
         let mods = base_mods();
