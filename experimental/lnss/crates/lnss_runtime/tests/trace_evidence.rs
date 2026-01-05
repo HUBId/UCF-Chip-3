@@ -414,7 +414,7 @@ fn write_u16(buf: &mut Vec<u8>, value: u16) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
-fn runtime_with_shadow(
+struct RuntimeFixture {
     pvgs: Option<Box<dyn PvgsClientReader>>,
     proposal_inbox: Option<ProposalInbox>,
     injection_limits: InjectionLimits,
@@ -423,31 +423,33 @@ fn runtime_with_shadow(
     mapper: FeatureToBrainMap,
     sae: Box<dyn SaeBackend>,
     rig: Box<dyn RigClient>,
-) -> LnssRuntime {
+}
+
+fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
     LnssRuntime {
         llm: Box::new(StubLlmBackend),
         hooks: Box::new(StubHookProvider {
             taps: vec![TapFrame::new("hook-a", vec![1, 2, 3])],
         }),
-        sae,
+        sae: fixture.sae,
         mechint: Box::new(RecordingWriter::default()),
-        pvgs,
-        rig,
-        mapper,
+        pvgs: fixture.pvgs,
+        rig: fixture.rig,
+        mapper: fixture.mapper,
         limits: Limits::default(),
-        injection_limits,
+        injection_limits: fixture.injection_limits,
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
-        proposal_inbox,
+        proposal_inbox: fixture.proposal_inbox,
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
-        shadow,
-        shadow_rig,
+        shadow: fixture.shadow,
+        shadow_rig: fixture.shadow_rig,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
     }
@@ -462,25 +464,25 @@ fn shadow_trace_commits_once_and_is_deterministic() {
     let mapper = mapping_for_features(&feature_ids, 2);
     let shadow_mapping = mapping_for_features(&feature_ids[..1], 1);
 
-    let mut runtime = runtime_with_shadow(
-        Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
-        None,
-        InjectionLimits {
+    let mut runtime = runtime_with_shadow(RuntimeFixture {
+        pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
+        proposal_inbox: None,
+        injection_limits: InjectionLimits {
             max_spikes_per_tick: 1,
             max_targets_per_spike: 4,
         },
-        ShadowConfig {
+        shadow: ShadowConfig {
             enabled: true,
             shadow_mapping: Some(shadow_mapping),
             #[cfg(feature = "lnss-liquid-ode")]
             shadow_liquid_params: None,
             shadow_injection_limits: None,
         },
-        None,
+        shadow_rig: None,
         mapper,
-        Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
-        Box::new(StubRigClient::default()),
-    );
+        sae: Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
+        rig: Box::new(StubRigClient::default()),
+    });
 
     let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
     runtime
@@ -489,7 +491,7 @@ fn shadow_trace_commits_once_and_is_deterministic() {
             "step-1",
             b"input",
             &default_mods(),
-            &[tap_spec.clone()],
+            std::slice::from_ref(&tap_spec),
         )
         .expect("runtime step");
 
@@ -552,28 +554,28 @@ fn neutral_trace_blocks_aap_generation() {
     let mapper = mapping_for_features(&feature_ids, 2);
     let shadow_mapping = mapper.clone();
 
-    let mut runtime = runtime_with_shadow(
-        None,
-        Some(ProposalInbox::with_limits(&dir, 1, 1)),
-        InjectionLimits {
+    let mut runtime = runtime_with_shadow(RuntimeFixture {
+        pvgs: None,
+        proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 1)),
+        injection_limits: InjectionLimits {
             max_spikes_per_tick: 10,
             max_targets_per_spike: 4,
         },
-        ShadowConfig {
+        shadow: ShadowConfig {
             enabled: true,
             shadow_mapping: Some(shadow_mapping),
             #[cfg(feature = "lnss-liquid-ode")]
             shadow_liquid_params: None,
             shadow_injection_limits: None,
         },
-        None,
+        shadow_rig: None,
         mapper,
-        Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
-        Box::new(FeedbackRigClient::new(InjectionLimits {
+        sae: Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
+        rig: Box::new(FeedbackRigClient::new(InjectionLimits {
             max_spikes_per_tick: 10,
             max_targets_per_spike: 4,
         })),
-    );
+    });
 
     let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
     runtime
@@ -618,28 +620,28 @@ fn promising_trace_allows_aap_and_binds_trace_digest() {
     let mapper = mapping_for_features(&feature_ids, 2);
     let shadow_mapping = mapper.clone();
 
-    let mut runtime = runtime_with_shadow(
-        None,
-        Some(ProposalInbox::with_limits(&dir, 1, 1)),
-        InjectionLimits {
+    let mut runtime = runtime_with_shadow(RuntimeFixture {
+        pvgs: None,
+        proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 1)),
+        injection_limits: InjectionLimits {
             max_spikes_per_tick: 1,
             max_targets_per_spike: 4,
         },
-        ShadowConfig {
+        shadow: ShadowConfig {
             enabled: true,
             shadow_mapping: Some(shadow_mapping),
             #[cfg(feature = "lnss-liquid-ode")]
             shadow_liquid_params: None,
             shadow_injection_limits: None,
         },
-        None,
+        shadow_rig: None,
         mapper,
-        Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
-        Box::new(FeedbackRigClient::new(InjectionLimits {
+        sae: Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
+        rig: Box::new(FeedbackRigClient::new(InjectionLimits {
             max_spikes_per_tick: 1,
             max_targets_per_spike: 4,
         })),
-    );
+    });
 
     let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
     runtime
