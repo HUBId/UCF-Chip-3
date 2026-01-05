@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lnss_core::MAX_STRING_LEN;
+use lnss_core::{digest, MAX_STRING_LEN};
 use lnss_evolve::{Proposal, ProposalKind};
 use prost::Message;
 use thiserror::Error;
@@ -15,6 +15,78 @@ const AAP_ID_PREFIX_LEN: usize = 8;
 const MAX_EVIDENCE_REFS: usize = 4;
 const MAX_ALTERNATIVES: usize = 3;
 const MAX_CONSTRAINTS: usize = 8;
+const ACTIVATION_DOMAIN: &str = "UCF:LNSS:ACTIVATION";
+const MAX_ACTIVATION_ID_LEN: usize = 64;
+const MAX_ACTIVATION_REASON_CODES: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivationStatus {
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivationInjectionLimits {
+    pub max_spikes_per_tick: u32,
+    pub max_targets_per_spike: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalActivationEvidenceLocal {
+    pub activation_id: String,
+    pub proposal_digest: [u8; 32],
+    pub approval_digest: [u8; 32],
+    pub status: ActivationStatus,
+    pub active_mapping_digest: Option<[u8; 32]>,
+    pub active_sae_pack_digest: Option<[u8; 32]>,
+    pub active_liquid_params_digest: Option<[u8; 32]>,
+    pub active_injection_limits: Option<ActivationInjectionLimits>,
+    pub created_at_ms: u64,
+    pub reason_codes: Vec<String>,
+    pub activation_digest: [u8; 32],
+}
+
+pub fn encode_activation(ev: &ProposalActivationEvidenceLocal) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    let activation_id = bound_string_with_limit(&ev.activation_id, MAX_ACTIVATION_ID_LEN)
+        .trim()
+        .to_uppercase();
+    write_string_u16(&mut buf, &activation_id);
+    buf.extend_from_slice(&ev.proposal_digest);
+    buf.extend_from_slice(&ev.approval_digest);
+    buf.push(activation_status_tag(&ev.status));
+    write_u64(&mut buf, ev.created_at_ms);
+    write_optional_digest(&mut buf, ev.active_mapping_digest);
+    write_optional_digest(&mut buf, ev.active_sae_pack_digest);
+    write_optional_digest(&mut buf, ev.active_liquid_params_digest);
+    write_optional_injection_limits(&mut buf, ev.active_injection_limits.as_ref());
+
+    let mut reason_codes = ev
+        .reason_codes
+        .iter()
+        .map(|code| bound_string(code).to_uppercase())
+        .collect::<Vec<_>>();
+    reason_codes.sort();
+    reason_codes.truncate(MAX_ACTIVATION_REASON_CODES);
+    write_u16(&mut buf, reason_codes.len() as u16);
+    for code in reason_codes {
+        write_string_u16(&mut buf, &code);
+    }
+
+    buf.extend_from_slice(&ev.activation_digest);
+
+    buf
+}
+
+pub fn compute_activation_digest(ev: &mut ProposalActivationEvidenceLocal) -> [u8; 32] {
+    let mut canonical = ev.clone();
+    canonical.activation_digest = [0u8; 32];
+    let bytes = encode_activation(&canonical);
+    let digest_bytes = digest(ACTIVATION_DOMAIN, &bytes);
+    ev.activation_digest = digest_bytes;
+    digest_bytes
+}
 
 #[derive(Debug, Error)]
 pub enum ApprovalLoadError {
@@ -218,6 +290,57 @@ fn bound_string(value: &str) -> String {
     out
 }
 
+fn bound_string_with_limit(value: &str, limit: usize) -> String {
+    let mut out = value.trim().to_string();
+    out.truncate(limit);
+    out
+}
+
+fn activation_status_tag(status: &ActivationStatus) -> u8 {
+    match status {
+        ActivationStatus::Applied => 1,
+        ActivationStatus::Rejected => 2,
+    }
+}
+
+fn write_bool(buf: &mut Vec<u8>, value: bool) {
+    buf.push(u8::from(value));
+}
+
+fn write_u16(buf: &mut Vec<u8>, value: u16) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_string_u16(buf: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(&bytes[..len as usize]);
+}
+
+fn write_optional_digest(buf: &mut Vec<u8>, digest: Option<[u8; 32]>) {
+    write_bool(buf, digest.is_some());
+    if let Some(digest) = digest {
+        buf.extend_from_slice(&digest);
+    }
+}
+
+fn write_optional_injection_limits(buf: &mut Vec<u8>, limits: Option<&ActivationInjectionLimits>) {
+    write_bool(buf, limits.is_some());
+    if let Some(limits) = limits {
+        write_u32(buf, limits.max_spikes_per_tick);
+        write_u32(buf, limits.max_targets_per_spike);
+    }
+}
+
 fn pending_aap_ids(dir: &Path) -> Result<BTreeSet<String>, ApprovalLoadError> {
     let aap_dir = dir.join("aap");
     let mut ids = BTreeSet::new();
@@ -373,5 +496,37 @@ mod tests {
         if let Some(constraints) = aap.constraints.as_ref() {
             assert!(constraints.constraints_added.len() <= MAX_CONSTRAINTS);
         }
+    }
+
+    #[test]
+    fn activation_encoding_is_deterministic() {
+        let mut evidence = ProposalActivationEvidenceLocal {
+            activation_id: "act:aa:bb".to_string(),
+            proposal_digest: [1u8; 32],
+            approval_digest: [2u8; 32],
+            status: ActivationStatus::Applied,
+            active_mapping_digest: Some([3u8; 32]),
+            active_sae_pack_digest: None,
+            active_liquid_params_digest: Some([4u8; 32]),
+            active_injection_limits: Some(ActivationInjectionLimits {
+                max_spikes_per_tick: 10,
+                max_targets_per_spike: 5,
+            }),
+            created_at_ms: 42,
+            reason_codes: vec![
+                "rc.gv.proposal.activated".to_string(),
+                "rc.gv.proposal.activated".to_string(),
+                "zz".to_string(),
+                "aa".to_string(),
+            ],
+            activation_digest: [0u8; 32],
+        };
+
+        let first_digest = compute_activation_digest(&mut evidence);
+        let first = encode_activation(&evidence);
+        let second = encode_activation(&evidence);
+
+        assert_eq!(first, second);
+        assert_eq!(first_digest, evidence.activation_digest);
     }
 }

@@ -84,6 +84,8 @@ fn boundedness_caps_are_enforced() {
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_injection_limits: None,
+        activation_digest: None,
+        committed_to_pvgs: None,
     });
     assert_eq!(record.tap_digests.len(), 4);
 }
@@ -184,6 +186,7 @@ fn end_to_end_stub_pipeline() {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
         approval_inbox: None,
+        activation_now_ms: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

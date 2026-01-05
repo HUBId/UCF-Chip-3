@@ -2,7 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lnss_approval::{build_aap_for_proposal, ApprovalContext};
+use lnss_approval::{
+    build_aap_for_proposal, compute_activation_digest, encode_activation,
+    ActivationInjectionLimits, ActivationStatus, ApprovalContext, ProposalActivationEvidenceLocal,
+};
 use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapFrame, TapKind, TapSpec};
 use lnss_evolve::load_proposals;
 use lnss_runtime::{
@@ -11,6 +14,7 @@ use lnss_runtime::{
     FILE_DIGEST_DOMAIN,
 };
 use lnss_sae::StubSaeBackend;
+use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
 #[derive(Default, Clone)]
@@ -31,6 +35,259 @@ impl MechIntWriter for RecordingWriter {
     }
 }
 
+#[derive(Clone)]
+struct SharedPvgsClient {
+    inner: std::sync::Arc<std::sync::Mutex<MockPvgsClient>>,
+}
+
+impl SharedPvgsClient {
+    fn new(inner: std::sync::Arc<std::sync::Mutex<MockPvgsClient>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl PvgsClient for SharedPvgsClient {
+    fn commit_experience_record(
+        &mut self,
+        record: ucf::v1::ExperienceRecord,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_experience_record(record)
+    }
+
+    fn commit_dlp_decision(
+        &mut self,
+        dlp: ucf::v1::DlpDecision,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_dlp_decision(dlp)
+    }
+
+    fn commit_tool_registry(
+        &mut self,
+        trc: ucf::v1::ToolRegistryContainer,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_tool_registry(trc)
+    }
+
+    fn commit_tool_onboarding_event(
+        &mut self,
+        event: ucf::v1::ToolOnboardingEvent,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_tool_onboarding_event(event)
+    }
+
+    fn commit_micro_milestone(
+        &mut self,
+        micro: ucf::v1::MicroMilestone,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_micro_milestone(micro)
+    }
+
+    fn commit_consistency_feedback(
+        &mut self,
+        feedback: ucf::v1::ConsistencyFeedback,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_consistency_feedback(feedback)
+    }
+
+    fn commit_proposal_evidence(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_proposal_evidence(payload_bytes)
+    }
+
+    fn commit_proposal_activation(
+        &mut self,
+        payload_bytes: Vec<u8>,
+    ) -> Result<ucf::v1::PvgsReceipt, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .commit_proposal_activation(payload_bytes)
+    }
+
+    fn try_commit_next_micro(
+        &mut self,
+        session_id: &str,
+    ) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .try_commit_next_micro(session_id)
+    }
+
+    fn try_commit_next_meso(&mut self) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner.lock().expect("pvgs lock").try_commit_next_meso()
+    }
+
+    fn try_commit_next_macro(
+        &mut self,
+        consistency_digest: Option<[u8; 32]>,
+    ) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .try_commit_next_macro(consistency_digest)
+    }
+
+    fn get_pending_replay_plans(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_pending_replay_plans(session_id)
+    }
+
+    fn get_pvgs_head(&self) -> pvgs_client::PvgsHead {
+        self.inner.lock().expect("pvgs lock").get_pvgs_head()
+    }
+}
+
+impl PvgsReader for SharedPvgsClient {
+    fn get_latest_pev(&self) -> Option<ucf::v1::PolicyEcologyVector> {
+        self.inner.lock().expect("pvgs lock").get_latest_pev()
+    }
+
+    fn get_latest_pev_digest(&self) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_latest_pev_digest()
+    }
+
+    fn get_current_ruleset_digest(&self) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_current_ruleset_digest()
+    }
+
+    fn get_microcircuit_config(
+        &self,
+        module: ucf::v1::MicroModule,
+    ) -> Result<Option<ucf::v1::MicrocircuitConfigEvidence>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_microcircuit_config(module)
+    }
+
+    fn list_microcircuit_configs(
+        &self,
+    ) -> Result<Vec<ucf::v1::MicrocircuitConfigEvidence>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .list_microcircuit_configs()
+    }
+
+    fn get_recovery_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_recovery_state(session_id)
+    }
+
+    fn get_latest_cbv_digest(&self) -> Option<pvgs_client::CbvDigest> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_latest_cbv_digest()
+    }
+
+    fn get_latest_trace_run(
+        &mut self,
+    ) -> Result<Option<pvgs_client::TraceRunSummary>, pvgs_client::PvgsClientError> {
+        self.inner.lock().expect("pvgs lock").get_latest_trace_run()
+    }
+
+    fn get_latest_rpp_head_meta(
+        &mut self,
+    ) -> Result<Option<pvgs_client::RppHeadMeta>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_latest_rpp_head_meta()
+    }
+
+    fn get_rpp_head_meta(
+        &mut self,
+        head_id: u64,
+    ) -> Result<Option<pvgs_client::RppHeadMeta>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_rpp_head_meta(head_id)
+    }
+
+    fn is_session_sealed(&self, session_id: &str) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .is_session_sealed(session_id)
+    }
+
+    fn has_unlock_permit(&self, session_id: &str) -> Result<bool, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .has_unlock_permit(session_id)
+    }
+
+    fn get_session_seal_digest(&self, session_id: &str) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_session_seal_digest(session_id)
+    }
+
+    fn get_unlock_permit_digest(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<[u8; 32]>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_unlock_permit_digest(session_id)
+    }
+
+    fn get_pending_replay_plans(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ucf::v1::ReplayPlan>, pvgs_client::PvgsClientError> {
+        self.inner
+            .lock()
+            .expect("pvgs lock")
+            .get_pending_replay_plans(session_id)
+    }
+}
+
 fn temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -46,21 +303,31 @@ fn write_json(path: &Path, value: serde_json::Value) {
     fs::write(path, bytes).expect("write json");
 }
 
-fn map_fixture(dir: &Path) -> (PathBuf, FeatureToBrainMap, [u8; 32]) {
+fn map_fixture_named(dir: &Path, filename: &str) -> (PathBuf, FeatureToBrainMap, [u8; 32]) {
     let target = BrainTarget::new("v1", "pop", 1, "syn", 700);
     let map = FeatureToBrainMap::new(1, vec![(1, target)]);
     let bytes = serde_json::to_vec(&map).expect("serialize map");
-    let path = dir.join("map.bin");
+    let path = dir.join(filename);
     fs::write(&path, &bytes).expect("write map");
     let digest = lnss_core::digest(FILE_DIGEST_DOMAIN, &bytes);
     (path, map, digest)
 }
 
-fn proposal_fixture(dir: &Path, map_path: &Path, map_digest: [u8; 32]) -> lnss_evolve::Proposal {
+fn map_fixture(dir: &Path) -> (PathBuf, FeatureToBrainMap, [u8; 32]) {
+    map_fixture_named(dir, "map.bin")
+}
+
+fn proposal_fixture_named(
+    dir: &Path,
+    map_path: &Path,
+    map_digest: [u8; 32],
+    filename: &str,
+    proposal_id: &str,
+) -> lnss_evolve::Proposal {
     write_json(
-        &dir.join("proposal.json"),
+        &dir.join(filename),
         serde_json::json!({
-            "proposal_id": "proposal-map-1",
+            "proposal_id": proposal_id,
             "kind": "mapping_update",
             "created_at_ms": 1,
             "base_evidence_digest": vec![1; 32],
@@ -73,7 +340,15 @@ fn proposal_fixture(dir: &Path, map_path: &Path, map_digest: [u8; 32]) -> lnss_e
             "reason_codes": ["offline"]
         }),
     );
-    load_proposals(dir).expect("load proposals").remove(0)
+    load_proposals(dir)
+        .expect("load proposals")
+        .into_iter()
+        .find(|proposal| proposal.proposal_id == proposal_id)
+        .expect("proposal present")
+}
+
+fn proposal_fixture(dir: &Path, map_path: &Path, map_digest: [u8; 32]) -> lnss_evolve::Proposal {
+    proposal_fixture_named(dir, map_path, map_digest, "proposal.json", "proposal-map-1")
 }
 
 fn aap_fixture(dir: &Path, proposal: &lnss_evolve::Proposal) -> ucf::v1::ApprovalArtifactPackage {
@@ -158,7 +433,20 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
             ApprovalInbox::with_state_path(dir, dir.join("state/approval_state.json"), 1)
                 .expect("approval inbox"),
         ),
+        activation_now_ms: None,
     }
+}
+
+fn runtime_fixture_with_pvgs(
+    dir: &Path,
+    writer: RecordingWriter,
+    pvgs: std::sync::Arc<std::sync::Mutex<MockPvgsClient>>,
+    activation_now_ms: u64,
+) -> LnssRuntime {
+    let mut runtime = runtime_fixture(dir, writer);
+    runtime.pvgs = Some(Box::new(SharedPvgsClient::new(pvgs)));
+    runtime.activation_now_ms = Some(activation_now_ms);
+    runtime
 }
 
 fn run_once(runtime: &mut LnssRuntime) {
@@ -175,6 +463,44 @@ fn run_once(runtime: &mut LnssRuntime) {
     runtime
         .run_step("session-1", "step-1", b"input", &mods, &tap_specs)
         .expect("runtime step");
+}
+
+fn activation_id_for(proposal_digest: [u8; 32], approval_digest: [u8; 32]) -> String {
+    let proposal_prefix = hex::encode(&proposal_digest[..8]);
+    let approval_prefix = hex::encode(&approval_digest[..8]);
+    format!("act:{proposal_prefix}:{approval_prefix}")
+}
+
+fn expected_activation_evidence(
+    proposal: &lnss_evolve::Proposal,
+    approval_digest: [u8; 32],
+    status: ActivationStatus,
+    active_mapping_digest: Option<[u8; 32]>,
+    active_sae_pack_digest: Option<[u8; 32]>,
+    active_liquid_params_digest: Option<[u8; 32]>,
+    active_injection_limits: Option<InjectionLimits>,
+    created_at_ms: u64,
+) -> ProposalActivationEvidenceLocal {
+    let reason_code = match &status {
+        ActivationStatus::Applied => "RC.GV.PROPOSAL.ACTIVATED".to_string(),
+        ActivationStatus::Rejected => "RC.GV.PROPOSAL.REJECTED".to_string(),
+    };
+    ProposalActivationEvidenceLocal {
+        activation_id: activation_id_for(proposal.proposal_digest, approval_digest),
+        proposal_digest: proposal.proposal_digest,
+        approval_digest,
+        status,
+        active_mapping_digest,
+        active_sae_pack_digest,
+        active_liquid_params_digest,
+        active_injection_limits: active_injection_limits.map(|limits| ActivationInjectionLimits {
+            max_spikes_per_tick: limits.max_spikes_per_tick,
+            max_targets_per_spike: limits.max_targets_per_spike,
+        }),
+        created_at_ms,
+        reason_codes: vec![reason_code],
+        activation_digest: [0u8; 32],
+    }
 }
 
 #[test]
@@ -272,4 +598,193 @@ fn state_persists_active_digests() {
     let state_path = dir.join("state/approval_state.json");
     let inbox = ApprovalInbox::with_state_path(&dir, state_path, 1).expect("reload inbox");
     assert_eq!(inbox.state().active_mapping_digest, Some(map.map_digest));
+}
+
+#[test]
+fn activation_commit_on_apply() {
+    let dir = temp_dir("lnss_activation_commit_apply");
+    let (map_path, map, map_digest) = map_fixture(&dir);
+    let proposal = proposal_fixture(&dir, &map_path, map_digest);
+    let aap = aap_fixture(&dir, &proposal);
+    let approval_digest = approval_fixture(&dir, &aap.aap_id, ucf::v1::DecisionForm::Allow, None);
+
+    let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+    let writer = RecordingWriter::default();
+    let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+
+    run_once(&mut runtime);
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_activation_bytes
+        .clone();
+    assert_eq!(committed.len(), 1);
+
+    let mut expected = expected_activation_evidence(
+        &proposal,
+        approval_digest,
+        ActivationStatus::Applied,
+        Some(map.map_digest),
+        None,
+        None,
+        Some(InjectionLimits::default()),
+        123,
+    );
+    compute_activation_digest(&mut expected);
+    let expected_bytes = encode_activation(&expected);
+    assert_eq!(committed[0], expected_bytes);
+}
+
+#[test]
+fn activation_commit_is_idempotent() {
+    let dir = temp_dir("lnss_activation_commit_idempotent");
+    let (map_path, _map, map_digest) = map_fixture(&dir);
+    let proposal = proposal_fixture(&dir, &map_path, map_digest);
+    let aap = aap_fixture(&dir, &proposal);
+    approval_fixture(&dir, &aap.aap_id, ucf::v1::DecisionForm::Allow, None);
+
+    let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+    let writer = RecordingWriter::default();
+    let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+
+    run_once(&mut runtime);
+    run_once(&mut runtime);
+
+    let committed_count = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_activation_bytes
+        .len();
+    assert_eq!(committed_count, 1);
+}
+
+#[test]
+fn activation_commit_ordering_is_deterministic() {
+    let dir = temp_dir("lnss_activation_commit_order");
+    let (map_path_a, map_a, map_digest_a) = map_fixture_named(&dir, "map-a.bin");
+    let (map_path_b, map_b, map_digest_b) = map_fixture_named(&dir, "map-b.bin");
+    let proposal_a = proposal_fixture_named(
+        &dir,
+        &map_path_a,
+        map_digest_a,
+        "proposal-a.json",
+        "proposal-a",
+    );
+    let proposal_b = proposal_fixture_named(
+        &dir,
+        &map_path_b,
+        map_digest_b,
+        "proposal-b.json",
+        "proposal-b",
+    );
+    let aap_a = aap_fixture(&dir, &proposal_a);
+    let aap_b = aap_fixture(&dir, &proposal_b);
+    let approval_a = approval_fixture(&dir, &aap_a.aap_id, ucf::v1::DecisionForm::Allow, None);
+    let approval_b = approval_fixture(&dir, &aap_b.aap_id, ucf::v1::DecisionForm::Allow, None);
+
+    let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+    let writer = RecordingWriter::default();
+    let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+
+    run_once(&mut runtime);
+    run_once(&mut runtime);
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_activation_bytes
+        .clone();
+    assert_eq!(committed.len(), 2);
+
+    let (first_proposal, first_approval, first_map, second_proposal, second_approval, second_map) =
+        if approval_a < approval_b {
+            (
+                &proposal_a,
+                approval_a,
+                map_a.map_digest,
+                &proposal_b,
+                approval_b,
+                map_b.map_digest,
+            )
+        } else {
+            (
+                &proposal_b,
+                approval_b,
+                map_b.map_digest,
+                &proposal_a,
+                approval_a,
+                map_a.map_digest,
+            )
+        };
+
+    let mut expected_first = expected_activation_evidence(
+        first_proposal,
+        first_approval,
+        ActivationStatus::Applied,
+        Some(first_map),
+        None,
+        None,
+        Some(InjectionLimits::default()),
+        123,
+    );
+    compute_activation_digest(&mut expected_first);
+    let mut expected_second = expected_activation_evidence(
+        second_proposal,
+        second_approval,
+        ActivationStatus::Applied,
+        Some(second_map),
+        None,
+        None,
+        Some(InjectionLimits::default()),
+        123,
+    );
+    compute_activation_digest(&mut expected_second);
+
+    assert_eq!(committed[0], encode_activation(&expected_first));
+    assert_eq!(committed[1], encode_activation(&expected_second));
+}
+
+#[test]
+fn activation_commit_on_reject() {
+    let dir = temp_dir("lnss_activation_commit_reject");
+    let (map_path, _map, map_digest) = map_fixture(&dir);
+    let proposal = proposal_fixture(&dir, &map_path, map_digest);
+    let aap = aap_fixture(&dir, &proposal);
+    let approval_digest = approval_fixture(&dir, &aap.aap_id, ucf::v1::DecisionForm::Deny, None);
+
+    let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+    let writer = RecordingWriter::default();
+    let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+    let baseline_mapping = runtime.mapper.map_digest;
+
+    run_once(&mut runtime);
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_activation_bytes
+        .clone();
+    assert_eq!(committed.len(), 1);
+
+    let mut expected = expected_activation_evidence(
+        &proposal,
+        approval_digest,
+        ActivationStatus::Rejected,
+        Some(baseline_mapping),
+        None,
+        None,
+        Some(InjectionLimits::default()),
+        123,
+    );
+    compute_activation_digest(&mut expected);
+    assert_eq!(committed[0], encode_activation(&expected));
 }
