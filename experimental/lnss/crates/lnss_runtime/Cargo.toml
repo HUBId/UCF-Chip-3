@@ -27,6 +27,7 @@ burn = { version = "0.12", default-features = false, optional = true }
 bincode = { version = "=2.0.0-rc.3", features = ["serde"], optional = true }
 
 [dev-dependencies]
+chip2 = { path = "../chip2" }
 lnss_hooks = { path = "../lnss_hooks" }
 lnss_sae = { path = "../lnss_sae", features = ["lnss-sae-real"] }
 lnss_mechint = { path = "../lnss_mechint" }

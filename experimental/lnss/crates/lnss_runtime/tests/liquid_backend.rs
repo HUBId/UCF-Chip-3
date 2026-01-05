@@ -128,7 +128,7 @@ mod liquid_backend_tests {
             mods_gain_q: 100,
         };
         let backend_a = LiquidOdeBackend::new(cfg.clone());
-        let backend_b = LiquidOdeBackend::new(cfg);
+        let backend_b = LiquidOdeBackend::new(cfg.clone());
         let hooks_a = backend_a.tap_provider();
         let hooks_b = backend_b.tap_provider();
         let tap_specs = vec![TapSpec::new(
@@ -163,12 +163,15 @@ mod liquid_backend_tests {
             injection_limits: lnss_runtime::InjectionLimits::default(),
             active_sae_pack_digest: None,
             active_liquid_params_digest: None,
+            active_liquid_params: Some(cfg.clone()),
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
             approval_inbox: None,
             activation_now_ms: None,
             event_sink: None,
+            shadow: lnss_runtime::ShadowConfig::default(),
+            shadow_rig: None,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -182,12 +185,15 @@ mod liquid_backend_tests {
             injection_limits: lnss_runtime::InjectionLimits::default(),
             active_sae_pack_digest: None,
             active_liquid_params_digest: None,
+            active_liquid_params: Some(cfg),
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
             proposal_inbox: None,
             approval_inbox: None,
             activation_now_ms: None,
             event_sink: None,
+            shadow: lnss_runtime::ShadowConfig::default(),
+            shadow_rig: None,
         };
 
         let mods = base_mods();

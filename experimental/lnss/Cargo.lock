@@ -995,6 +995,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "burn",
+ "chip2",
  "hex",
  "lnss_approval",
  "lnss_core",

@@ -120,12 +120,16 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
         injection_limits: InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss::lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     };
 
     let mods = EmotionFieldSnapshot::new(

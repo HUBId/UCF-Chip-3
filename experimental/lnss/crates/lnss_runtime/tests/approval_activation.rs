@@ -426,6 +426,8 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         injection_limits: InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
@@ -435,6 +437,8 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         ),
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     }
 }
 

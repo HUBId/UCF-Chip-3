@@ -303,12 +303,16 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 2)),
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -416,12 +420,16 @@ fn proposal_commits_only_once_across_ticks() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 10)),
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -516,12 +524,16 @@ fn proposal_commits_are_bounded_and_ordered() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -618,12 +630,16 @@ fn local_pvgs_receives_expected_payload() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        #[cfg(feature = "lnss-liquid-ode")]
+        active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
         approval_inbox: None,
         activation_now_ms: None,
         event_sink: None,
+        shadow: lnss_runtime::ShadowConfig::default(),
+        shadow_rig: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
