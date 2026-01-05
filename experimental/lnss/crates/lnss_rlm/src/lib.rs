@@ -21,17 +21,9 @@ impl Default for RlmConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RlmController {
     pub config: RlmConfig,
-}
-
-impl Default for RlmController {
-    fn default() -> Self {
-        Self {
-            config: RlmConfig::default(),
-        }
-    }
 }
 
 impl RlmCore for RlmController {
