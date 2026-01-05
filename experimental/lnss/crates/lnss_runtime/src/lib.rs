@@ -1102,7 +1102,7 @@ fn liquid_params_digest(kv_pairs: &[(String, String)]) -> [u8; 32] {
 }
 
 fn decision_allows_application(decision: &ucf::v1::ApprovalDecision) -> bool {
-    let form = ucf::v1::DecisionForm::from_i32(decision.decision)
+    let form = ucf::v1::DecisionForm::try_from(decision.decision)
         .unwrap_or(ucf::v1::DecisionForm::Unspecified);
     if form != ucf::v1::DecisionForm::Allow {
         return false;
