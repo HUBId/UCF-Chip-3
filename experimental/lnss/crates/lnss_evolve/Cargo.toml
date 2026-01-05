@@ -5,6 +5,10 @@ edition = "2021"
 license = "Apache-2.0"
 publish = false
 
+[features]
+default = []
+lnss-legacy-evidence = []
+
 [dependencies]
 blake3 = { workspace = true }
 hex = { workspace = true }
@@ -12,3 +16,4 @@ lnss_core = { path = "../lnss_core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ucf-protocol = { path = "../../../../crates/ucf-protocol" }

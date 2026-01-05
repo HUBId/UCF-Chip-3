@@ -1,18 +1,16 @@
 #![forbid(unsafe_code)]
 
+use prost::Message;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use prost::Message;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use lnss_approval::{
-    approval_artifact_package_digest, build_aap_for_proposal, compute_activation_digest,
-    encode_activation, load_approval_decisions, ActivationInjectionLimits, ActivationStatus,
-    ApprovalContext, ProposalActivationEvidenceLocal,
+    approval_artifact_package_digest, build_aap_for_proposal, build_activation_evidence_pb,
+    load_approval_decisions, ActivationInjectionLimits, ActivationStatus, ApprovalContext,
+    ProposalActivationEvidenceLocal,
 };
 pub use lnss_core::BiophysFeedbackSnapshot;
 #[cfg(feature = "lnss-liquid-ode")]
@@ -22,12 +20,13 @@ use lnss_core::{
     MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
-    encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest,
-    trace_encoding::{compute_trace_digest, encode_trace, TraceRunEvidenceLocal, TraceVerdict},
-    EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind,
+    build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
+    trace_encoding::{build_trace_run_evidence_pb, TraceRunEvidenceLocal},
+    EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind, TraceVerdict,
 };
 use lnss_hooks::TapRegistry;
 use pvgs_client::PvgsClientReader;
+use ucf_protocol::canonical_bytes;
 use ucf_protocol::ucf;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4096;
@@ -44,7 +43,7 @@ pub const FILE_DIGEST_DOMAIN: &str = "lnss.file.bytes.v1";
 pub const LIQUID_PARAMS_DOMAIN: &str = "lnss.liquid.params.v1";
 const ACTIVATION_ID_PREFIX_LEN: usize = 8;
 const TRACE_ID_PREFIX_LEN: usize = 8;
-const TRACE_CREATED_AT_MS_MULTIPLIER: u64 = 10;
+const FIXED_MS_PER_TICK: u64 = 10;
 const RC_PROPOSAL_ACTIVATED: &str = "RC.GV.PROPOSAL.ACTIVATED";
 const RC_PROPOSAL_REJECTED: &str = "RC.GV.PROPOSAL.REJECTED";
 const RC_SHADOW_BETTER: &str = "RC.GV.SHADOW.BETTER";
@@ -252,10 +251,44 @@ impl ProposalInbox {
 
         let mut processed = 0usize;
         for proposal in proposals {
-            if self.committed.contains(&proposal.proposal_digest) {
+            let eval = evaluate(&proposal, eval_ctx);
+            let base_evidence_digest = eval_ctx.latest_feedback_digest.unwrap_or([0u8; 32]);
+            let mut reason_codes = eval.reason_codes.clone();
+            if base_evidence_digest == [0u8; 32] {
+                reason_codes.push("RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string());
+            }
+            if eval.verdict == EvalVerdict::Promising
+                && trace_state
+                    .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
+                    .is_none()
+            {
+                reason_codes.push(RC_AAP_BLOCKED_BY_TRACE.to_string());
+            }
+            let payload_digest = proposal_payload_digest(&proposal.payload)
+                .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
+            let evidence = ProposalEvidence {
+                proposal_id: proposal.proposal_id.clone(),
+                proposal_digest: proposal.proposal_digest,
+                kind: proposal.kind.clone(),
+                base_evidence_digest,
+                payload_digest,
+                created_at_ms: proposal.created_at_ms,
+                score: eval.score,
+                verdict: eval.verdict.clone(),
+                reason_codes,
+            };
+            let evidence_pb = build_proposal_evidence_pb(&evidence);
+            let evidence_digest = evidence_pb
+                .proposal_digest
+                .as_ref()
+                .and_then(digest_bytes)
+                .unwrap_or([0u8; 32]);
+            let payload_bytes = canonical_bytes(&evidence_pb);
+
+            if self.committed.contains(&evidence_digest) {
                 continue;
             }
-            let eval = evaluate(&proposal, eval_ctx);
+
             let mut parts = base_parts.clone();
             parts.proposal_digest = Some(proposal.proposal_digest);
             parts.proposal_kind = Some(proposal.kind.clone());
@@ -295,33 +328,6 @@ impl ProposalInbox {
             let record = MechIntRecord::new(parts);
             mechint.write_step(&record)?;
 
-            let base_evidence_digest = eval_ctx.latest_feedback_digest.unwrap_or([0u8; 32]);
-            let mut reason_codes = eval.reason_codes.clone();
-            if base_evidence_digest == [0u8; 32] {
-                reason_codes.push("RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string());
-            }
-            if eval.verdict == EvalVerdict::Promising
-                && trace_state
-                    .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
-                    .is_none()
-            {
-                reason_codes.push(RC_AAP_BLOCKED_BY_TRACE.to_string());
-            }
-            let payload_digest = proposal_payload_digest(&proposal.payload)
-                .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
-            let evidence = ProposalEvidence {
-                proposal_id: proposal.proposal_id.clone(),
-                proposal_digest: proposal.proposal_digest,
-                kind: proposal.kind.clone(),
-                base_evidence_digest,
-                payload_digest,
-                created_at_ms: proposal.created_at_ms,
-                score: eval.score,
-                verdict: eval.verdict,
-                reason_codes,
-            };
-            let payload_bytes = encode_proposal_evidence(&evidence);
-
             let accepted = match pvgs.as_deref_mut() {
                 Some(client) => match client.commit_proposal_evidence(payload_bytes) {
                     Ok(receipt) => receipt.status == ucf::v1::ReceiptStatus::Accepted as i32,
@@ -331,7 +337,7 @@ impl ProposalInbox {
             };
 
             if accepted {
-                self.committed.insert(proposal.proposal_digest);
+                self.committed.insert(evidence_digest);
             }
 
             processed += 1;
@@ -1058,6 +1064,13 @@ impl LnssRuntime {
             ActivationResult::Rejected => ActivationStatus::Rejected,
         };
         let activation_id = activation_id_for(plan.proposal.proposal_digest, plan.approval_digest);
+        let created_at_ms = self.activation_now_ms.unwrap_or_else(|| {
+            base_parts
+                .feedback
+                .as_ref()
+                .map(|feedback| feedback.tick.saturating_mul(FIXED_MS_PER_TICK))
+                .unwrap_or(0)
+        });
         let mut activation =
             ProposalActivationEvidenceLocal {
                 activation_id,
@@ -1073,15 +1086,20 @@ impl LnssRuntime {
                         max_targets_per_spike: limits.max_targets_per_spike,
                     },
                 ),
-                created_at_ms: self.activation_now_ms.unwrap_or_else(current_time_ms),
+                created_at_ms,
                 reason_codes: vec![match outcome.result {
                     ActivationResult::Applied => RC_PROPOSAL_ACTIVATED.to_string(),
                     ActivationResult::Rejected => RC_PROPOSAL_REJECTED.to_string(),
                 }],
                 activation_digest: [0u8; 32],
             };
-        compute_activation_digest(&mut activation);
-        let activation_payload = encode_activation(&activation);
+        let activation_pb = build_activation_evidence_pb(&activation);
+        activation.activation_digest = activation_pb
+            .activation_digest
+            .as_ref()
+            .and_then(digest_bytes)
+            .unwrap_or([0u8; 32]);
+        let activation_payload = canonical_bytes(&activation_pb);
         let mut committed_to_pvgs = None;
         let mut activation_digest = None;
         if let Some(inbox) = self.approval_inbox.as_mut() {
@@ -1137,9 +1155,7 @@ impl LnssRuntime {
         shadow_mapping_digest: [u8; 32],
     ) -> TraceRunState {
         let verdict = trace_verdict_from_delta(score.delta);
-        let created_at_ms = active_feedback
-            .tick
-            .saturating_mul(TRACE_CREATED_AT_MS_MULTIPLIER);
+        let created_at_ms = active_feedback.tick.saturating_mul(FIXED_MS_PER_TICK);
         let trace_id = trace_id_for(
             self.mapper.map_digest,
             shadow_mapping_digest,
@@ -1162,8 +1178,14 @@ impl LnssRuntime {
             reason_codes: trace_reason_codes,
             trace_digest: [0u8; 32],
         };
-        let trace_digest = compute_trace_digest(&mut trace_evidence);
-        let payload_bytes = encode_trace(&trace_evidence);
+        let trace_pb = build_trace_run_evidence_pb(&trace_evidence);
+        let trace_digest = trace_pb
+            .trace_digest
+            .as_ref()
+            .and_then(digest_bytes)
+            .unwrap_or([0u8; 32]);
+        trace_evidence.trace_digest = trace_digest;
+        let payload_bytes = canonical_bytes(&trace_pb);
 
         let committed = if self.seen_trace_digests.contains(&trace_digest) {
             true
@@ -1652,13 +1674,6 @@ fn is_tightening_constraint(entry: &str) -> bool {
         || lower.contains("simulate first")
         || lower.contains("simulate_first")
         || lower.contains("increase simulate")
-}
-
-fn current_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn activation_id_for(proposal_digest: [u8; 32], approval_digest: [u8; 32]) -> String {

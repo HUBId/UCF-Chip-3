@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lnss_core::{digest, MAX_STRING_LEN};
+use lnss_core::MAX_STRING_LEN;
 use lnss_evolve::{Proposal, ProposalKind};
 use prost::Message;
 use thiserror::Error;
@@ -15,7 +15,7 @@ const AAP_ID_PREFIX_LEN: usize = 8;
 const MAX_EVIDENCE_REFS: usize = 4;
 const MAX_ALTERNATIVES: usize = 3;
 const MAX_CONSTRAINTS: usize = 8;
-const ACTIVATION_DOMAIN: &str = "UCF:LNSS:ACTIVATION";
+const ACTIVATION_DOMAIN: &str = "UCF:ACTIVATION_EVIDENCE";
 const MAX_ACTIVATION_ID_LEN: usize = 64;
 const MAX_ACTIVATION_REASON_CODES: usize = 32;
 
@@ -46,6 +46,62 @@ pub struct ProposalActivationEvidenceLocal {
     pub activation_digest: [u8; 32],
 }
 
+pub fn build_activation_evidence_pb(
+    ev: &ProposalActivationEvidenceLocal,
+) -> ucf::v1::ProposalActivationEvidence {
+    let mut reason_codes = ev
+        .reason_codes
+        .iter()
+        .map(|code| bound_string(code).to_uppercase())
+        .collect::<Vec<_>>();
+    reason_codes.sort();
+    reason_codes.truncate(MAX_ACTIVATION_REASON_CODES);
+
+    let mut evidence = ucf::v1::ProposalActivationEvidence {
+        activation_id: bound_string_with_limit(&ev.activation_id, MAX_ACTIVATION_ID_LEN)
+            .trim()
+            .to_uppercase(),
+        proposal_digest: Some(ucf::v1::Digest32 {
+            value: ev.proposal_digest.to_vec(),
+        }),
+        approval_digest: Some(ucf::v1::Digest32 {
+            value: ev.approval_digest.to_vec(),
+        }),
+        status: activation_status_proto(&ev.status) as i32,
+        created_at_ms: ev.created_at_ms,
+        active_mapping_digest: ev.active_mapping_digest.map(|digest| ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+        active_sae_pack_digest: ev.active_sae_pack_digest.map(|digest| ucf::v1::Digest32 {
+            value: digest.to_vec(),
+        }),
+        active_liquid_params_digest: ev.active_liquid_params_digest.map(|digest| {
+            ucf::v1::Digest32 {
+                value: digest.to_vec(),
+            }
+        }),
+        active_injection_limits: ev.active_injection_limits.as_ref().map(|limits| {
+            ucf::v1::ActivationInjectionLimits {
+                max_spikes_per_tick: limits.max_spikes_per_tick,
+                max_targets_per_spike: limits.max_targets_per_spike,
+            }
+        }),
+        reason_codes: Some(ucf::v1::ReasonCodes {
+            codes: reason_codes,
+        }),
+        activation_digest: Some(ucf::v1::Digest32 {
+            value: vec![0u8; 32],
+        }),
+    };
+
+    let digest_bytes = digest_proto(ACTIVATION_DOMAIN, &canonical_bytes(&evidence));
+    evidence.activation_digest = Some(ucf::v1::Digest32 {
+        value: digest_bytes.to_vec(),
+    });
+    evidence
+}
+
+#[cfg(feature = "lnss-legacy-evidence")]
 pub fn encode_activation(ev: &ProposalActivationEvidenceLocal) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -80,10 +136,12 @@ pub fn encode_activation(ev: &ProposalActivationEvidenceLocal) -> Vec<u8> {
 }
 
 pub fn compute_activation_digest(ev: &mut ProposalActivationEvidenceLocal) -> [u8; 32] {
-    let mut canonical = ev.clone();
-    canonical.activation_digest = [0u8; 32];
-    let bytes = encode_activation(&canonical);
-    let digest_bytes = digest(ACTIVATION_DOMAIN, &bytes);
+    let evidence = build_activation_evidence_pb(ev);
+    let digest_bytes = evidence
+        .activation_digest
+        .as_ref()
+        .and_then(digest_bytes)
+        .unwrap_or([0u8; 32]);
     ev.activation_digest = digest_bytes;
     digest_bytes
 }
@@ -300,6 +358,7 @@ fn bound_string_with_limit(value: &str, limit: usize) -> String {
     out
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn activation_status_tag(status: &ActivationStatus) -> u8 {
     match status {
         ActivationStatus::Applied => 1,
@@ -307,22 +366,34 @@ fn activation_status_tag(status: &ActivationStatus) -> u8 {
     }
 }
 
+fn activation_status_proto(status: &ActivationStatus) -> ucf::v1::ActivationStatus {
+    match status {
+        ActivationStatus::Applied => ucf::v1::ActivationStatus::Applied,
+        ActivationStatus::Rejected => ucf::v1::ActivationStatus::Rejected,
+    }
+}
+
+#[cfg(feature = "lnss-legacy-evidence")]
 fn write_bool(buf: &mut Vec<u8>, value: bool) {
     buf.push(u8::from(value));
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn write_u16(buf: &mut Vec<u8>, value: u16) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn write_u32(buf: &mut Vec<u8>, value: u32) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn write_u64(buf: &mut Vec<u8>, value: u64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn write_string_u16(buf: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
@@ -330,6 +401,7 @@ fn write_string_u16(buf: &mut Vec<u8>, value: &str) {
     buf.extend_from_slice(&bytes[..len as usize]);
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn write_optional_digest(buf: &mut Vec<u8>, digest: Option<[u8; 32]>) {
     write_bool(buf, digest.is_some());
     if let Some(digest) = digest {
@@ -337,6 +409,7 @@ fn write_optional_digest(buf: &mut Vec<u8>, digest: Option<[u8; 32]>) {
     }
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn write_optional_injection_limits(buf: &mut Vec<u8>, limits: Option<&ActivationInjectionLimits>) {
     write_bool(buf, limits.is_some());
     if let Some(limits) = limits {
@@ -535,10 +608,42 @@ mod tests {
         };
 
         let first_digest = compute_activation_digest(&mut evidence);
-        let first = encode_activation(&evidence);
-        let second = encode_activation(&evidence);
+        let first = canonical_bytes(&build_activation_evidence_pb(&evidence));
+        let second = canonical_bytes(&build_activation_evidence_pb(&evidence));
 
         assert_eq!(first, second);
         assert_eq!(first_digest, evidence.activation_digest);
+    }
+
+    #[test]
+    fn activation_digest_matches() {
+        let evidence = ProposalActivationEvidenceLocal {
+            activation_id: "act:aa:bb".to_string(),
+            proposal_digest: [1u8; 32],
+            approval_digest: [2u8; 32],
+            status: ActivationStatus::Applied,
+            active_mapping_digest: Some([3u8; 32]),
+            active_sae_pack_digest: None,
+            active_liquid_params_digest: Some([4u8; 32]),
+            active_injection_limits: Some(ActivationInjectionLimits {
+                max_spikes_per_tick: 10,
+                max_targets_per_spike: 5,
+            }),
+            created_at_ms: 42,
+            reason_codes: vec!["rc.gv.proposal.activated".to_string()],
+            activation_digest: [0u8; 32],
+        };
+
+        let mut pb = build_activation_evidence_pb(&evidence);
+        let digest = pb
+            .activation_digest
+            .as_ref()
+            .and_then(digest_bytes)
+            .expect("activation digest");
+        pb.activation_digest = Some(ucf::v1::Digest32 {
+            value: vec![0u8; 32],
+        });
+        let recomputed = digest_proto(ACTIVATION_DOMAIN, &canonical_bytes(&pb));
+        assert_eq!(digest, recomputed);
     }
 }

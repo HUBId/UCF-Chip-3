@@ -90,6 +90,202 @@ pub mod ucf {
             #[prost(uint64, tag = "2")]
             pub count: u64,
         }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ProposalEvidence {
+            #[prost(string, tag = "1")]
+            pub proposal_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub proposal_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "ProposalKind", tag = "3")]
+            pub kind: i32,
+            #[prost(message, optional, tag = "4")]
+            pub base_evidence_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "5")]
+            pub payload_digest: ::core::option::Option<Digest32>,
+            #[prost(uint64, tag = "6")]
+            pub created_at_ms: u64,
+            #[prost(int32, tag = "7")]
+            pub score: i32,
+            #[prost(enumeration = "ProposalVerdict", tag = "8")]
+            pub verdict: i32,
+            #[prost(message, optional, tag = "9")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ProposalActivationEvidence {
+            #[prost(string, tag = "1")]
+            pub activation_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub proposal_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "3")]
+            pub approval_digest: ::core::option::Option<Digest32>,
+            #[prost(enumeration = "ActivationStatus", tag = "4")]
+            pub status: i32,
+            #[prost(uint64, tag = "5")]
+            pub created_at_ms: u64,
+            #[prost(message, optional, tag = "6")]
+            pub active_mapping_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "7")]
+            pub active_sae_pack_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "8")]
+            pub active_liquid_params_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "9")]
+            pub active_injection_limits: ::core::option::Option<ActivationInjectionLimits>,
+            #[prost(message, optional, tag = "10")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+            #[prost(message, optional, tag = "11")]
+            pub activation_digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct TraceRunEvidence {
+            #[prost(string, tag = "1")]
+            pub trace_id: ::prost::alloc::string::String,
+            #[prost(message, optional, tag = "2")]
+            pub active_cfg_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "3")]
+            pub shadow_cfg_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "4")]
+            pub active_feedback_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "5")]
+            pub shadow_feedback_digest: ::core::option::Option<Digest32>,
+            #[prost(int32, tag = "6")]
+            pub score_active: i32,
+            #[prost(int32, tag = "7")]
+            pub score_shadow: i32,
+            #[prost(int32, tag = "8")]
+            pub delta: i32,
+            #[prost(enumeration = "TraceVerdict", tag = "9")]
+            pub verdict: i32,
+            #[prost(uint64, tag = "10")]
+            pub created_at_ms: u64,
+            #[prost(message, optional, tag = "11")]
+            pub reason_codes: ::core::option::Option<ReasonCodes>,
+            #[prost(message, optional, tag = "12")]
+            pub trace_digest: ::core::option::Option<Digest32>,
+        }
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct ActivationInjectionLimits {
+            #[prost(uint32, tag = "1")]
+            pub max_spikes_per_tick: u32,
+            #[prost(uint32, tag = "2")]
+            pub max_targets_per_spike: u32,
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ProposalKind {
+            Unspecified = 0,
+            MappingUpdate = 1,
+            SaePackUpdate = 2,
+            LiquidParamsUpdate = 3,
+            InjectionLimitsUpdate = 4,
+        }
+        impl ProposalKind {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ProposalKind::Unspecified => "PROPOSAL_KIND_UNSPECIFIED",
+                    ProposalKind::MappingUpdate => "PROPOSAL_KIND_MAPPING_UPDATE",
+                    ProposalKind::SaePackUpdate => "PROPOSAL_KIND_SAE_PACK_UPDATE",
+                    ProposalKind::LiquidParamsUpdate => "PROPOSAL_KIND_LIQUID_PARAMS_UPDATE",
+                    ProposalKind::InjectionLimitsUpdate => "PROPOSAL_KIND_INJECTION_LIMITS_UPDATE",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "PROPOSAL_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+                    "PROPOSAL_KIND_MAPPING_UPDATE" => Some(Self::MappingUpdate),
+                    "PROPOSAL_KIND_SAE_PACK_UPDATE" => Some(Self::SaePackUpdate),
+                    "PROPOSAL_KIND_LIQUID_PARAMS_UPDATE" => Some(Self::LiquidParamsUpdate),
+                    "PROPOSAL_KIND_INJECTION_LIMITS_UPDATE" => Some(Self::InjectionLimitsUpdate),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ProposalVerdict {
+            Unspecified = 0,
+            Promising = 1,
+            Neutral = 2,
+            Risky = 3,
+        }
+        impl ProposalVerdict {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ProposalVerdict::Unspecified => "PROPOSAL_VERDICT_UNSPECIFIED",
+                    ProposalVerdict::Promising => "PROPOSAL_VERDICT_PROMISING",
+                    ProposalVerdict::Neutral => "PROPOSAL_VERDICT_NEUTRAL",
+                    ProposalVerdict::Risky => "PROPOSAL_VERDICT_RISKY",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "PROPOSAL_VERDICT_UNSPECIFIED" => Some(Self::Unspecified),
+                    "PROPOSAL_VERDICT_PROMISING" => Some(Self::Promising),
+                    "PROPOSAL_VERDICT_NEUTRAL" => Some(Self::Neutral),
+                    "PROPOSAL_VERDICT_RISKY" => Some(Self::Risky),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum ActivationStatus {
+            Unspecified = 0,
+            Applied = 1,
+            Rejected = 2,
+        }
+        impl ActivationStatus {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    ActivationStatus::Unspecified => "ACTIVATION_STATUS_UNSPECIFIED",
+                    ActivationStatus::Applied => "ACTIVATION_STATUS_APPLIED",
+                    ActivationStatus::Rejected => "ACTIVATION_STATUS_REJECTED",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "ACTIVATION_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+                    "ACTIVATION_STATUS_APPLIED" => Some(Self::Applied),
+                    "ACTIVATION_STATUS_REJECTED" => Some(Self::Rejected),
+                    _ => None,
+                }
+            }
+        }
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
+        )]
+        #[repr(i32)]
+        pub enum TraceVerdict {
+            Unspecified = 0,
+            Promising = 1,
+            Neutral = 2,
+            Risky = 3,
+        }
+        impl TraceVerdict {
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    TraceVerdict::Unspecified => "TRACE_VERDICT_UNSPECIFIED",
+                    TraceVerdict::Promising => "TRACE_VERDICT_PROMISING",
+                    TraceVerdict::Neutral => "TRACE_VERDICT_NEUTRAL",
+                    TraceVerdict::Risky => "TRACE_VERDICT_RISKY",
+                }
+            }
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "TRACE_VERDICT_UNSPECIFIED" => Some(Self::Unspecified),
+                    "TRACE_VERDICT_PROMISING" => Some(Self::Promising),
+                    "TRACE_VERDICT_NEUTRAL" => Some(Self::Neutral),
+                    "TRACE_VERDICT_RISKY" => Some(Self::Risky),
+                    _ => None,
+                }
+            }
+        }
         #[derive(
             Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration,
         )]

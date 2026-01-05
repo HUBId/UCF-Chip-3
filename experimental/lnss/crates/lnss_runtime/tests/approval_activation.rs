@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_approval::{
-    build_aap_for_proposal, compute_activation_digest, encode_activation,
-    ActivationInjectionLimits, ActivationStatus, ApprovalContext, ProposalActivationEvidenceLocal,
+    build_aap_for_proposal, build_activation_evidence_pb, ActivationInjectionLimits,
+    ActivationStatus, ApprovalContext, ProposalActivationEvidenceLocal,
 };
 use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapFrame, TapKind, TapSpec};
 use lnss_evolve::load_proposals;
@@ -647,7 +647,7 @@ fn activation_commit_on_apply() {
         .clone();
     assert_eq!(committed.len(), 1);
 
-    let mut expected = expected_activation_evidence(ExpectedActivationInput {
+    let expected = expected_activation_evidence(ExpectedActivationInput {
         proposal: &proposal,
         approval_digest,
         status: ActivationStatus::Applied,
@@ -657,8 +657,7 @@ fn activation_commit_on_apply() {
         active_injection_limits: Some(InjectionLimits::default()),
         created_at_ms: 123,
     });
-    compute_activation_digest(&mut expected);
-    let expected_bytes = encode_activation(&expected);
+    let expected_bytes = canonical_bytes(&build_activation_evidence_pb(&expected));
     assert_eq!(committed[0], expected_bytes);
 }
 
@@ -748,7 +747,7 @@ fn activation_commit_ordering_is_deterministic() {
             )
         };
 
-    let mut expected_first = expected_activation_evidence(ExpectedActivationInput {
+    let expected_first = expected_activation_evidence(ExpectedActivationInput {
         proposal: first_proposal,
         approval_digest: first_approval,
         status: ActivationStatus::Applied,
@@ -758,8 +757,8 @@ fn activation_commit_ordering_is_deterministic() {
         active_injection_limits: Some(InjectionLimits::default()),
         created_at_ms: 123,
     });
-    compute_activation_digest(&mut expected_first);
-    let mut expected_second = expected_activation_evidence(ExpectedActivationInput {
+    let expected_first_bytes = canonical_bytes(&build_activation_evidence_pb(&expected_first));
+    let expected_second = expected_activation_evidence(ExpectedActivationInput {
         proposal: second_proposal,
         approval_digest: second_approval,
         status: ActivationStatus::Applied,
@@ -769,10 +768,10 @@ fn activation_commit_ordering_is_deterministic() {
         active_injection_limits: Some(InjectionLimits::default()),
         created_at_ms: 123,
     });
-    compute_activation_digest(&mut expected_second);
+    let expected_second_bytes = canonical_bytes(&build_activation_evidence_pb(&expected_second));
 
-    assert_eq!(committed[0], encode_activation(&expected_first));
-    assert_eq!(committed[1], encode_activation(&expected_second));
+    assert_eq!(committed[0], expected_first_bytes);
+    assert_eq!(committed[1], expected_second_bytes);
 }
 
 #[test]
@@ -799,7 +798,7 @@ fn activation_commit_on_reject() {
         .clone();
     assert_eq!(committed.len(), 1);
 
-    let mut expected = expected_activation_evidence(ExpectedActivationInput {
+    let expected = expected_activation_evidence(ExpectedActivationInput {
         proposal: &proposal,
         approval_digest,
         status: ActivationStatus::Rejected,
@@ -809,6 +808,6 @@ fn activation_commit_on_reject() {
         active_injection_limits: Some(InjectionLimits::default()),
         created_at_ms: 123,
     });
-    compute_activation_digest(&mut expected);
-    assert_eq!(committed[0], encode_activation(&expected));
+    let expected_bytes = canonical_bytes(&build_activation_evidence_pb(&expected));
+    assert_eq!(committed[0], expected_bytes);
 }

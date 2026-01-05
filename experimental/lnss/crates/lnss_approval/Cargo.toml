@@ -5,6 +5,10 @@ edition = "2021"
 license = "Apache-2.0"
 publish = false
 
+[features]
+default = []
+lnss-legacy-evidence = []
+
 [dependencies]
 lnss_core = { path = "../lnss_core" }
 lnss_evolve = { path = "../lnss_evolve" }

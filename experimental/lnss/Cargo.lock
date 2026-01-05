@@ -957,6 +957,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "ucf-protocol",
 ]
 
 [[package]]
@@ -1266,6 +1267,7 @@ name = "pvgs_client"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "prost",
  "pvgs_verify",
  "rpp_checker",
  "thiserror",
