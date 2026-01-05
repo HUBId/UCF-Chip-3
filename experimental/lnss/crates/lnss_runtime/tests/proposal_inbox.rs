@@ -290,9 +290,13 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         rig: Box::new(StubRigClient::default()),
         mapper,
         limits: Limits::default(),
+        injection_limits: lnss_runtime::InjectionLimits::default(),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 2)),
+        approval_inbox: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -397,9 +401,13 @@ fn proposal_commits_only_once_across_ticks() {
         rig: Box::new(StubRigClient::default()),
         mapper,
         limits: Limits::default(),
+        injection_limits: lnss_runtime::InjectionLimits::default(),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 10)),
+        approval_inbox: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -491,9 +499,13 @@ fn proposal_commits_are_bounded_and_ordered() {
         rig: Box::new(StubRigClient::default()),
         mapper,
         limits: Limits::default(),
+        injection_limits: lnss_runtime::InjectionLimits::default(),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
+        approval_inbox: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -587,9 +599,13 @@ fn local_pvgs_receives_expected_payload() {
         rig: Box::new(StubRigClient::default()),
         mapper,
         limits: Limits::default(),
+        injection_limits: lnss_runtime::InjectionLimits::default(),
+        active_sae_pack_digest: None,
+        active_liquid_params_digest: None,
         feedback: FeedbackConsumer::default(),
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 5)),
+        approval_inbox: None,
     };
 
     let mods = EmotionFieldSnapshot::new(
