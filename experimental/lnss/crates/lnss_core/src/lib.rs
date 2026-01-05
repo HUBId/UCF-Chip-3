@@ -428,6 +428,7 @@ pub struct OrchestratorOutput {
 pub struct CoreOrchestrator;
 
 impl CoreOrchestrator {
+    #[allow(clippy::too_many_arguments)]
     pub fn run_tick<W, L, R>(
         &mut self,
         worldmodel: &mut W,
