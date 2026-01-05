@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureToBrainMap, TapFrame, TapKind, TapSpec};
 use lnss_evolve::{
-    encode_proposal_evidence, evaluate, load_proposals, proposal_payload_digest, EvalContext,
+    build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest, EvalContext,
     ProposalEvidence, ProposalKind,
 };
 use lnss_runtime::{
@@ -13,7 +13,9 @@ use lnss_runtime::{
     ProposalInbox, StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_sae::StubSaeBackend;
+use prost::Message;
 use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
+use ucf_protocol::canonical_bytes;
 use ucf_protocol::ucf;
 
 #[derive(Clone, Default)]
@@ -224,10 +226,8 @@ fn write_json(path: &Path, value: serde_json::Value) {
 }
 
 fn proposal_id_from_payload(payload: &[u8]) -> String {
-    let len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-    let start = 2;
-    let end = start + len;
-    String::from_utf8(payload[start..end].to_vec()).expect("proposal id")
+    let evidence = ucf::v1::ProposalEvidence::decode(payload).expect("decode proposal evidence");
+    evidence.proposal_id
 }
 
 #[test]
@@ -700,7 +700,7 @@ fn local_pvgs_receives_expected_payload() {
         verdict: eval.verdict,
         reason_codes: vec!["RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string()],
     };
-    let expected = encode_proposal_evidence(&evidence);
+    let expected = canonical_bytes(&build_proposal_evidence_pb(&evidence));
 
     let committed = pvgs_handle
         .lock()

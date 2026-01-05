@@ -8,10 +8,16 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
 use lnss_core::{MAX_REASON_CODES, MAX_STRING_LEN};
 pub mod trace_encoding;
-pub use trace_encoding::{compute_trace_digest, encode_trace, TraceRunEvidenceLocal, TraceVerdict};
+#[cfg(feature = "lnss-legacy-evidence")]
+pub use trace_encoding::encode_trace;
+pub use trace_encoding::TraceVerdict;
+pub use trace_encoding::{
+    build_trace_run_evidence_pb, compute_trace_digest, TraceRunEvidenceLocal,
+};
 
 const MAX_CHANGE_SUMMARY: usize = 32;
 const MAX_PARAM_ENTRIES: usize = 64;
@@ -226,9 +232,46 @@ pub fn evaluate(proposal: &Proposal, ctx: &EvalContext) -> EvalResult {
 pub fn proposal_payload_digest(payload: &ProposalPayload) -> Result<[u8; 32], LnssEvolveError> {
     let value = serde_json::to_value(payload)?;
     let bytes = canonical_json_bytes(value);
-    Ok(domain_digest("UCF:LNSS:PROPOSAL_PAYLOAD", &bytes))
+    Ok(domain_digest("UCF:PROPOSAL_PAYLOAD", &bytes))
 }
 
+pub fn build_proposal_evidence_pb(pe: &ProposalEvidence) -> ucf::v1::ProposalEvidence {
+    let mut reason_codes = pe
+        .reason_codes
+        .iter()
+        .map(|code| bound_string(code, MAX_REASON_CODE_LEN).to_uppercase())
+        .collect::<Vec<_>>();
+    reason_codes.sort();
+    reason_codes.truncate(MAX_REASON_CODES);
+
+    let mut evidence = ucf::v1::ProposalEvidence {
+        proposal_id: bound_string(&pe.proposal_id, MAX_STRING_LEN).to_uppercase(),
+        proposal_digest: Some(ucf::v1::Digest32 {
+            value: vec![0u8; 32],
+        }),
+        kind: proposal_kind_proto(&pe.kind) as i32,
+        base_evidence_digest: Some(ucf::v1::Digest32 {
+            value: pe.base_evidence_digest.to_vec(),
+        }),
+        payload_digest: Some(ucf::v1::Digest32 {
+            value: pe.payload_digest.to_vec(),
+        }),
+        created_at_ms: pe.created_at_ms,
+        score: pe.score,
+        verdict: proposal_verdict_proto(&pe.verdict) as i32,
+        reason_codes: Some(ucf::v1::ReasonCodes {
+            codes: reason_codes,
+        }),
+    };
+
+    let digest = digest_proto("UCF:PROPOSAL_EVIDENCE", &canonical_bytes(&evidence));
+    evidence.proposal_digest = Some(ucf::v1::Digest32 {
+        value: digest.to_vec(),
+    });
+    evidence
+}
+
+#[cfg(feature = "lnss-legacy-evidence")]
 pub fn encode_proposal_evidence(pe: &ProposalEvidence) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -374,6 +417,7 @@ fn normalize_reason_codes(reason_codes: Vec<String>) -> Vec<String> {
     codes
 }
 
+#[cfg(feature = "lnss-legacy-evidence")]
 fn proposal_kind_tag(kind: &ProposalKind) -> u8 {
     match kind {
         ProposalKind::MappingUpdate => 1,
@@ -383,11 +427,29 @@ fn proposal_kind_tag(kind: &ProposalKind) -> u8 {
     }
 }
 
+fn proposal_kind_proto(kind: &ProposalKind) -> ucf::v1::ProposalKind {
+    match kind {
+        ProposalKind::MappingUpdate => ucf::v1::ProposalKind::MappingUpdate,
+        ProposalKind::SaePackUpdate => ucf::v1::ProposalKind::SaePackUpdate,
+        ProposalKind::LiquidParamsUpdate => ucf::v1::ProposalKind::LiquidParamsUpdate,
+        ProposalKind::InjectionLimitsUpdate => ucf::v1::ProposalKind::InjectionLimitsUpdate,
+    }
+}
+
+#[cfg(feature = "lnss-legacy-evidence")]
 fn eval_verdict_tag(verdict: &EvalVerdict) -> u8 {
     match verdict {
         EvalVerdict::Promising => 1,
         EvalVerdict::Neutral => 2,
         EvalVerdict::Risky => 3,
+    }
+}
+
+fn proposal_verdict_proto(verdict: &EvalVerdict) -> ucf::v1::ProposalVerdict {
+    match verdict {
+        EvalVerdict::Promising => ucf::v1::ProposalVerdict::Promising,
+        EvalVerdict::Neutral => ucf::v1::ProposalVerdict::Neutral,
+        EvalVerdict::Risky => ucf::v1::ProposalVerdict::Risky,
     }
 }
 
@@ -614,8 +676,44 @@ mod tests {
             reason_codes: vec!["rc.beta".to_string(), "RC.ALPHA".to_string()],
         };
 
-        let first = encode_proposal_evidence(&evidence);
-        let second = encode_proposal_evidence(&evidence);
+        let first = canonical_bytes(&build_proposal_evidence_pb(&evidence));
+        let second = canonical_bytes(&build_proposal_evidence_pb(&evidence));
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn proposal_evidence_digest_matches() {
+        let payload = ProposalPayload::InjectionLimitsUpdate {
+            max_spikes_per_tick: 32,
+            max_targets_per_spike: 4,
+        };
+        let payload_digest = proposal_payload_digest(&payload).expect("payload digest");
+        let evidence = ProposalEvidence {
+            proposal_id: "proposal-1".to_string(),
+            proposal_digest: [9; 32],
+            kind: ProposalKind::InjectionLimitsUpdate,
+            base_evidence_digest: [0; 32],
+            payload_digest,
+            created_at_ms: 123,
+            score: 7,
+            verdict: EvalVerdict::Neutral,
+            reason_codes: vec!["rc.beta".to_string(), "RC.ALPHA".to_string()],
+        };
+
+        let mut pb = build_proposal_evidence_pb(&evidence);
+        let digest = pb
+            .proposal_digest
+            .as_ref()
+            .and_then(digest_bytes)
+            .expect("proposal digest");
+        pb.proposal_digest = Some(ucf::v1::Digest32 {
+            value: vec![0u8; 32],
+        });
+        let recomputed = digest_proto("UCF:PROPOSAL_EVIDENCE", &canonical_bytes(&pb));
+        assert_eq!(digest, recomputed);
+    }
+
+    fn digest_bytes(digest: &ucf::v1::Digest32) -> Option<[u8; 32]> {
+        digest.value.as_slice().try_into().ok()
     }
 }

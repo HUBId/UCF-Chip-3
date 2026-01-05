@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use prost::Message;
 use pvgs_verify::{IngestError, PvgsKeyEpochStore};
 use rpp_checker::{compute_accumulator_digest, RppCheckInputs};
 use thiserror::Error;
@@ -1256,7 +1257,21 @@ impl PvgsClient for LocalPvgsClient {
         payload_bytes: Vec<u8>,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         let digest = ucf_protocol::digest_proto("UCF:HASH:PROPOSAL_EVIDENCE", &payload_bytes);
+        let evidence_valid = proposal_evidence_digest_valid(&payload_bytes);
         self.committed_proposal_evidence_bytes.push(payload_bytes);
+
+        let mut status = self.default_status;
+        let mut reject_reason_codes = if status == ucf::v1::ReceiptStatus::Rejected {
+            self.reject_reason_codes.clone()
+        } else {
+            Vec::new()
+        };
+        if !evidence_valid {
+            status = ucf::v1::ReceiptStatus::Rejected;
+            if reject_reason_codes.is_empty() {
+                reject_reason_codes.push("RC.GV.DIGEST_MISMATCH".to_string());
+            }
+        }
 
         let receipt = ucf::v1::PvgsReceipt {
             receipt_epoch: self.receipt_epoch.clone(),
@@ -1267,7 +1282,7 @@ impl PvgsClient for LocalPvgsClient {
             receipt_digest: Some(ucf::v1::Digest32 {
                 value: digest.to_vec(),
             }),
-            status: self.default_status.into(),
+            status: status.into(),
             action_digest: None,
             decision_digest: Some(ucf::v1::Digest32 {
                 value: digest.to_vec(),
@@ -1278,11 +1293,7 @@ impl PvgsClient for LocalPvgsClient {
             prev_record_digest: None,
             profile_digest: None,
             tool_profile_digest: None,
-            reject_reason_codes: if self.default_status == ucf::v1::ReceiptStatus::Rejected {
-                self.reject_reason_codes.clone()
-            } else {
-                Vec::new()
-            },
+            reject_reason_codes,
             signer: None,
         };
 
@@ -1294,7 +1305,21 @@ impl PvgsClient for LocalPvgsClient {
         payload_bytes: Vec<u8>,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         let digest = ucf_protocol::digest_proto("UCF:HASH:PROPOSAL_ACTIVATION", &payload_bytes);
+        let evidence_valid = activation_evidence_digest_valid(&payload_bytes);
         self.committed_proposal_activation_bytes.push(payload_bytes);
+
+        let mut status = self.default_status;
+        let mut reject_reason_codes = if status == ucf::v1::ReceiptStatus::Rejected {
+            self.reject_reason_codes.clone()
+        } else {
+            Vec::new()
+        };
+        if !evidence_valid {
+            status = ucf::v1::ReceiptStatus::Rejected;
+            if reject_reason_codes.is_empty() {
+                reject_reason_codes.push("RC.GV.DIGEST_MISMATCH".to_string());
+            }
+        }
 
         let receipt = ucf::v1::PvgsReceipt {
             receipt_epoch: self.receipt_epoch.clone(),
@@ -1305,7 +1330,7 @@ impl PvgsClient for LocalPvgsClient {
             receipt_digest: Some(ucf::v1::Digest32 {
                 value: digest.to_vec(),
             }),
-            status: self.default_status.into(),
+            status: status.into(),
             action_digest: None,
             decision_digest: Some(ucf::v1::Digest32 {
                 value: digest.to_vec(),
@@ -1316,11 +1341,7 @@ impl PvgsClient for LocalPvgsClient {
             prev_record_digest: None,
             profile_digest: None,
             tool_profile_digest: None,
-            reject_reason_codes: if self.default_status == ucf::v1::ReceiptStatus::Rejected {
-                self.reject_reason_codes.clone()
-            } else {
-                Vec::new()
-            },
+            reject_reason_codes,
             signer: None,
         };
 
@@ -1332,7 +1353,21 @@ impl PvgsClient for LocalPvgsClient {
         payload_bytes: Vec<u8>,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
         let digest = ucf_protocol::digest_proto("UCF:HASH:TRACE_RUN_EVIDENCE", &payload_bytes);
+        let evidence_valid = trace_run_evidence_digest_valid(&payload_bytes);
         self.committed_trace_run_bytes.push(payload_bytes);
+
+        let mut status = self.default_status;
+        let mut reject_reason_codes = if status == ucf::v1::ReceiptStatus::Rejected {
+            self.reject_reason_codes.clone()
+        } else {
+            Vec::new()
+        };
+        if !evidence_valid {
+            status = ucf::v1::ReceiptStatus::Rejected;
+            if reject_reason_codes.is_empty() {
+                reject_reason_codes.push("RC.GV.DIGEST_MISMATCH".to_string());
+            }
+        }
 
         let receipt = ucf::v1::PvgsReceipt {
             receipt_epoch: self.receipt_epoch.clone(),
@@ -1343,7 +1378,7 @@ impl PvgsClient for LocalPvgsClient {
             receipt_digest: Some(ucf::v1::Digest32 {
                 value: digest.to_vec(),
             }),
-            status: self.default_status.into(),
+            status: status.into(),
             action_digest: None,
             decision_digest: Some(ucf::v1::Digest32 {
                 value: digest.to_vec(),
@@ -1354,11 +1389,7 @@ impl PvgsClient for LocalPvgsClient {
             prev_record_digest: None,
             profile_digest: None,
             tool_profile_digest: None,
-            reject_reason_codes: if self.default_status == ucf::v1::ReceiptStatus::Rejected {
-                self.reject_reason_codes.clone()
-            } else {
-                Vec::new()
-            },
+            reject_reason_codes,
             signer: None,
         };
 
@@ -1471,6 +1502,70 @@ impl PvgsClient for LocalPvgsClient {
     fn run_spotcheck(&mut self, _session_id: &str) -> Result<SpotCheckReport, PvgsClientError> {
         Ok(self.spotcheck_report.clone())
     }
+}
+
+fn proposal_evidence_digest_valid(payload_bytes: &[u8]) -> bool {
+    let mut evidence = match ucf::v1::ProposalEvidence::decode(payload_bytes) {
+        Ok(evidence) => evidence,
+        Err(_) => return false,
+    };
+    let digest = evidence
+        .proposal_digest
+        .as_ref()
+        .and_then(digest_bytes)
+        .unwrap_or([0u8; 32]);
+    evidence.proposal_digest = Some(ucf::v1::Digest32 {
+        value: vec![0u8; 32],
+    });
+    let recomputed = ucf_protocol::digest_proto(
+        "UCF:PROPOSAL_EVIDENCE",
+        &ucf_protocol::canonical_bytes(&evidence),
+    );
+    digest == recomputed
+}
+
+fn activation_evidence_digest_valid(payload_bytes: &[u8]) -> bool {
+    let mut evidence = match ucf::v1::ProposalActivationEvidence::decode(payload_bytes) {
+        Ok(evidence) => evidence,
+        Err(_) => return false,
+    };
+    let digest = evidence
+        .activation_digest
+        .as_ref()
+        .and_then(digest_bytes)
+        .unwrap_or([0u8; 32]);
+    evidence.activation_digest = Some(ucf::v1::Digest32 {
+        value: vec![0u8; 32],
+    });
+    let recomputed = ucf_protocol::digest_proto(
+        "UCF:ACTIVATION_EVIDENCE",
+        &ucf_protocol::canonical_bytes(&evidence),
+    );
+    digest == recomputed
+}
+
+fn trace_run_evidence_digest_valid(payload_bytes: &[u8]) -> bool {
+    let mut evidence = match ucf::v1::TraceRunEvidence::decode(payload_bytes) {
+        Ok(evidence) => evidence,
+        Err(_) => return false,
+    };
+    let digest = evidence
+        .trace_digest
+        .as_ref()
+        .and_then(digest_bytes)
+        .unwrap_or([0u8; 32]);
+    evidence.trace_digest = Some(ucf::v1::Digest32 {
+        value: vec![0u8; 32],
+    });
+    let recomputed = ucf_protocol::digest_proto(
+        "UCF:TRACE_RUN_EVIDENCE",
+        &ucf_protocol::canonical_bytes(&evidence),
+    );
+    digest == recomputed
+}
+
+fn digest_bytes(digest: &ucf::v1::Digest32) -> Option<[u8; 32]> {
+    digest.value.as_slice().try_into().ok()
 }
 
 impl PvgsReader for LocalPvgsClient {

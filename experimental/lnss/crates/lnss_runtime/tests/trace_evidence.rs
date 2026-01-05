@@ -6,13 +6,17 @@ use lnss_core::{
     digest, BiophysFeedbackSnapshot, BrainTarget, EmotionFieldSnapshot, FeatureEvent,
     FeatureToBrainMap, TapFrame, TapKind, TapSpec,
 };
+use lnss_evolve::trace_encoding::{
+    build_trace_run_evidence_pb, TraceRunEvidenceLocal, TraceVerdict,
+};
 use lnss_runtime::{
     BrainSpike, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
     MechIntRecord, MechIntWriter, ProposalInbox, RigClient, SaeBackend, ShadowConfig,
     StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use prost::Message;
-use pvgs_client::{MockPvgsClient, PvgsClient, PvgsClientReader, PvgsReader};
+use pvgs_client::{LocalPvgsClient, MockPvgsClient, PvgsClient, PvgsClientReader, PvgsReader};
+use ucf_protocol::canonical_bytes;
 use ucf_protocol::ucf;
 
 #[derive(Clone, Default)]
@@ -673,4 +677,34 @@ fn promising_trace_allows_aap_and_binds_trace_digest() {
         trace_ref.digest.as_ref().expect("trace digest").value,
         trace_digest
     );
+}
+
+#[test]
+fn tampered_trace_evidence_rejected() {
+    let evidence = TraceRunEvidenceLocal {
+        trace_id: "trace:aa:bb:1".to_string(),
+        active_cfg_digest: [1u8; 32],
+        shadow_cfg_digest: [2u8; 32],
+        active_feedback_digest: [3u8; 32],
+        shadow_feedback_digest: [4u8; 32],
+        score_active: 10,
+        score_shadow: 15,
+        delta: 5,
+        verdict: TraceVerdict::Promising,
+        created_at_ms: 20,
+        reason_codes: vec!["rc.beta".to_string(), "rc.alpha".to_string()],
+        trace_digest: [0u8; 32],
+    };
+
+    let pb = build_trace_run_evidence_pb(&evidence);
+    let mut tampered = pb.clone();
+    if let Some(reason_codes) = tampered.reason_codes.as_mut() {
+        reason_codes.codes.reverse();
+    }
+
+    let mut pvgs = LocalPvgsClient::default();
+    let receipt = pvgs
+        .commit_trace_run_evidence(canonical_bytes(&tampered))
+        .expect("commit trace");
+    assert_eq!(receipt.status, ucf::v1::ReceiptStatus::Rejected as i32);
 }
