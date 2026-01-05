@@ -1092,6 +1092,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "ucf-protocol",
 ]
 
 [[package]]
@@ -1416,6 +1417,7 @@ dependencies = [
  "chip4-pvgs",
  "ed25519-dalek",
  "hex",
+ "prost",
  "pvgs_verify",
  "rand 0.8.5",
  "rpp_checker",
