@@ -551,7 +551,7 @@ impl PvgsClient for Chip4LocalPvgsClient {
         &mut self,
         payload_bytes: Vec<u8>,
     ) -> Result<ucf::v1::PvgsReceipt, PvgsClientError> {
-        Ok(self.pvgs.append_proposal_activation(payload_bytes))
+        Ok(self.pvgs.append_proposal_evidence(payload_bytes))
     }
 
     fn try_commit_next_micro(&mut self, _session_id: &str) -> Result<bool, PvgsClientError> {
