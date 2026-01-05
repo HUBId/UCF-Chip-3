@@ -1,9 +1,11 @@
 use chip2::{Chip2Runtime, DefaultRouter, L4Circuit};
-use lnss_core::{BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapKind, TapSpec};
+use lnss_core::{
+    BrainTarget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, TapFrame, TapKind, TapSpec,
+};
 use lnss_runtime::{
-    BiophysFeedbackSnapshot, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
-    MechIntRecord, MechIntWriter, RigClient, SaeBackend, ShadowConfig, StubHookProvider,
-    StubLlmBackend,
+    BiophysFeedbackSnapshot, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime,
+    MappingAdaptationConfig, MechIntRecord, MechIntWriter, RigClient, SaeBackend, ShadowConfig,
+    StubHookProvider, StubLlmBackend,
 };
 
 #[derive(Clone, Default)]
@@ -63,7 +65,10 @@ impl Chip2RigClient {
 }
 
 impl RigClient for Chip2RigClient {
-    fn send_spikes(&mut self, spikes: &[lnss_runtime::BrainSpike]) -> Result<(), lnss_runtime::LnssRuntimeError> {
+    fn send_spikes(
+        &mut self,
+        spikes: &[lnss_runtime::BrainSpike],
+    ) -> Result<(), lnss_runtime::LnssRuntimeError> {
         let external: Vec<chip2::ExternalSpike> = spikes
             .iter()
             .map(|spike| chip2::ExternalSpike {
@@ -171,7 +176,10 @@ fn shadow_mapping_reduces_amplitude_and_improves_score() {
         .iter()
         .find(|record| record.shadow_evidence.is_some())
         .expect("shadow record");
-    let evidence = shadow_record.shadow_evidence.as_ref().expect("shadow evidence");
+    let evidence = shadow_record
+        .shadow_evidence
+        .as_ref()
+        .expect("shadow evidence");
     assert_eq!(evidence.shadow_mapping_digest, shadow_mapping.map_digest);
     assert!(evidence.score.delta > 0);
 }

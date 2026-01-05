@@ -872,11 +872,7 @@ impl LnssRuntime {
                 self.active_liquid_params.as_ref(),
                 &self.injection_limits,
             )?;
-            let shadow_mapping = self
-                .shadow
-                .shadow_mapping
-                .as_ref()
-                .unwrap_or(&self.mapper);
+            let shadow_mapping = self.shadow.shadow_mapping.as_ref().unwrap_or(&self.mapper);
             let shadow_limits = self
                 .shadow
                 .shadow_injection_limits
