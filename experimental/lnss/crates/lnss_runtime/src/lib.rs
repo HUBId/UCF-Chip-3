@@ -1172,7 +1172,7 @@ impl LnssRuntime {
                 Some(client) => match client.commit_trace_run_evidence(payload_bytes) {
                     Ok(receipt) => receipt.status == ucf::v1::ReceiptStatus::Accepted as i32,
                     Err(err) => {
-                        eprintln!("trace run commit failed for {step_id}: {}", err.to_string());
+                        eprintln!("trace run commit failed for {step_id}: {err}");
                         false
                     }
                 },
