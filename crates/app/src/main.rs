@@ -141,8 +141,8 @@ mod lnss_cli {
     use lnss_frames_bridge::LnssGovEvent;
     use lnss_hooks::TransformerLensPlanImport;
     use lnss_mechint::JsonlMechIntWriter;
-    use lnss_rlm::RlmController;
     use lnss_rig::LoggingRigClient;
+    use lnss_rlm::RlmController;
     use lnss_runtime::{
         ActivationResult, FeedbackConsumer, Limits, LnssEventSink, LnssRuntime,
         MappingAdaptationConfig, SaeBackend, StubHookProvider, StubLlmBackend,
