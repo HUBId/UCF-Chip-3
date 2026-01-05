@@ -50,7 +50,7 @@ fn map_fixture(dir: &Path) -> (PathBuf, FeatureToBrainMap, [u8; 32]) {
     let target = BrainTarget::new("v1", "pop", 1, "syn", 700);
     let map = FeatureToBrainMap::new(1, vec![(1, target)]);
     let bytes = serde_json::to_vec(&map).expect("serialize map");
-    let path = dir.join("map.json");
+    let path = dir.join("map.bin");
     fs::write(&path, &bytes).expect("write map");
     let digest = lnss_core::digest(FILE_DIGEST_DOMAIN, &bytes);
     (path, map, digest)
@@ -155,7 +155,8 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         adaptation: MappingAdaptationConfig::default(),
         proposal_inbox: None,
         approval_inbox: Some(
-            ApprovalInbox::with_state_path(dir, dir.join("state.json"), 1).expect("approval inbox"),
+            ApprovalInbox::with_state_path(dir, dir.join("state/approval_state.json"), 1)
+                .expect("approval inbox"),
         ),
     }
 }
@@ -268,7 +269,7 @@ fn state_persists_active_digests() {
     let mut runtime = runtime_fixture(&dir, writer);
     run_once(&mut runtime);
 
-    let state_path = dir.join("state.json");
+    let state_path = dir.join("state/approval_state.json");
     let inbox = ApprovalInbox::with_state_path(&dir, state_path, 1).expect("reload inbox");
     assert_eq!(inbox.state().active_mapping_digest, Some(map.map_digest));
 }
