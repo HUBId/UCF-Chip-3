@@ -241,7 +241,6 @@ mod lnss_cli {
             injection_limits: lnss_runtime::InjectionLimits::default(),
             active_sae_pack_digest: None,
             active_liquid_params_digest: None,
-            #[cfg(feature = "lnss-liquid-ode")]
             active_liquid_params: None,
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
