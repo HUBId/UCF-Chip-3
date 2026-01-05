@@ -87,7 +87,7 @@ fn aap_fixture(dir: &Path, proposal: &lnss_evolve::Proposal) -> ucf::v1::Approva
         requested_operation: ucf::v1::OperationCategory::OpException,
     };
     let aap = build_aap_for_proposal(proposal, &ctx);
-    let digest = aap
+    let digest: [u8; 32] = aap
         .aap_digest
         .as_ref()
         .and_then(|d| d.value.as_slice().try_into().ok())
