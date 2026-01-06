@@ -317,6 +317,64 @@ impl ContextBundle {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreContextDigestPack {
+    pub world_state_digest: [u8; 32],
+    pub self_state_digest: [u8; 32],
+    pub control_frame_digest: [u8; 32],
+    pub policy_digest: Option<[u8; 32]>,
+    pub last_feedback_digest: Option<[u8; 32]>,
+    pub wm_pred_error_bucket: u8,
+    pub rlm_followup_executed: bool,
+}
+
+impl CoreContextDigestPack {
+    pub fn packed_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(32 * 3 + 1 + 32 + 1 + 32 + 2);
+        buf.extend_from_slice(&self.world_state_digest);
+        buf.extend_from_slice(&self.self_state_digest);
+        buf.extend_from_slice(&self.control_frame_digest);
+        match self.policy_digest {
+            Some(digest) => {
+                buf.push(1);
+                buf.extend_from_slice(&digest);
+            }
+            None => buf.push(0),
+        }
+        match self.last_feedback_digest {
+            Some(digest) => {
+                buf.push(1);
+                buf.extend_from_slice(&digest);
+            }
+            None => buf.push(0),
+        }
+        buf.push(self.wm_pred_error_bucket);
+        buf.push(u8::from(self.rlm_followup_executed));
+        buf
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        core_context_digest(&self.packed_bytes())
+    }
+}
+
+pub fn core_context_digest(packed_bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(b"UCF:LNSS:CORE_CTX");
+    hasher.update(packed_bytes);
+    *hasher.finalize().as_bytes()
+}
+
+pub fn wm_pred_error_bucket(prediction_error_score: i32) -> u8 {
+    match prediction_error_score {
+        score if score < 20 => 0,
+        score if score < 50 => 1,
+        score if score < 80 => 2,
+        score if score < 95 => 3,
+        _ => 4,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlIntentClass {
     Monitor,
@@ -757,6 +815,37 @@ mod tests {
 
         assert!(output.followup_output.is_none());
         assert!(output.recursion_blocked);
+    }
+
+    #[test]
+    fn core_context_digest_is_deterministic() {
+        let pack = CoreContextDigestPack {
+            world_state_digest: [1; 32],
+            self_state_digest: [2; 32],
+            control_frame_digest: [3; 32],
+            policy_digest: Some([4; 32]),
+            last_feedback_digest: Some([5; 32]),
+            wm_pred_error_bucket: wm_pred_error_bucket(87),
+            rlm_followup_executed: true,
+        };
+        let first = pack.digest();
+        let second = pack.digest();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn wm_pred_error_bucket_is_stable() {
+        assert_eq!(wm_pred_error_bucket(-1), 0);
+        assert_eq!(wm_pred_error_bucket(0), 0);
+        assert_eq!(wm_pred_error_bucket(19), 0);
+        assert_eq!(wm_pred_error_bucket(20), 1);
+        assert_eq!(wm_pred_error_bucket(49), 1);
+        assert_eq!(wm_pred_error_bucket(50), 2);
+        assert_eq!(wm_pred_error_bucket(79), 2);
+        assert_eq!(wm_pred_error_bucket(80), 3);
+        assert_eq!(wm_pred_error_bucket(94), 3);
+        assert_eq!(wm_pred_error_bucket(95), 4);
+        assert_eq!(wm_pred_error_bucket(120), 4);
     }
 
     #[test]

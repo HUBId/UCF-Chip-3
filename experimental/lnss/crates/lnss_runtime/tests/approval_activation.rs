@@ -7,8 +7,8 @@ use lnss_approval::{
     ActivationStatus, ApprovalContext, ProposalActivationEvidenceLocal,
 };
 use lnss_core::{
-    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
-    RecursionPolicy, TapFrame, TapKind, TapSpec,
+    BrainTarget, ControlIntentClass, CoreContextDigestPack, EmotionFieldSnapshot,
+    FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
 };
 use lnss_evolve::load_proposals;
 use lnss_rlm::RlmController;
@@ -30,6 +30,18 @@ struct RecordingWriter {
 impl RecordingWriter {
     fn records(&self) -> Vec<MechIntRecord> {
         self.records.lock().expect("records lock").clone()
+    }
+}
+
+fn core_context_pack(seed: u8) -> CoreContextDigestPack {
+    CoreContextDigestPack {
+        world_state_digest: [seed; 32],
+        self_state_digest: [seed.wrapping_add(1); 32],
+        control_frame_digest: [seed.wrapping_add(2); 32],
+        policy_digest: None,
+        last_feedback_digest: None,
+        wm_pred_error_bucket: 2,
+        rlm_followup_executed: false,
     }
 }
 
@@ -339,6 +351,7 @@ fn proposal_fixture_named(
     filename: &str,
     proposal_id: &str,
 ) -> lnss_evolve::Proposal {
+    let core_context = core_context_pack(3);
     write_json(
         &dir.join(filename),
         serde_json::json!({
@@ -346,6 +359,16 @@ fn proposal_fixture_named(
             "kind": "mapping_update",
             "created_at_ms": 1,
             "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": {
+                "world_state_digest": core_context.world_state_digest.to_vec(),
+                "self_state_digest": core_context.self_state_digest.to_vec(),
+                "control_frame_digest": core_context.control_frame_digest.to_vec(),
+                "policy_digest": serde_json::Value::Null,
+                "last_feedback_digest": serde_json::Value::Null,
+                "wm_pred_error_bucket": core_context.wm_pred_error_bucket,
+                "rlm_followup_executed": core_context.rlm_followup_executed,
+            },
+            "core_context_digest": core_context.digest().to_vec(),
             "payload": {
                 "type": "mapping_update",
                 "new_map_path": map_path.to_string_lossy(),
@@ -377,7 +400,7 @@ fn aap_fixture(dir: &Path, proposal: &lnss_evolve::Proposal) -> ucf::v1::Approva
         trace_digest: None,
         requested_operation: ucf::v1::OperationCategory::OpException,
     };
-    let aap = build_aap_for_proposal(proposal, &ctx);
+    let aap = build_aap_for_proposal(proposal, &ctx).expect("aap");
     let digest: [u8; 32] = aap
         .aap_digest
         .as_ref()
@@ -526,6 +549,7 @@ fn expected_activation_evidence(
         activation_id: activation_id_for(input.proposal.proposal_digest, input.approval_digest),
         proposal_digest: input.proposal.proposal_digest,
         approval_digest: input.approval_digest,
+        core_context_digest: input.proposal.core_context_digest,
         status: input.status,
         active_mapping_digest: input.active_mapping_digest,
         active_sae_pack_digest: input.active_sae_pack_digest,

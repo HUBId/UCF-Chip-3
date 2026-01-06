@@ -10,7 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
-use lnss_core::{MAX_REASON_CODES, MAX_STRING_LEN};
+use lnss_core::{CoreContextDigestPack, MAX_REASON_CODES, MAX_STRING_LEN};
 pub mod trace_encoding;
 #[cfg(feature = "lnss-legacy-evidence")]
 pub use trace_encoding::encode_trace;
@@ -41,6 +41,8 @@ pub struct Proposal {
     pub kind: ProposalKind,
     pub created_at_ms: u64,
     pub base_evidence_digest: [u8; 32],
+    pub core_context_digest_pack: CoreContextDigestPack,
+    pub core_context_digest: [u8; 32],
     pub payload: ProposalPayload,
     pub reason_codes: Vec<String>,
 }
@@ -87,6 +89,7 @@ pub struct ProposalEvidence {
     pub proposal_digest: [u8; 32],
     pub kind: ProposalKind,
     pub base_evidence_digest: [u8; 32],
+    pub core_context_digest: [u8; 32],
     pub payload_digest: [u8; 32],
     pub created_at_ms: u64,
     pub score: i32,
@@ -119,6 +122,8 @@ struct ProposalInput {
     kind: ProposalKind,
     created_at_ms: u64,
     base_evidence_digest: [u8; 32],
+    core_context_digest_pack: CoreContextDigestPack,
+    core_context_digest: [u8; 32],
     payload: ProposalPayload,
     #[serde(default)]
     reason_codes: Vec<String>,
@@ -262,6 +267,9 @@ pub fn build_proposal_evidence_pb(pe: &ProposalEvidence) -> ucf::v1::ProposalEvi
         reason_codes: Some(ucf::v1::ReasonCodes {
             codes: reason_codes,
         }),
+        context_digest: Some(ucf::v1::Digest32 {
+            value: pe.core_context_digest.to_vec(),
+        }),
     };
 
     let digest = digest_proto("UCF:PROPOSAL_EVIDENCE", &canonical_bytes(&evidence));
@@ -284,6 +292,7 @@ pub fn encode_proposal_evidence(pe: &ProposalEvidence) -> Vec<u8> {
     buf.extend_from_slice(&pe.proposal_digest);
     buf.push(proposal_kind_tag(&pe.kind));
     buf.extend_from_slice(&pe.base_evidence_digest);
+    buf.extend_from_slice(&pe.core_context_digest);
     buf.extend_from_slice(&pe.payload_digest);
     buf.extend_from_slice(&pe.created_at_ms.to_le_bytes());
     buf.extend_from_slice(&pe.score.to_le_bytes());
@@ -324,6 +333,19 @@ fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError>
             &reason_codes,
         ),
     };
+    if is_zero_digest(&input.core_context_digest_pack.world_state_digest)
+        || is_zero_digest(&input.core_context_digest_pack.self_state_digest)
+    {
+        return Err(LnssEvolveError::Validation(
+            "missing core context digest components".to_string(),
+        ));
+    }
+    let expected_context_digest = input.core_context_digest_pack.digest();
+    if expected_context_digest != input.core_context_digest {
+        return Err(LnssEvolveError::Validation(
+            "core context digest mismatch".to_string(),
+        ));
+    }
 
     let canonical = ProposalCanonical {
         proposal_id: &proposal_id,
@@ -342,6 +364,8 @@ fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError>
         kind: input.kind,
         created_at_ms: input.created_at_ms,
         base_evidence_digest: input.base_evidence_digest,
+        core_context_digest_pack: input.core_context_digest_pack,
+        core_context_digest: input.core_context_digest,
         payload,
         reason_codes,
     })
@@ -575,14 +599,47 @@ mod tests {
         fs::write(path, serde_json::to_vec(&value).expect("json")).expect("write json");
     }
 
+    fn core_context_pack(seed: u8) -> CoreContextDigestPack {
+        CoreContextDigestPack {
+            world_state_digest: [seed; 32],
+            self_state_digest: [seed.wrapping_add(1); 32],
+            control_frame_digest: [seed.wrapping_add(2); 32],
+            policy_digest: None,
+            last_feedback_digest: None,
+            wm_pred_error_bucket: 2,
+            rlm_followup_executed: false,
+        }
+    }
+
+    fn core_context_json(seed: u8) -> Value {
+        let pack = core_context_pack(seed);
+        serde_json::json!({
+            "core_context_digest_pack": {
+                "world_state_digest": pack.world_state_digest.to_vec(),
+                "self_state_digest": pack.self_state_digest.to_vec(),
+                "control_frame_digest": pack.control_frame_digest.to_vec(),
+                "policy_digest": Value::Null,
+                "last_feedback_digest": Value::Null,
+                "wm_pred_error_bucket": pack.wm_pred_error_bucket,
+                "rlm_followup_executed": pack.rlm_followup_executed,
+            },
+            "core_context_digest": pack.digest().to_vec(),
+        })
+    }
+
     #[test]
     fn load_proposals_orders_and_hashes_deterministically() {
         let dir = temp_dir("lnss_prop");
+        let context_a = core_context_json(10);
+        let context_b = core_context_json(11);
+        let context_c = core_context_json(12);
         let proposal_a = serde_json::json!({
             "proposal_id": "p-a",
             "kind": "mapping_update",
             "created_at_ms": 10,
             "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": context_a["core_context_digest_pack"].clone(),
+            "core_context_digest": context_a["core_context_digest"].clone(),
             "payload": {
                 "type": "mapping_update",
                 "new_map_path": "maps/a.json",
@@ -596,6 +653,8 @@ mod tests {
             "kind": "injection_limits_update",
             "created_at_ms": 11,
             "base_evidence_digest": vec![2; 32],
+            "core_context_digest_pack": context_b["core_context_digest_pack"].clone(),
+            "core_context_digest": context_b["core_context_digest"].clone(),
             "payload": {
                 "type": "injection_limits_update",
                 "max_spikes_per_tick": 100,
@@ -608,6 +667,8 @@ mod tests {
             "kind": "sae_pack_update",
             "created_at_ms": 12,
             "base_evidence_digest": vec![3; 32],
+            "core_context_digest_pack": context_c["core_context_digest_pack"].clone(),
+            "core_context_digest": context_c["core_context_digest"].clone(),
             "payload": {
                 "type": "sae_pack_update",
                 "pack_path": "packs/p.safetensors",
@@ -633,6 +694,69 @@ mod tests {
     }
 
     #[test]
+    fn proposal_missing_context_is_rejected() {
+        let dir = temp_dir("lnss_prop_missing_context");
+        let mut pack = core_context_pack(20);
+        pack.world_state_digest = [0u8; 32];
+        let proposal = serde_json::json!({
+            "proposal_id": "p-missing",
+            "kind": "mapping_update",
+            "created_at_ms": 10,
+            "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": {
+                "world_state_digest": pack.world_state_digest.to_vec(),
+                "self_state_digest": pack.self_state_digest.to_vec(),
+                "control_frame_digest": pack.control_frame_digest.to_vec(),
+                "policy_digest": Value::Null,
+                "last_feedback_digest": Value::Null,
+                "wm_pred_error_bucket": pack.wm_pred_error_bucket,
+                "rlm_followup_executed": pack.rlm_followup_executed,
+            },
+            "core_context_digest": pack.digest().to_vec(),
+            "payload": {
+                "type": "mapping_update",
+                "new_map_path": "maps/a.json",
+                "map_digest": vec![2; 32],
+                "change_summary": ["b", "a"]
+            },
+            "reason_codes": ["z", "a"]
+        });
+        write_json(&dir.join("a.json"), proposal);
+        assert!(load_proposals(&dir).is_err());
+    }
+
+    #[test]
+    fn proposal_context_digest_mismatch_is_rejected() {
+        let dir = temp_dir("lnss_prop_context_mismatch");
+        let pack = core_context_pack(21);
+        let proposal = serde_json::json!({
+            "proposal_id": "p-mismatch",
+            "kind": "mapping_update",
+            "created_at_ms": 10,
+            "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": {
+                "world_state_digest": pack.world_state_digest.to_vec(),
+                "self_state_digest": pack.self_state_digest.to_vec(),
+                "control_frame_digest": pack.control_frame_digest.to_vec(),
+                "policy_digest": Value::Null,
+                "last_feedback_digest": Value::Null,
+                "wm_pred_error_bucket": pack.wm_pred_error_bucket,
+                "rlm_followup_executed": pack.rlm_followup_executed,
+            },
+            "core_context_digest": vec![0u8; 32],
+            "payload": {
+                "type": "mapping_update",
+                "new_map_path": "maps/a.json",
+                "map_digest": vec![2; 32],
+                "change_summary": ["b", "a"]
+            },
+            "reason_codes": ["z", "a"]
+        });
+        write_json(&dir.join("a.json"), proposal);
+        assert!(load_proposals(&dir).is_err());
+    }
+
+    #[test]
     fn evaluation_is_deterministic() {
         let proposal = Proposal {
             proposal_id: "p".to_string(),
@@ -640,6 +764,8 @@ mod tests {
             kind: ProposalKind::InjectionLimitsUpdate,
             created_at_ms: 1,
             base_evidence_digest: [0; 32],
+            core_context_digest_pack: core_context_pack(1),
+            core_context_digest: core_context_pack(1).digest(),
             payload: ProposalPayload::InjectionLimitsUpdate {
                 max_spikes_per_tick: 32,
                 max_targets_per_spike: 4,
@@ -664,11 +790,13 @@ mod tests {
             max_targets_per_spike: 4,
         };
         let payload_digest = proposal_payload_digest(&payload).expect("payload digest");
+        let context_digest = core_context_pack(2).digest();
         let evidence = ProposalEvidence {
             proposal_id: "proposal-1".to_string(),
             proposal_digest: [9; 32],
             kind: ProposalKind::InjectionLimitsUpdate,
             base_evidence_digest: [0; 32],
+            core_context_digest: context_digest,
             payload_digest,
             created_at_ms: 123,
             score: 7,
@@ -688,11 +816,13 @@ mod tests {
             max_targets_per_spike: 4,
         };
         let payload_digest = proposal_payload_digest(&payload).expect("payload digest");
+        let context_digest = core_context_pack(3).digest();
         let evidence = ProposalEvidence {
             proposal_id: "proposal-1".to_string(),
             proposal_digest: [9; 32],
             kind: ProposalKind::InjectionLimitsUpdate,
             base_evidence_digest: [0; 32],
+            core_context_digest: context_digest,
             payload_digest,
             created_at_ms: 123,
             score: 7,

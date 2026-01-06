@@ -12,7 +12,7 @@ use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
 const AAP_DOMAIN: &str = "UCF:HASH:APPROVAL_ARTIFACT_PACKAGE";
 const AAP_ID_PREFIX_LEN: usize = 8;
-const MAX_EVIDENCE_REFS: usize = 4;
+const MAX_EVIDENCE_REFS: usize = 7;
 const MAX_ALTERNATIVES: usize = 3;
 const MAX_CONSTRAINTS: usize = 8;
 const ACTIVATION_DOMAIN: &str = "UCF:ACTIVATION_EVIDENCE";
@@ -36,6 +36,7 @@ pub struct ProposalActivationEvidenceLocal {
     pub activation_id: String,
     pub proposal_digest: [u8; 32],
     pub approval_digest: [u8; 32],
+    pub core_context_digest: [u8; 32],
     pub status: ActivationStatus,
     pub active_mapping_digest: Option<[u8; 32]>,
     pub active_sae_pack_digest: Option<[u8; 32]>,
@@ -92,6 +93,9 @@ pub fn build_activation_evidence_pb(
         activation_digest: Some(ucf::v1::Digest32 {
             value: vec![0u8; 32],
         }),
+        context_digest: Some(ucf::v1::Digest32 {
+            value: ev.core_context_digest.to_vec(),
+        }),
     };
 
     let digest_bytes = digest_proto(ACTIVATION_DOMAIN, &canonical_bytes(&evidence));
@@ -111,6 +115,7 @@ pub fn encode_activation(ev: &ProposalActivationEvidenceLocal) -> Vec<u8> {
     write_string_u16(&mut buf, &activation_id);
     buf.extend_from_slice(&ev.proposal_digest);
     buf.extend_from_slice(&ev.approval_digest);
+    buf.extend_from_slice(&ev.core_context_digest);
     buf.push(activation_status_tag(&ev.status));
     write_u64(&mut buf, ev.created_at_ms);
     write_optional_digest(&mut buf, ev.active_mapping_digest);
@@ -154,6 +159,12 @@ pub enum ApprovalLoadError {
     Decode(String),
 }
 
+#[derive(Debug, Error)]
+pub enum ApprovalBuildError {
+    #[error("missing core context binding")]
+    MissingContextBinding,
+}
+
 #[derive(Debug, Clone)]
 pub struct ApprovalContext {
     pub session_id: String,
@@ -169,7 +180,10 @@ pub struct ApprovalContext {
 pub fn build_aap_for_proposal(
     proposal: &Proposal,
     ctx: &ApprovalContext,
-) -> ucf::v1::ApprovalArtifactPackage {
+) -> Result<ucf::v1::ApprovalArtifactPackage, ApprovalBuildError> {
+    if is_zero_digest(&proposal.core_context_digest) {
+        return Err(ApprovalBuildError::MissingContextBinding);
+    }
     let aap_id = aap_id_for_proposal(proposal);
     let mut evidence_refs = Vec::new();
     evidence_refs.push(related_ref("proposal_digest", proposal.proposal_digest));
@@ -177,9 +191,21 @@ pub fn build_aap_for_proposal(
         "base_evidence_digest",
         proposal.base_evidence_digest,
     ));
+    evidence_refs.push(related_ref(
+        "core_context_digest",
+        proposal.core_context_digest,
+    ));
     if let Some(trace_digest) = ctx.trace_digest {
         evidence_refs.push(related_ref("trace_digest", trace_digest));
     }
+    evidence_refs.push(related_ref(
+        "world_state_digest",
+        proposal.core_context_digest_pack.world_state_digest,
+    ));
+    evidence_refs.push(related_ref(
+        "self_state_digest",
+        proposal.core_context_digest_pack.self_state_digest,
+    ));
     if let Some(scorecard) = ctx.latest_scorecard_digest {
         evidence_refs.push(related_ref("scorecard_digest", scorecard));
     }
@@ -226,7 +252,7 @@ pub fn build_aap_for_proposal(
     aap.aap_digest = Some(ucf::v1::Digest32 {
         value: digest.to_vec(),
     });
-    aap
+    Ok(aap)
 }
 
 pub fn approval_artifact_package_digest(aap: &ucf::v1::ApprovalArtifactPackage) -> [u8; 32] {
@@ -470,18 +496,34 @@ fn digest_bytes(digest: &ucf::v1::Digest32) -> Option<[u8; 32]> {
     Some(bytes)
 }
 
+fn is_zero_digest(digest: &[u8; 32]) -> bool {
+    digest.iter().all(|b| *b == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lnss_evolve::{Proposal, ProposalKind, ProposalPayload};
 
     fn sample_proposal() -> Proposal {
+        let core_context_digest_pack = lnss_core::CoreContextDigestPack {
+            world_state_digest: [6u8; 32],
+            self_state_digest: [7u8; 32],
+            control_frame_digest: [8u8; 32],
+            policy_digest: None,
+            last_feedback_digest: None,
+            wm_pred_error_bucket: 1,
+            rlm_followup_executed: false,
+        };
+        let core_context_digest = core_context_digest_pack.digest();
         Proposal {
             proposal_id: "proposal-1".to_string(),
             proposal_digest: [3u8; 32],
             kind: ProposalKind::MappingUpdate,
             created_at_ms: 100,
             base_evidence_digest: [5u8; 32],
+            core_context_digest_pack,
+            core_context_digest,
             payload: ProposalPayload::MappingUpdate {
                 new_map_path: "maps/new.json".to_string(),
                 map_digest: [9u8; 32],
@@ -505,12 +547,21 @@ mod tests {
     }
 
     #[test]
+    fn aap_requires_context_binding() {
+        let mut proposal = sample_proposal();
+        proposal.core_context_digest = [0u8; 32];
+        let ctx = sample_context("session-missing");
+        let err = build_aap_for_proposal(&proposal, &ctx).expect_err("missing context");
+        assert!(matches!(err, ApprovalBuildError::MissingContextBinding));
+    }
+
+    #[test]
     fn aap_id_and_digest_are_deterministic() {
         let proposal = sample_proposal();
         let ctx = sample_context("session-1");
 
-        let first = build_aap_for_proposal(&proposal, &ctx);
-        let second = build_aap_for_proposal(&proposal, &ctx);
+        let first = build_aap_for_proposal(&proposal, &ctx).expect("aap");
+        let second = build_aap_for_proposal(&proposal, &ctx).expect("aap");
 
         assert_eq!(first.aap_id, second.aap_id);
         assert_eq!(first.aap_digest, second.aap_digest);
@@ -520,7 +571,7 @@ mod tests {
     fn alternatives_present_and_ordered() {
         let proposal = sample_proposal();
         let ctx = sample_context("session-2");
-        let aap = build_aap_for_proposal(&proposal, &ctx);
+        let aap = build_aap_for_proposal(&proposal, &ctx).expect("aap");
 
         assert!(aap.alternatives.len() >= 2);
         assert_eq!(
@@ -537,7 +588,7 @@ mod tests {
     fn evidence_refs_include_proposal_and_base_evidence() {
         let proposal = sample_proposal();
         let ctx = sample_context("session-3");
-        let aap = build_aap_for_proposal(&proposal, &ctx);
+        let aap = build_aap_for_proposal(&proposal, &ctx).expect("aap");
 
         let proposal_ref = aap
             .evidence_refs
@@ -572,7 +623,7 @@ mod tests {
         let proposal = sample_proposal();
         let long_session = "s".repeat(MAX_STRING_LEN + 32);
         let ctx = sample_context(&long_session);
-        let aap = build_aap_for_proposal(&proposal, &ctx);
+        let aap = build_aap_for_proposal(&proposal, &ctx).expect("aap");
 
         assert!(aap.session_id.len() <= MAX_STRING_LEN);
         assert!(aap.aap_id.len() <= MAX_STRING_LEN);
@@ -589,6 +640,7 @@ mod tests {
             activation_id: "act:aa:bb".to_string(),
             proposal_digest: [1u8; 32],
             approval_digest: [2u8; 32],
+            core_context_digest: [3u8; 32],
             status: ActivationStatus::Applied,
             active_mapping_digest: Some([3u8; 32]),
             active_sae_pack_digest: None,
@@ -621,6 +673,7 @@ mod tests {
             activation_id: "act:aa:bb".to_string(),
             proposal_digest: [1u8; 32],
             approval_digest: [2u8; 32],
+            core_context_digest: [3u8; 32],
             status: ActivationStatus::Applied,
             active_mapping_digest: Some([3u8; 32]),
             active_sae_pack_digest: None,
