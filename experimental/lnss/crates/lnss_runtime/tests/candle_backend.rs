@@ -50,6 +50,7 @@ fn candle_tap_summary_is_deterministic_and_bounded() {
 
     let cfg = CandleConfig {
         model_dir: model_dir.to_string_lossy().to_string(),
+        model_revision: "rev-1".to_string(),
         max_new_tokens: 1,
         seed: 42,
         device: "cpu".to_string(),
@@ -91,6 +92,7 @@ fn candle_end_to_end_is_deterministic() {
 
     let cfg = CandleConfig {
         model_dir: model_dir.to_string_lossy().to_string(),
+        model_revision: "rev-1".to_string(),
         max_new_tokens: 1,
         seed: 7,
         device: "cpu".to_string(),
@@ -131,6 +133,8 @@ fn candle_end_to_end_is_deterministic() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

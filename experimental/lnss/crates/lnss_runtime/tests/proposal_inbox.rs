@@ -359,6 +359,8 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -498,6 +500,8 @@ fn proposal_commits_only_once_across_ticks() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -621,6 +625,8 @@ fn proposal_commits_are_bounded_and_ordered() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -746,6 +752,8 @@ fn local_pvgs_receives_expected_payload() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

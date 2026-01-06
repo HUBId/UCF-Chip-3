@@ -31,6 +31,98 @@ pub fn digest(domain: &str, bytes: &[u8]) -> [u8; 32] {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentCfgDigest {
+    pub name: String,
+    pub digest: [u8; 32],
+}
+
+impl ComponentCfgDigest {
+    pub fn new(name: &str, digest: [u8; 32]) -> Self {
+        Self {
+            name: bound_string(name),
+            digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfgRootDigestPack {
+    pub language_cfg_digest: [u8; 32],
+    pub worldmodel_cfg_digest: [u8; 32],
+    pub rlm_cfg_digest: [u8; 32],
+    pub sae_cfg_digest: [u8; 32],
+    pub mapping_cfg_digest: [u8; 32],
+    pub limits_cfg_digest: [u8; 32],
+    pub policy_cfg_digest: Option<[u8; 32]>,
+    pub root_cfg_digest: [u8; 32],
+}
+
+impl CfgRootDigestPack {
+    pub fn new(
+        language_cfg_digest: [u8; 32],
+        worldmodel_cfg_digest: [u8; 32],
+        rlm_cfg_digest: [u8; 32],
+        sae_cfg_digest: [u8; 32],
+        mapping_cfg_digest: [u8; 32],
+        limits_cfg_digest: [u8; 32],
+        policy_cfg_digest: Option<[u8; 32]>,
+    ) -> Self {
+        let root_cfg_digest = compute_root_cfg_digest(
+            language_cfg_digest,
+            worldmodel_cfg_digest,
+            rlm_cfg_digest,
+            sae_cfg_digest,
+            mapping_cfg_digest,
+            limits_cfg_digest,
+            policy_cfg_digest,
+        );
+        Self {
+            language_cfg_digest,
+            worldmodel_cfg_digest,
+            rlm_cfg_digest,
+            sae_cfg_digest,
+            mapping_cfg_digest,
+            limits_cfg_digest,
+            policy_cfg_digest,
+            root_cfg_digest,
+        }
+    }
+
+    pub fn compute_root_cfg_digest(&self) -> [u8; 32] {
+        compute_root_cfg_digest(
+            self.language_cfg_digest,
+            self.worldmodel_cfg_digest,
+            self.rlm_cfg_digest,
+            self.sae_cfg_digest,
+            self.mapping_cfg_digest,
+            self.limits_cfg_digest,
+            self.policy_cfg_digest,
+        )
+    }
+}
+
+fn compute_root_cfg_digest(
+    language_cfg_digest: [u8; 32],
+    worldmodel_cfg_digest: [u8; 32],
+    rlm_cfg_digest: [u8; 32],
+    sae_cfg_digest: [u8; 32],
+    mapping_cfg_digest: [u8; 32],
+    limits_cfg_digest: [u8; 32],
+    policy_cfg_digest: Option<[u8; 32]>,
+) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(b"UCF:LNSS:CFG_ROOT");
+    hasher.update(&language_cfg_digest);
+    hasher.update(&worldmodel_cfg_digest);
+    hasher.update(&rlm_cfg_digest);
+    hasher.update(&sae_cfg_digest);
+    hasher.update(&mapping_cfg_digest);
+    hasher.update(&limits_cfg_digest);
+    hasher.update(&policy_cfg_digest.unwrap_or([0u8; 32]));
+    *hasher.finalize().as_bytes()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BiophysFeedbackSnapshot {
     pub tick: u64,
     pub snapshot_digest: [u8; 32],
@@ -433,8 +525,25 @@ pub struct WorldModelOutput {
     pub world_taps: Option<Vec<CoreTapFrame>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldModelCfgSnapshot {
+    pub mode: String,
+    pub encoder_id: String,
+    pub predictor_id: String,
+    pub constants: Vec<(String, i64)>,
+}
+
 pub trait WorldModelCore {
     fn step(&mut self, input: &WorldModelInput) -> WorldModelOutput;
+
+    fn cfg_snapshot(&self) -> WorldModelCfgSnapshot {
+        WorldModelCfgSnapshot {
+            mode: bound_string(std::any::type_name::<Self>()),
+            encoder_id: "stub-encoder".to_string(),
+            predictor_id: "stub-predictor".to_string(),
+            constants: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -461,8 +570,23 @@ pub struct RlmOutput {
     pub self_state_digest: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RlmCfgSnapshot {
+    pub recursion_depth_cap: u8,
+    pub directive_set: Vec<RlmDirective>,
+    pub max_directives: u8,
+}
+
 pub trait RlmCore {
     fn step(&mut self, input: &RlmInput) -> RlmOutput;
+
+    fn cfg_snapshot(&self) -> RlmCfgSnapshot {
+        RlmCfgSnapshot {
+            recursion_depth_cap: 0,
+            directive_set: Vec::new(),
+            max_directives: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

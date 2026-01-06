@@ -211,6 +211,8 @@ fn end_to_end_stub_pipeline() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -301,6 +303,8 @@ fn core_outputs_are_deterministic() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -349,6 +353,8 @@ fn core_outputs_are_deterministic() {
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

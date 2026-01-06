@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use blake3::Hasher;
-use lnss_core::{WorldModelCore, WorldModelInput, WorldModelOutput};
+use lnss_core::{WorldModelCfgSnapshot, WorldModelCore, WorldModelInput, WorldModelOutput};
 
 #[derive(Debug, Default)]
 pub struct WorldModelCoreStub;
@@ -18,6 +18,15 @@ impl WorldModelCore for WorldModelCoreStub {
             world_state_digest,
             prediction_error_score,
             world_taps: None,
+        }
+    }
+
+    fn cfg_snapshot(&self) -> WorldModelCfgSnapshot {
+        WorldModelCfgSnapshot {
+            mode: "stub".to_string(),
+            encoder_id: "stub-encoder".to_string(),
+            predictor_id: "stub-predictor".to_string(),
+            constants: vec![("pred_error_cap".to_string(), 1024)],
         }
     }
 }

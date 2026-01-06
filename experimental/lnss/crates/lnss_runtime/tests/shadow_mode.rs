@@ -139,6 +139,8 @@ fn shadow_mapping_reduces_amplitude_and_improves_score() {
         injection_limits: InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

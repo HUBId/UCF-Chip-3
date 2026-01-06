@@ -13,15 +13,15 @@ use lnss_approval::{
     ProposalActivationEvidenceLocal,
 };
 pub use lnss_core::BiophysFeedbackSnapshot;
-#[cfg(feature = "lnss-liquid-ode")]
 use lnss_core::TapKind;
 use lnss_core::{
-    digest, wm_pred_error_bucket, BrainTarget, CognitiveCore, ContextBundle, ControlIntentClass,
-    CoreContextDigestPack, CoreOrchestrator, CoreStepOutput, DeliberationBudget,
-    EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, FeedbackAnomalyFlags, PolicyMode,
-    PolicyView, RecursionPolicy, RlmCore, RlmDirective, RlmInput, TapFrame, TapSpec,
-    WorldModelCore, WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES,
-    MAX_RLM_DIRECTIVES, MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
+    digest, wm_pred_error_bucket, BrainTarget, CfgRootDigestPack, CognitiveCore, ContextBundle,
+    ControlIntentClass, CoreContextDigestPack, CoreOrchestrator, CoreStepOutput,
+    DeliberationBudget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
+    FeedbackAnomalyFlags, PolicyMode, PolicyView, RecursionPolicy, RlmCore, RlmDirective,
+    RlmInput, TapFrame, TapSpec, WorldModelCore, WorldModelInput, WorldModelCfgSnapshot,
+    RlmCfgSnapshot, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES, MAX_RLM_DIRECTIVES,
+    MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
@@ -62,6 +62,13 @@ pub const DEFAULT_APPROVAL_SCAN_TICKS: u64 = 10;
 pub const DEFAULT_APPROVAL_MAX_PER_TICK: usize = 1;
 pub const FILE_DIGEST_DOMAIN: &str = "lnss.file.bytes.v1";
 pub const LIQUID_PARAMS_DOMAIN: &str = "lnss.liquid.params.v1";
+const LANG_CFG_DOMAIN: &str = "UCF:LNSS:LANG_CFG";
+const WM_CFG_DOMAIN: &str = "UCF:LNSS:WM_CFG";
+const RLM_CFG_DOMAIN: &str = "UCF:LNSS:RLM_CFG";
+const SAE_CFG_DOMAIN: &str = "UCF:LNSS:SAE_CFG";
+const MAP_CFG_DOMAIN: &str = "UCF:LNSS:MAP_CFG";
+const LIMITS_CFG_DOMAIN: &str = "UCF:LNSS:LIMITS_CFG";
+const HOOK_CFG_DOMAIN: &str = "UCF:LNSS:HOOK_CFG";
 const ACTIVATION_ID_PREFIX_LEN: usize = 8;
 const TRACE_ID_PREFIX_LEN: usize = 8;
 const FIXED_MS_PER_TICK: u64 = 10;
@@ -101,6 +108,8 @@ pub enum LnssRuntimeError {
 pub trait LlmBackend {
     fn infer_step(&mut self, input: &[u8], mods: &EmotionFieldSnapshot) -> Vec<u8>;
     fn supports_hooks(&self) -> bool;
+    fn backend_identifier(&self) -> &'static str;
+    fn model_revision(&self) -> String;
 }
 
 pub trait HookProvider {
@@ -339,6 +348,7 @@ impl ProposalInbox {
             let key = LifecycleKey {
                 proposal_digest: proposal.proposal_digest,
                 context_digest: proposal.core_context_digest,
+                active_cfg_root_digest: proposal.base_active_cfg_digest,
             };
             lifecycle.index.note_proposal(key, lifecycle.tick);
             hydrate_lifecycle_from_query(
@@ -410,6 +420,7 @@ impl ProposalInbox {
                 && trace_allowed
                 && !activation_applied
                 && !pending_approval
+                && active_cfg_root_digest.is_some()
             {
                 let trace_state = trace_state
                     .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
@@ -425,6 +436,8 @@ impl ProposalInbox {
                     current_liquid_params_digest: None,
                     latest_scorecard_digest: None,
                     trace_digest: Some(trace_state.trace_digest),
+                    active_cfg_root_digest,
+                    shadow_cfg_root_digest,
                     requested_operation: ucf::v1::OperationCategory::OpException,
                 };
                 let aap = match build_aap_for_proposal(&proposal, &ctx) {
@@ -449,6 +462,12 @@ impl ProposalInbox {
                 if let Err(err) = fs::write(path, lnss_approval::encode_aap(&aap)) {
                     return Err(LnssRuntimeError::Proposal(err.to_string()));
                 }
+            } else if eval.verdict == EvalVerdict::Promising
+                && trace_allowed
+                && !activation_applied
+                && !pending_approval
+            {
+                eprintln!("cfg root digest missing: aap disabled for step {step_id}");
             }
             let evidence = ProposalEvidence {
                 proposal_id: proposal.proposal_id.clone(),
@@ -689,6 +708,8 @@ pub struct LnssRuntime {
     pub injection_limits: InjectionLimits,
     pub active_sae_pack_digest: Option<[u8; 32]>,
     pub active_liquid_params_digest: Option<[u8; 32]>,
+    pub active_cfg_root_digest: Option<[u8; 32]>,
+    pub shadow_cfg_root_digest: Option<[u8; 32]>,
     #[cfg(feature = "lnss-liquid-ode")]
     pub active_liquid_params: Option<LiquidOdeConfig>,
     pub feedback: FeedbackConsumer,
@@ -1237,6 +1258,53 @@ impl LnssRuntime {
             wm_pred_error_bucket: wm_pred_error_bucket(prediction_error_score),
             rlm_followup_executed: orchestration.followup_output.is_some(),
         };
+        let worldmodel_cfg = self.worldmodel.cfg_snapshot();
+        let rlm_cfg = self.rlm.cfg_snapshot();
+        let active_cfg_pack = cfg_root_digest_pack(
+            self.llm.as_ref(),
+            tap_specs,
+            &worldmodel_cfg,
+            &rlm_cfg,
+            self.active_sae_pack_digest,
+            &self.mapper,
+            &self.limits,
+            &self.injection_limits,
+            DEFAULT_AMPLITUDE_CAP_Q,
+            core_context_pack.policy_digest,
+            self.active_liquid_params_digest,
+        );
+        let active_cfg_root_digest = active_cfg_pack.as_ref().map(|pack| pack.root_cfg_digest);
+        self.active_cfg_root_digest = active_cfg_root_digest;
+        let shadow_cfg_root_digest = if self.shadow.enabled {
+            let shadow_mapping = self.shadow.shadow_mapping.as_ref().unwrap_or(&self.mapper);
+            let shadow_limits = self
+                .shadow
+                .shadow_injection_limits
+                .as_ref()
+                .unwrap_or(&self.injection_limits);
+            #[cfg(feature = "lnss-liquid-ode")]
+            let shadow_liquid_digest =
+                shadow_liquid_params_digest(self.shadow.shadow_liquid_params.as_ref());
+            #[cfg(not(feature = "lnss-liquid-ode"))]
+            let shadow_liquid_digest = None;
+            cfg_root_digest_pack(
+                self.llm.as_ref(),
+                tap_specs,
+                &worldmodel_cfg,
+                &rlm_cfg,
+                self.active_sae_pack_digest,
+                shadow_mapping,
+                &self.limits,
+                shadow_limits,
+                DEFAULT_AMPLITUDE_CAP_Q,
+                core_context_pack.policy_digest,
+                shadow_liquid_digest.or(self.active_liquid_params_digest),
+            )
+            .map(|pack| pack.root_cfg_digest)
+        } else {
+            None
+        };
+        self.shadow_cfg_root_digest = shadow_cfg_root_digest;
         let core_context_digest = core_context_pack.digest();
         let rlm_directives = orchestration.rlm_output.recursion_directives;
         let base_limits_for_plan = BaseLimits {
@@ -1471,14 +1539,21 @@ impl LnssRuntime {
                     active_context_digest: core_context_digest,
                     shadow_context_digest: core_context_digest,
                 };
-                let trace_state = self.commit_trace_run_evidence(
-                    step_id,
-                    &score,
-                    &reason_codes,
-                    shadow_mapping_digest,
-                    trace_context,
-                );
-                self.trace_state = Some(trace_state);
+                if let (Some(active_cfg_root_digest), Some(shadow_cfg_root_digest)) =
+                    (active_cfg_root_digest, shadow_cfg_root_digest)
+                {
+                    let trace_state = self.commit_trace_run_evidence(
+                        step_id,
+                        &score,
+                        &reason_codes,
+                        active_cfg_root_digest,
+                        shadow_cfg_root_digest,
+                        trace_context,
+                    );
+                    self.trace_state = Some(trace_state);
+                } else {
+                    self.trace_state = None;
+                }
                 if let Some(state) = self.trace_state.as_ref() {
                     if state.duplicate_skipped {
                         mechint_parts
@@ -1561,6 +1636,7 @@ impl LnssRuntime {
                 .as_ref()
                 .map(|snap| snap.snapshot_digest)
                 .unwrap_or([0u8; 32]),
+            active_cfg_root_digest: active_cfg_root_digest.unwrap_or([0u8; 32]),
             core_context_digest_pack: core_context_pack.clone(),
             mapping: self.mapper.clone(),
             max_spikes_per_tick: self.injection_limits.max_spikes_per_tick,
@@ -1572,13 +1648,14 @@ impl LnssRuntime {
         };
         let trigger_set =
             extract_triggers(&core_context_pack, feedback_snapshot.as_ref(), &constraints);
-        if self.trigger_proposals_enabled {
+        if self.trigger_proposals_enabled && active_cfg_root_digest.is_some() {
             if let Some(proposal) =
                 propose_from_triggers(&trigger_set, &active_cfg, core_context_digest)
             {
                 let key = LifecycleKey {
                     proposal_digest: proposal.proposal_digest,
                     context_digest: proposal.core_context_digest,
+                    active_cfg_root_digest: proposal.base_active_cfg_digest,
                 };
                 hydrate_lifecycle_from_query(
                     &mut self.lifecycle_index,
@@ -1627,6 +1704,8 @@ impl LnssRuntime {
                     }
                 }
             }
+        } else if self.trigger_proposals_enabled {
+            eprintln!("cfg root digest missing: proposals disabled for step {step_id}");
         }
 
         let mechint_record = MechIntRecord::new(mechint_parts.clone());
@@ -1734,6 +1813,7 @@ impl LnssRuntime {
         let key = LifecycleKey {
             proposal_digest: plan.proposal.proposal_digest,
             context_digest: plan.proposal.core_context_digest,
+            active_cfg_root_digest: plan.proposal.base_active_cfg_digest,
         };
         hydrate_lifecycle_from_query(
             &mut self.lifecycle_index,
@@ -1888,23 +1968,21 @@ impl LnssRuntime {
         step_id: &str,
         score: &ShadowScore,
         reason_codes: &[String],
-        shadow_mapping_digest: [u8; 32],
+        active_cfg_root_digest: [u8; 32],
+        shadow_cfg_root_digest: [u8; 32],
         trace_context: TraceContext,
     ) -> TraceRunState {
         let verdict = trace_verdict_from_delta(score.delta);
         let created_at_ms = trace_context.active_tick.saturating_mul(FIXED_MS_PER_TICK);
-        let trace_id = trace_id_for(
-            self.mapper.map_digest,
-            shadow_mapping_digest,
-            trace_context.active_tick,
-        );
+        let trace_id =
+            trace_id_for(active_cfg_root_digest, shadow_cfg_root_digest, trace_context.active_tick);
         let mut trace_reason_codes = reason_codes.to_vec();
         trace_reason_codes.push(trace_verdict_reason_code(&verdict).to_string());
 
         let mut trace_evidence = TraceRunEvidenceLocal {
             trace_id,
-            active_cfg_digest: self.mapper.map_digest,
-            shadow_cfg_digest: shadow_mapping_digest,
+            active_cfg_digest: active_cfg_root_digest,
+            shadow_cfg_digest: shadow_cfg_root_digest,
             active_feedback_digest: trace_context.active_feedback_digest,
             shadow_feedback_digest: trace_context.shadow_feedback_digest,
             active_context_digest: trace_context.active_context_digest,
@@ -1951,8 +2029,8 @@ impl LnssRuntime {
             verdict,
             committed,
             duplicate_skipped,
-            active_cfg_digest: self.mapper.map_digest,
-            shadow_cfg_digest: shadow_mapping_digest,
+            active_cfg_digest: active_cfg_root_digest,
+            shadow_cfg_digest: shadow_cfg_root_digest,
             created_at_ms,
         }
     }
@@ -2433,6 +2511,14 @@ impl LlmBackend for StubLlmBackend {
     fn supports_hooks(&self) -> bool {
         true
     }
+
+    fn backend_identifier(&self) -> &'static str {
+        "stub-llm"
+    }
+
+    fn model_revision(&self) -> String {
+        "stub".to_string()
+    }
 }
 
 pub struct StubHookProvider {
@@ -2511,6 +2597,178 @@ fn liquid_params_digest(kv_pairs: &[(String, String)]) -> [u8; 32] {
     digest(LIQUID_PARAMS_DOMAIN, &buf)
 }
 
+fn hook_config_digest(specs: &[TapSpec]) -> [u8; 32] {
+    let mut specs = specs.to_vec();
+    specs.sort_by(|a, b| {
+        a.hook_id
+            .cmp(&b.hook_id)
+            .then_with(|| tap_kind_tag(a.tap_kind).cmp(&tap_kind_tag(b.tap_kind)))
+            .then_with(|| a.layer_index.cmp(&b.layer_index))
+            .then_with(|| a.tensor_name.cmp(&b.tensor_name))
+    });
+    let mut buf = Vec::new();
+    write_u32(&mut buf, specs.len() as u32);
+    for spec in specs {
+        write_string(&mut buf, &spec.hook_id);
+        buf.push(tap_kind_tag(spec.tap_kind));
+        write_u16(&mut buf, spec.layer_index);
+        write_string(&mut buf, &spec.tensor_name);
+    }
+    digest(HOOK_CFG_DOMAIN, &buf)
+}
+
+fn language_cfg_digest(backend_id: &str, model_revision: &str, hook_digest: [u8; 32]) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_string(&mut buf, backend_id);
+    write_string(&mut buf, model_revision);
+    buf.extend_from_slice(&hook_digest);
+    digest(LANG_CFG_DOMAIN, &buf)
+}
+
+fn worldmodel_cfg_digest(snapshot: &WorldModelCfgSnapshot) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_string(&mut buf, &snapshot.mode);
+    write_string(&mut buf, &snapshot.encoder_id);
+    write_string(&mut buf, &snapshot.predictor_id);
+    let mut constants = snapshot.constants.clone();
+    constants.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    write_u32(&mut buf, constants.len() as u32);
+    for (name, value) in constants {
+        write_string(&mut buf, &name);
+        write_i64(&mut buf, value);
+    }
+    digest(WM_CFG_DOMAIN, &buf)
+}
+
+fn rlm_cfg_digest(snapshot: &RlmCfgSnapshot) -> [u8; 32] {
+    let mut buf = Vec::new();
+    buf.push(snapshot.recursion_depth_cap);
+    let mut directives = snapshot.directive_set.clone();
+    directives.sort();
+    directives.dedup();
+    write_u32(&mut buf, directives.len() as u32);
+    for directive in directives {
+        buf.push(directive as u8);
+    }
+    buf.push(snapshot.max_directives);
+    digest(RLM_CFG_DOMAIN, &buf)
+}
+
+fn sae_cfg_digest(sae_pack_digest: [u8; 32], top_k_base: u16, feature_caps: &[u16]) -> [u8; 32] {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&sae_pack_digest);
+    write_u16(&mut buf, top_k_base);
+    write_u32(&mut buf, feature_caps.len() as u32);
+    for cap in feature_caps {
+        write_u16(&mut buf, *cap);
+    }
+    digest(SAE_CFG_DOMAIN, &buf)
+}
+
+fn mapping_cfg_digest(map_digest: [u8; 32], map_version: u32) -> [u8; 32] {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&map_digest);
+    write_u32(&mut buf, map_version);
+    digest(MAP_CFG_DOMAIN, &buf)
+}
+
+fn limits_cfg_digest(
+    limits: &Limits,
+    injection_limits: &InjectionLimits,
+    amplitude_cap_q: u16,
+    liquid_params_digest: Option<[u8; 32]>,
+) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_u32(&mut buf, injection_limits.max_spikes_per_tick);
+    write_u32(&mut buf, injection_limits.max_targets_per_spike);
+    write_u16(&mut buf, amplitude_cap_q);
+    write_u32(
+        &mut buf,
+        u32::try_from(limits.max_output_bytes).unwrap_or(u32::MAX),
+    );
+    write_u32(&mut buf, u32::try_from(limits.max_taps).unwrap_or(u32::MAX));
+    write_u32(
+        &mut buf,
+        u32::try_from(limits.max_spikes).unwrap_or(u32::MAX),
+    );
+    write_u32(
+        &mut buf,
+        u32::try_from(limits.max_mechint_bytes).unwrap_or(u32::MAX),
+    );
+    match liquid_params_digest {
+        Some(digest_bytes) => {
+            write_bool(&mut buf, true);
+            buf.extend_from_slice(&digest_bytes);
+        }
+        None => write_bool(&mut buf, false),
+    }
+    digest(LIMITS_CFG_DOMAIN, &buf)
+}
+
+pub fn cfg_root_digest_pack(
+    llm: &dyn LlmBackend,
+    tap_specs: &[TapSpec],
+    worldmodel_cfg: &WorldModelCfgSnapshot,
+    rlm_cfg: &RlmCfgSnapshot,
+    sae_pack_digest: Option<[u8; 32]>,
+    mapping: &FeatureToBrainMap,
+    limits: &Limits,
+    injection_limits: &InjectionLimits,
+    amplitude_cap_q: u16,
+    policy_digest: Option<[u8; 32]>,
+    liquid_params_digest: Option<[u8; 32]>,
+) -> Option<CfgRootDigestPack> {
+    if mapping.map_digest == [0u8; 32] {
+        return None;
+    }
+    let backend_id = llm.backend_identifier();
+    if backend_id.is_empty() {
+        return None;
+    }
+    let model_revision = llm.model_revision();
+    if model_revision.is_empty() {
+        return None;
+    }
+    if worldmodel_cfg.mode.is_empty()
+        || worldmodel_cfg.encoder_id.is_empty()
+        || worldmodel_cfg.predictor_id.is_empty()
+    {
+        return None;
+    }
+    let hook_digest = hook_config_digest(tap_specs);
+    let language_digest = language_cfg_digest(backend_id, &model_revision, hook_digest);
+    let worldmodel_digest = worldmodel_cfg_digest(worldmodel_cfg);
+    let rlm_digest = rlm_cfg_digest(rlm_cfg);
+    let sae_pack_digest = sae_pack_digest.unwrap_or([0u8; 32]);
+    let sae_digest = sae_cfg_digest(sae_pack_digest, MAX_TOP_FEATURES as u16, &[MAX_TOP_FEATURES as u16]);
+    let mapping_digest = mapping_cfg_digest(mapping.map_digest, mapping.map_version);
+    let limits_digest = limits_cfg_digest(
+        limits,
+        injection_limits,
+        amplitude_cap_q,
+        liquid_params_digest,
+    );
+    Some(CfgRootDigestPack::new(
+        language_digest,
+        worldmodel_digest,
+        rlm_digest,
+        sae_digest,
+        mapping_digest,
+        limits_digest,
+        policy_digest,
+    ))
+}
+
+fn tap_kind_tag(kind: TapKind) -> u8 {
+    match kind {
+        TapKind::ResidualStream => 1,
+        TapKind::MlpPost => 2,
+        TapKind::AttnOut => 3,
+        TapKind::Embedding => 4,
+        TapKind::LiquidState => 5,
+    }
+}
+
 fn decision_allows_application(decision: &ucf::v1::ApprovalDecision) -> bool {
     let form = ucf::v1::DecisionForm::try_from(decision.decision)
         .unwrap_or(ucf::v1::DecisionForm::Unspecified);
@@ -2553,9 +2811,13 @@ fn activation_id_for(proposal_digest: [u8; 32], approval_digest: [u8; 32]) -> St
     format!("act:{proposal_prefix}:{approval_prefix}")
 }
 
-fn trace_id_for(active_cfg_digest: [u8; 32], shadow_cfg_digest: [u8; 32], tick: u64) -> String {
-    let active_prefix = hex::encode(&active_cfg_digest[..TRACE_ID_PREFIX_LEN]);
-    let shadow_prefix = hex::encode(&shadow_cfg_digest[..TRACE_ID_PREFIX_LEN]);
+fn trace_id_for(
+    active_cfg_root_digest: [u8; 32],
+    shadow_cfg_root_digest: [u8; 32],
+    tick: u64,
+) -> String {
+    let active_prefix = hex::encode(&active_cfg_root_digest[..TRACE_ID_PREFIX_LEN]);
+    let shadow_prefix = hex::encode(&shadow_cfg_root_digest[..TRACE_ID_PREFIX_LEN]);
     format!("trace:{active_prefix}:{shadow_prefix}:{tick}")
 }
 
@@ -2666,6 +2928,10 @@ fn write_u64(buf: &mut Vec<u8>, value: u64) {
 }
 
 fn write_i32(buf: &mut Vec<u8>, value: i32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_i64(buf: &mut Vec<u8>, value: i64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -3040,6 +3306,22 @@ impl LlmBackend for LiquidOdeBackend {
     fn supports_hooks(&self) -> bool {
         true
     }
+
+    fn backend_identifier(&self) -> &'static str {
+        "liquid-ode"
+    }
+
+    fn model_revision(&self) -> String {
+        format!(
+            "state_dim={};dt_ms_q={};steps_per_call={};seed={};input_proj_dim={};mods_gain_q={}",
+            self.cfg.state_dim,
+            self.cfg.dt_ms_q,
+            self.cfg.steps_per_call,
+            self.cfg.seed,
+            self.cfg.input_proj_dim,
+            self.cfg.mods_gain_q
+        )
+    }
 }
 
 #[cfg(feature = "lnss-liquid-ode")]
@@ -3225,6 +3507,7 @@ impl HookProvider for TapRegistryProvider {
 #[derive(Debug, Clone)]
 pub struct CandleConfig {
     pub model_dir: String,
+    pub model_revision: String,
     pub max_new_tokens: u32,
     pub seed: u64,
     pub device: String,
@@ -3236,6 +3519,7 @@ impl Default for CandleConfig {
     fn default() -> Self {
         Self {
             model_dir: ".".to_string(),
+            model_revision: "unknown".to_string(),
             max_new_tokens: 1,
             seed: 0,
             device: "cpu".to_string(),
@@ -3342,6 +3626,18 @@ impl LlmBackend for CandleLlmBackend {
 
     fn supports_hooks(&self) -> bool {
         self.loaded && self.cfg.hooks_enabled
+    }
+
+    fn backend_identifier(&self) -> &'static str {
+        "candle"
+    }
+
+    fn model_revision(&self) -> String {
+        if self.cfg.model_revision.is_empty() {
+            self.cfg.model_dir.clone()
+        } else {
+            self.cfg.model_revision.clone()
+        }
     }
 }
 

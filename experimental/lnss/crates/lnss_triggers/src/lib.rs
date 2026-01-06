@@ -104,6 +104,7 @@ impl Default for LiquidParamsSnapshot {
 pub struct ActiveCfg {
     pub created_at_ms: u64,
     pub base_evidence_digest: [u8; 32],
+    pub active_cfg_root_digest: [u8; 32],
     pub core_context_digest_pack: CoreContextDigestPack,
     pub mapping: FeatureToBrainMap,
     pub max_spikes_per_tick: u32,
@@ -204,6 +205,7 @@ pub fn propose_from_triggers(
         kind,
         active_cfg.created_at_ms,
         active_cfg.base_evidence_digest,
+        Some(active_cfg.active_cfg_root_digest),
         active_cfg.core_context_digest_pack.clone(),
         payload,
         reason_codes,
@@ -215,6 +217,7 @@ pub fn proposal_is_duplicate(index: &LifecycleIndex, proposal: &Proposal) -> boo
     let key = LifecycleKey {
         proposal_digest: proposal.proposal_digest,
         context_digest: proposal.core_context_digest,
+        active_cfg_root_digest: proposal.base_active_cfg_digest,
     };
     index.state_for(&key).is_some()
 }
@@ -433,6 +436,7 @@ mod tests {
         ActiveCfg {
             created_at_ms: 100,
             base_evidence_digest: [9u8; 32],
+            active_cfg_root_digest: [4u8; 32],
             core_context_digest_pack: ctx_with_bucket(2),
             mapping: map,
             max_spikes_per_tick: 100,
@@ -536,6 +540,7 @@ mod tests {
         let key = LifecycleKey {
             proposal_digest: proposal.proposal_digest,
             context_digest: proposal.core_context_digest,
+            active_cfg_root_digest: proposal.base_active_cfg_digest,
         };
         index.note_proposal(key, 1);
         assert!(proposal_is_duplicate(&index, &proposal));

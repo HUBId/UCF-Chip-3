@@ -174,6 +174,8 @@ pub struct ApprovalContext {
     pub current_liquid_params_digest: Option<[u8; 32]>,
     pub latest_scorecard_digest: Option<[u8; 32]>,
     pub trace_digest: Option<[u8; 32]>,
+    pub active_cfg_root_digest: Option<[u8; 32]>,
+    pub shadow_cfg_root_digest: Option<[u8; 32]>,
     pub requested_operation: ucf::v1::OperationCategory,
 }
 
@@ -197,6 +199,18 @@ pub fn build_aap_for_proposal(
     ));
     if let Some(trace_digest) = ctx.trace_digest {
         evidence_refs.push(related_ref("trace_digest", trace_digest));
+    }
+    if let Some(active_cfg_root_digest) = ctx.active_cfg_root_digest {
+        evidence_refs.push(related_ref(
+            "active_cfg_root_digest",
+            active_cfg_root_digest,
+        ));
+    }
+    if let Some(shadow_cfg_root_digest) = ctx.shadow_cfg_root_digest {
+        evidence_refs.push(related_ref(
+            "shadow_cfg_root_digest",
+            shadow_cfg_root_digest,
+        ));
     }
     evidence_refs.push(related_ref(
         "world_state_digest",
@@ -522,6 +536,7 @@ mod tests {
             kind: ProposalKind::MappingUpdate,
             created_at_ms: 100,
             base_evidence_digest: [5u8; 32],
+            base_active_cfg_digest: Some([4u8; 32]),
             core_context_digest_pack,
             core_context_digest,
             payload: ProposalPayload::MappingUpdate {
@@ -542,6 +557,8 @@ mod tests {
             current_liquid_params_digest: None,
             latest_scorecard_digest: Some([1u8; 32]),
             trace_digest: Some([9u8; 32]),
+            active_cfg_root_digest: Some([2u8; 32]),
+            shadow_cfg_root_digest: Some([3u8; 32]),
             requested_operation: ucf::v1::OperationCategory::OpException,
         }
     }
