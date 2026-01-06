@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_core::{
-    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
-    RecursionPolicy, TapFrame, TapKind, TapSpec,
+    BrainTarget, ControlIntentClass, CoreContextDigestPack, EmotionFieldSnapshot,
+    FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
 };
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest, EvalContext,
@@ -230,6 +230,34 @@ fn write_json(path: &Path, value: serde_json::Value) {
     fs::write(path, serde_json::to_vec(&value).expect("json")).expect("write json");
 }
 
+fn core_context_pack(seed: u8) -> CoreContextDigestPack {
+    CoreContextDigestPack {
+        world_state_digest: [seed; 32],
+        self_state_digest: [seed.wrapping_add(1); 32],
+        control_frame_digest: [seed.wrapping_add(2); 32],
+        policy_digest: None,
+        last_feedback_digest: None,
+        wm_pred_error_bucket: 2,
+        rlm_followup_executed: false,
+    }
+}
+
+fn core_context_json(seed: u8) -> serde_json::Value {
+    let pack = core_context_pack(seed);
+    serde_json::json!({
+        "core_context_digest_pack": {
+            "world_state_digest": pack.world_state_digest.to_vec(),
+            "self_state_digest": pack.self_state_digest.to_vec(),
+            "control_frame_digest": pack.control_frame_digest.to_vec(),
+            "policy_digest": serde_json::Value::Null,
+            "last_feedback_digest": serde_json::Value::Null,
+            "wm_pred_error_bucket": pack.wm_pred_error_bucket,
+            "rlm_followup_executed": pack.rlm_followup_executed,
+        },
+        "core_context_digest": pack.digest().to_vec(),
+    })
+}
+
 fn proposal_id_from_payload(payload: &[u8]) -> String {
     let evidence = ucf::v1::ProposalEvidence::decode(payload).expect("decode proposal evidence");
     evidence.proposal_id
@@ -238,6 +266,9 @@ fn proposal_id_from_payload(payload: &[u8]) -> String {
 #[test]
 fn proposal_ingestion_is_bounded_and_does_not_apply() {
     let dir = temp_dir("lnss_inbox");
+    let context_a = core_context_json(1);
+    let context_b = core_context_json(2);
+    let context_c = core_context_json(3);
     write_json(
         &dir.join("a.json"),
         serde_json::json!({
@@ -245,6 +276,8 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
             "kind": "mapping_update",
             "created_at_ms": 1,
             "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": context_a["core_context_digest_pack"].clone(),
+            "core_context_digest": context_a["core_context_digest"].clone(),
             "payload": {
                 "type": "mapping_update",
                 "new_map_path": "maps/new.json",
@@ -261,6 +294,8 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
             "kind": "injection_limits_update",
             "created_at_ms": 2,
             "base_evidence_digest": vec![2; 32],
+            "core_context_digest_pack": context_b["core_context_digest_pack"].clone(),
+            "core_context_digest": context_b["core_context_digest"].clone(),
             "payload": {
                 "type": "injection_limits_update",
                 "max_spikes_per_tick": 32,
@@ -276,6 +311,8 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
             "kind": "sae_pack_update",
             "created_at_ms": 3,
             "base_evidence_digest": vec![3; 32],
+            "core_context_digest_pack": context_c["core_context_digest_pack"].clone(),
+            "core_context_digest": context_c["core_context_digest"].clone(),
             "payload": {
                 "type": "sae_pack_update",
                 "pack_path": "packs/p.safetensors",
@@ -383,6 +420,8 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
 #[test]
 fn proposal_commits_only_once_across_ticks() {
     let dir = temp_dir("lnss_inbox_commit_once");
+    let context_a = core_context_json(4);
+    let context_b = core_context_json(5);
     write_json(
         &dir.join("a.json"),
         serde_json::json!({
@@ -390,6 +429,8 @@ fn proposal_commits_only_once_across_ticks() {
             "kind": "mapping_update",
             "created_at_ms": 1,
             "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": context_a["core_context_digest_pack"].clone(),
+            "core_context_digest": context_a["core_context_digest"].clone(),
             "payload": {
                 "type": "mapping_update",
                 "new_map_path": "maps/new.json",
@@ -406,6 +447,8 @@ fn proposal_commits_only_once_across_ticks() {
             "kind": "injection_limits_update",
             "created_at_ms": 2,
             "base_evidence_digest": vec![2; 32],
+            "core_context_digest_pack": context_b["core_context_digest_pack"].clone(),
+            "core_context_digest": context_b["core_context_digest"].clone(),
             "payload": {
                 "type": "injection_limits_update",
                 "max_spikes_per_tick": 32,
@@ -514,6 +557,7 @@ fn proposal_commits_only_once_across_ticks() {
 fn proposal_commits_are_bounded_and_ordered() {
     let dir = temp_dir("lnss_inbox_bounded");
     for idx in 0..20 {
+        let context = core_context_json(idx as u8 + 1);
         write_json(
             &dir.join(format!("{idx:02}.json")),
             serde_json::json!({
@@ -521,6 +565,8 @@ fn proposal_commits_are_bounded_and_ordered() {
                 "kind": "injection_limits_update",
                 "created_at_ms": idx,
                 "base_evidence_digest": vec![idx as u8; 32],
+                "core_context_digest_pack": context["core_context_digest_pack"].clone(),
+                "core_context_digest": context["core_context_digest"].clone(),
                 "payload": {
                     "type": "injection_limits_update",
                     "max_spikes_per_tick": 32,
@@ -633,6 +679,7 @@ fn proposal_commits_are_bounded_and_ordered() {
 #[test]
 fn local_pvgs_receives_expected_payload() {
     let dir = temp_dir("lnss_inbox_payload");
+    let context = core_context_json(30);
     write_json(
         &dir.join("a.json"),
         serde_json::json!({
@@ -640,6 +687,8 @@ fn local_pvgs_receives_expected_payload() {
             "kind": "injection_limits_update",
             "created_at_ms": 1,
             "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": context["core_context_digest_pack"].clone(),
+            "core_context_digest": context["core_context_digest"].clone(),
             "payload": {
                 "type": "injection_limits_update",
                 "max_spikes_per_tick": 32,
@@ -739,6 +788,7 @@ fn local_pvgs_receives_expected_payload() {
         proposal_digest: proposal.proposal_digest,
         kind: ProposalKind::InjectionLimitsUpdate,
         base_evidence_digest: [0u8; 32],
+        core_context_digest: proposal.core_context_digest,
         payload_digest,
         created_at_ms: proposal.created_at_ms,
         score: eval.score,

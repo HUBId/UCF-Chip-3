@@ -21,6 +21,8 @@ pub struct TraceRunEvidenceLocal {
     pub shadow_cfg_digest: [u8; 32],
     pub active_feedback_digest: [u8; 32],
     pub shadow_feedback_digest: [u8; 32],
+    pub active_context_digest: [u8; 32],
+    pub shadow_context_digest: [u8; 32],
     pub score_active: i32,
     pub score_shadow: i32,
     pub delta: i32,
@@ -55,6 +57,12 @@ pub fn build_trace_run_evidence_pb(ev: &TraceRunEvidenceLocal) -> ucf::v1::Trace
         shadow_feedback_digest: Some(ucf::v1::Digest32 {
             value: ev.shadow_feedback_digest.to_vec(),
         }),
+        active_context_digest: Some(ucf::v1::Digest32 {
+            value: ev.active_context_digest.to_vec(),
+        }),
+        shadow_context_digest: Some(ucf::v1::Digest32 {
+            value: ev.shadow_context_digest.to_vec(),
+        }),
         score_active: ev.score_active,
         score_shadow: ev.score_shadow,
         delta: ev.delta,
@@ -88,6 +96,8 @@ pub fn encode_trace(ev: &TraceRunEvidenceLocal) -> Vec<u8> {
     buf.extend_from_slice(&ev.shadow_cfg_digest);
     buf.extend_from_slice(&ev.active_feedback_digest);
     buf.extend_from_slice(&ev.shadow_feedback_digest);
+    buf.extend_from_slice(&ev.active_context_digest);
+    buf.extend_from_slice(&ev.shadow_context_digest);
     write_i32(&mut buf, ev.score_active);
     write_i32(&mut buf, ev.score_shadow);
     write_i32(&mut buf, ev.delta);
@@ -187,6 +197,8 @@ mod tests {
             shadow_cfg_digest: [2u8; 32],
             active_feedback_digest: [3u8; 32],
             shadow_feedback_digest: [4u8; 32],
+            active_context_digest: [5u8; 32],
+            shadow_context_digest: [6u8; 32],
             score_active: 10,
             score_shadow: 15,
             delta: 5,
@@ -216,6 +228,8 @@ mod tests {
             shadow_cfg_digest: [2u8; 32],
             active_feedback_digest: [3u8; 32],
             shadow_feedback_digest: [4u8; 32],
+            active_context_digest: [5u8; 32],
+            shadow_context_digest: [6u8; 32],
             score_active: 10,
             score_shadow: 15,
             delta: 5,

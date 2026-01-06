@@ -110,6 +110,8 @@ pub mod ucf {
             pub verdict: i32,
             #[prost(message, optional, tag = "9")]
             pub reason_codes: ::core::option::Option<ReasonCodes>,
+            #[prost(message, optional, tag = "10")]
+            pub context_digest: ::core::option::Option<Digest32>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ProposalActivationEvidence {
@@ -135,6 +137,8 @@ pub mod ucf {
             pub reason_codes: ::core::option::Option<ReasonCodes>,
             #[prost(message, optional, tag = "11")]
             pub activation_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "12")]
+            pub context_digest: ::core::option::Option<Digest32>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct TraceRunEvidence {
@@ -162,6 +166,10 @@ pub mod ucf {
             pub reason_codes: ::core::option::Option<ReasonCodes>,
             #[prost(message, optional, tag = "12")]
             pub trace_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "13")]
+            pub active_context_digest: ::core::option::Option<Digest32>,
+            #[prost(message, optional, tag = "14")]
+            pub shadow_context_digest: ::core::option::Option<Digest32>,
         }
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct ActivationInjectionLimits {

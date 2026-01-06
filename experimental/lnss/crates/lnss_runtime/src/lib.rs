@@ -16,11 +16,12 @@ pub use lnss_core::BiophysFeedbackSnapshot;
 #[cfg(feature = "lnss-liquid-ode")]
 use lnss_core::TapKind;
 use lnss_core::{
-    digest, BrainTarget, CognitiveCore, ContextBundle, ControlIntentClass, CoreOrchestrator,
-    CoreStepOutput, DeliberationBudget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
-    FeedbackAnomalyFlags, PolicyMode, PolicyView, RecursionPolicy, RlmCore, RlmDirective, RlmInput,
-    TapFrame, TapSpec, WorldModelCore, WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES,
-    MAX_REASON_CODES, MAX_RLM_DIRECTIVES, MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
+    digest, wm_pred_error_bucket, BrainTarget, CognitiveCore, ContextBundle, ControlIntentClass,
+    CoreContextDigestPack, CoreOrchestrator, CoreStepOutput, DeliberationBudget,
+    EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, FeedbackAnomalyFlags, PolicyMode,
+    PolicyView, RecursionPolicy, RlmCore, RlmDirective, RlmInput, TapFrame, TapSpec,
+    WorldModelCore, WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES,
+    MAX_RLM_DIRECTIVES, MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
@@ -61,6 +62,7 @@ const RC_TRACE_PROMISING: &str = "RC.GV.TRACE.PROMISING";
 const RC_TRACE_NEUTRAL: &str = "RC.GV.TRACE.NEUTRAL";
 const RC_TRACE_RISKY: &str = "RC.GV.TRACE.RISKY";
 const RC_AAP_BLOCKED_BY_TRACE: &str = "RC.GV.AAP.BLOCKED_BY_TRACE";
+const RC_AAP_MISSING_CONTEXT_BINDING: &str = "RC.GV.AAP.MISSING_CONTEXT_BINDING";
 const RC_RLM_RECURSION_STEP: &str = "RC.GV.RLM.RECURSION_STEP";
 const RC_RLM_RECURSION_BLOCKED_BY_POLICY: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_POLICY";
 const RC_RLM_RECURSION_BLOCKED_BY_OVERLOAD: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_OVERLOAD";
@@ -311,6 +313,12 @@ impl ProposalInbox {
 
         let mut processed = 0usize;
         for proposal in proposals {
+            if proposal.core_context_digest == [0u8; 32] {
+                eprintln!("{RC_AAP_MISSING_CONTEXT_BINDING}: proposal missing core context digest");
+                return Err(LnssRuntimeError::Proposal(
+                    "proposal missing core context digest".to_string(),
+                ));
+            }
             let eval = evaluate(&proposal, eval_ctx);
             let base_evidence_digest = eval_ctx.latest_feedback_digest.unwrap_or([0u8; 32]);
             let mut reason_codes = eval.reason_codes.clone();
@@ -326,28 +334,6 @@ impl ProposalInbox {
             }
             let payload_digest = proposal_payload_digest(&proposal.payload)
                 .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
-            let evidence = ProposalEvidence {
-                proposal_id: proposal.proposal_id.clone(),
-                proposal_digest: proposal.proposal_digest,
-                kind: proposal.kind.clone(),
-                base_evidence_digest,
-                payload_digest,
-                created_at_ms: proposal.created_at_ms,
-                score: eval.score,
-                verdict: eval.verdict.clone(),
-                reason_codes,
-            };
-            let evidence_pb = build_proposal_evidence_pb(&evidence);
-            let evidence_digest = evidence_pb
-                .proposal_digest
-                .as_ref()
-                .and_then(digest_bytes)
-                .unwrap_or([0u8; 32]);
-            let payload_bytes = canonical_bytes(&evidence_pb);
-
-            if self.committed.contains(&evidence_digest) {
-                continue;
-            }
 
             let mut parts = base_parts.clone();
             parts.proposal_digest = Some(proposal.proposal_digest);
@@ -372,7 +358,17 @@ impl ProposalInbox {
                         trace_digest: Some(trace_state.trace_digest),
                         requested_operation: ucf::v1::OperationCategory::OpException,
                     };
-                    let aap = build_aap_for_proposal(&proposal, &ctx);
+                    let aap = match build_aap_for_proposal(&proposal, &ctx) {
+                        Ok(aap) => aap,
+                        Err(_) => {
+                            eprintln!(
+                                "{RC_AAP_MISSING_CONTEXT_BINDING}: proposal missing core context digest"
+                            );
+                            return Err(LnssRuntimeError::Proposal(
+                                "missing core context digest".to_string(),
+                            ));
+                        }
+                    };
                     let aap_digest = approval_artifact_package_digest(&aap);
                     parts.aap_digest = Some(aap_digest);
                     if let Err(err) = fs::create_dir_all(&self.aap_dir) {
@@ -384,6 +380,29 @@ impl ProposalInbox {
                         return Err(LnssRuntimeError::Proposal(err.to_string()));
                     }
                 }
+            }
+            let evidence = ProposalEvidence {
+                proposal_id: proposal.proposal_id.clone(),
+                proposal_digest: proposal.proposal_digest,
+                kind: proposal.kind.clone(),
+                base_evidence_digest,
+                core_context_digest: proposal.core_context_digest,
+                payload_digest,
+                created_at_ms: proposal.created_at_ms,
+                score: eval.score,
+                verdict: eval.verdict.clone(),
+                reason_codes,
+            };
+            let evidence_pb = build_proposal_evidence_pb(&evidence);
+            let evidence_digest = evidence_pb
+                .proposal_digest
+                .as_ref()
+                .and_then(digest_bytes)
+                .unwrap_or([0u8; 32]);
+            let payload_bytes = canonical_bytes(&evidence_pb);
+
+            if self.committed.contains(&evidence_digest) {
+                continue;
             }
             let record = MechIntRecord::new(parts);
             mechint.write_step(&record)?;
@@ -1006,6 +1025,15 @@ pub struct ShadowScore {
     pub delta: i32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TraceContext {
+    active_tick: u64,
+    active_feedback_digest: [u8; 32],
+    shadow_feedback_digest: [u8; 32],
+    active_context_digest: [u8; 32],
+    shadow_context_digest: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowEvidence {
     pub shadow_mapping_digest: [u8; 32],
@@ -1045,6 +1073,7 @@ impl LnssRuntime {
     ) -> Result<RuntimeOutput, LnssRuntimeError> {
         let control_frame_digest = digest("lnss.control_frame.v1", input);
         let emotion_snapshot_digest = Some(emotion_snapshot_digest(mods));
+        let prior_feedback_digest = self.feedback.last.as_ref().map(|snap| snap.snapshot_digest);
         let world_input = WorldModelInput {
             input_digest: control_frame_digest,
             prev_world_digest: self.world_state_digest,
@@ -1113,6 +1142,16 @@ impl LnssRuntime {
         let action_bytes = followup_output_bytes.unwrap_or(primary_output_bytes.clone());
         self.last_action_digest = digest("lnss.action_bytes.v1", &action_bytes);
         let prediction_error_score = orchestration.world_output.prediction_error_score;
+        let core_context_pack = CoreContextDigestPack {
+            world_state_digest: orchestration.world_output.world_state_digest,
+            self_state_digest: orchestration.rlm_output.self_state_digest,
+            control_frame_digest,
+            policy_digest: None,
+            last_feedback_digest: prior_feedback_digest,
+            wm_pred_error_bucket: wm_pred_error_bucket(prediction_error_score),
+            rlm_followup_executed: orchestration.followup_output.is_some(),
+        };
+        let core_context_digest = core_context_pack.digest();
         let rlm_directives = orchestration.rlm_output.recursion_directives;
         let base_limits_for_plan = BaseLimits {
             top_k_base: MAX_TOP_FEATURES,
@@ -1334,13 +1373,19 @@ impl LnssRuntime {
                 let shadow_record = MechIntRecord::new(shadow_parts);
                 self.mechint.write_step(&shadow_record)?;
 
+                let trace_context = TraceContext {
+                    active_tick: active_feedback.tick,
+                    active_feedback_digest: active_feedback.snapshot_digest,
+                    shadow_feedback_digest: shadow_feedback.snapshot_digest,
+                    active_context_digest: core_context_digest,
+                    shadow_context_digest: core_context_digest,
+                };
                 let trace_state = self.commit_trace_run_evidence(
                     step_id,
                     &score,
                     &reason_codes,
-                    active_feedback,
-                    shadow_feedback,
                     shadow_mapping_digest,
+                    trace_context,
                 );
                 self.trace_state = Some(trace_state);
 
@@ -1454,6 +1499,7 @@ impl LnssRuntime {
                 activation_id,
                 proposal_digest: plan.proposal.proposal_digest,
                 approval_digest: plan.approval_digest,
+                core_context_digest: plan.proposal.core_context_digest,
                 status: activation_status,
                 active_mapping_digest: outcome.state.active_mapping_digest,
                 active_sae_pack_digest: outcome.state.active_sae_pack_digest,
@@ -1528,16 +1574,15 @@ impl LnssRuntime {
         step_id: &str,
         score: &ShadowScore,
         reason_codes: &[String],
-        active_feedback: &BiophysFeedbackSnapshot,
-        shadow_feedback: &BiophysFeedbackSnapshot,
         shadow_mapping_digest: [u8; 32],
+        trace_context: TraceContext,
     ) -> TraceRunState {
         let verdict = trace_verdict_from_delta(score.delta);
-        let created_at_ms = active_feedback.tick.saturating_mul(FIXED_MS_PER_TICK);
+        let created_at_ms = trace_context.active_tick.saturating_mul(FIXED_MS_PER_TICK);
         let trace_id = trace_id_for(
             self.mapper.map_digest,
             shadow_mapping_digest,
-            active_feedback.tick,
+            trace_context.active_tick,
         );
         let mut trace_reason_codes = reason_codes.to_vec();
         trace_reason_codes.push(trace_verdict_reason_code(&verdict).to_string());
@@ -1546,8 +1591,10 @@ impl LnssRuntime {
             trace_id,
             active_cfg_digest: self.mapper.map_digest,
             shadow_cfg_digest: shadow_mapping_digest,
-            active_feedback_digest: active_feedback.snapshot_digest,
-            shadow_feedback_digest: shadow_feedback.snapshot_digest,
+            active_feedback_digest: trace_context.active_feedback_digest,
+            shadow_feedback_digest: trace_context.shadow_feedback_digest,
+            active_context_digest: trace_context.active_context_digest,
+            shadow_context_digest: trace_context.shadow_context_digest,
             score_active: score.active,
             score_shadow: score.shadow,
             delta: score.delta,

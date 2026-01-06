@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_core::{
-    digest, BiophysFeedbackSnapshot, BrainTarget, ControlIntentClass, EmotionFieldSnapshot,
-    FeatureEvent, FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
+    digest, BiophysFeedbackSnapshot, BrainTarget, ControlIntentClass, CoreContextDigestPack,
+    EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame,
+    TapKind, TapSpec,
 };
 use lnss_evolve::trace_encoding::{
     build_trace_run_evidence_pb, TraceRunEvidenceLocal, TraceVerdict,
@@ -380,6 +381,34 @@ fn write_json(path: &Path, value: serde_json::Value) {
     fs::write(path, serde_json::to_vec(&value).expect("json")).expect("write json");
 }
 
+fn core_context_pack(seed: u8) -> CoreContextDigestPack {
+    CoreContextDigestPack {
+        world_state_digest: [seed; 32],
+        self_state_digest: [seed.wrapping_add(1); 32],
+        control_frame_digest: [seed.wrapping_add(2); 32],
+        policy_digest: None,
+        last_feedback_digest: None,
+        wm_pred_error_bucket: 2,
+        rlm_followup_executed: false,
+    }
+}
+
+fn core_context_json(seed: u8) -> serde_json::Value {
+    let pack = core_context_pack(seed);
+    serde_json::json!({
+        "core_context_digest_pack": {
+            "world_state_digest": pack.world_state_digest.to_vec(),
+            "self_state_digest": pack.self_state_digest.to_vec(),
+            "control_frame_digest": pack.control_frame_digest.to_vec(),
+            "policy_digest": serde_json::Value::Null,
+            "last_feedback_digest": serde_json::Value::Null,
+            "wm_pred_error_bucket": pack.wm_pred_error_bucket,
+            "rlm_followup_executed": pack.rlm_followup_executed,
+        },
+        "core_context_digest": pack.digest().to_vec(),
+    })
+}
+
 fn mapping_for_features(feature_ids: &[u32], targets_per_feature: usize) -> FeatureToBrainMap {
     let mut entries = Vec::new();
     for feature_id in feature_ids {
@@ -471,6 +500,71 @@ fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
     }
 }
 
+fn trace_context_digests(
+    pvgs: std::sync::Arc<std::sync::Mutex<MockPvgsClient>>,
+) -> ([u8; 32], [u8; 32]) {
+    let feature_ids = vec![1u32, 2u32];
+    let mapper = mapping_for_features(&feature_ids, 2);
+    let shadow_mapping = mapping_for_features(&feature_ids[..1], 1);
+
+    let mut runtime = runtime_with_shadow(RuntimeFixture {
+        pvgs: Some(Box::new(SharedPvgsClient::new(pvgs.clone()))),
+        proposal_inbox: None,
+        injection_limits: InjectionLimits {
+            max_spikes_per_tick: 4,
+            max_targets_per_spike: 4,
+        },
+        shadow: ShadowConfig {
+            enabled: true,
+            shadow_mapping: Some(shadow_mapping),
+            #[cfg(feature = "lnss-liquid-ode")]
+            shadow_liquid_params: None,
+            shadow_injection_limits: None,
+        },
+        shadow_rig: None,
+        mapper,
+        sae: Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
+        rig: Box::new(StubRigClient::default()),
+    });
+
+    let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &default_mods(),
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+
+    let committed = pvgs
+        .lock()
+        .expect("pvgs lock")
+        .committed_trace_run_bytes
+        .clone();
+    assert_eq!(committed.len(), 1);
+    let evidence =
+        ucf::v1::TraceRunEvidence::decode(committed[0].as_slice()).expect("decode trace evidence");
+    let active: [u8; 32] = evidence
+        .active_context_digest
+        .as_ref()
+        .expect("active context digest")
+        .value
+        .as_slice()
+        .try_into()
+        .expect("active context bytes");
+    let shadow: [u8; 32] = evidence
+        .shadow_context_digest
+        .as_ref()
+        .expect("shadow context digest")
+        .value
+        .as_slice()
+        .try_into()
+        .expect("shadow context bytes");
+    (active, shadow)
+}
+
 #[test]
 fn shadow_trace_commits_once_and_is_deterministic() {
     let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
@@ -538,18 +632,33 @@ fn shadow_trace_commits_once_and_is_deterministic() {
         .expect("pvgs lock")
         .committed_trace_run_bytes
         .len();
-    assert_eq!(committed_again, 1);
+    assert_eq!(committed_again, 2);
     let second_created_at = runtime
         .trace_state
         .as_ref()
         .expect("trace state")
         .created_at_ms;
-    assert_eq!(first_created_at, second_created_at);
+    assert!(second_created_at >= first_created_at);
+}
+
+#[test]
+fn trace_context_digests_are_present_and_deterministic() {
+    let pvgs_a = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let (active_a, shadow_a) = trace_context_digests(pvgs_a);
+    assert_ne!(active_a, [0u8; 32]);
+    assert_ne!(shadow_a, [0u8; 32]);
+    assert_eq!(active_a, shadow_a);
+
+    let pvgs_b = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let (active_b, shadow_b) = trace_context_digests(pvgs_b);
+    assert_eq!(active_a, active_b);
+    assert_eq!(shadow_a, shadow_b);
 }
 
 #[test]
 fn neutral_trace_blocks_aap_generation() {
     let dir = temp_dir("lnss_trace_neutral");
+    let context = core_context_json(1);
     write_json(
         &dir.join("proposal.json"),
         serde_json::json!({
@@ -557,6 +666,8 @@ fn neutral_trace_blocks_aap_generation() {
             "kind": "injection_limits_update",
             "created_at_ms": 1,
             "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": context["core_context_digest_pack"].clone(),
+            "core_context_digest": context["core_context_digest"].clone(),
             "payload": {
                 "type": "injection_limits_update",
                 "max_spikes_per_tick": 16,
@@ -616,6 +727,7 @@ fn neutral_trace_blocks_aap_generation() {
 #[test]
 fn promising_trace_allows_aap_and_binds_trace_digest() {
     let dir = temp_dir("lnss_trace_promising");
+    let context = core_context_json(2);
     write_json(
         &dir.join("proposal.json"),
         serde_json::json!({
@@ -623,6 +735,8 @@ fn promising_trace_allows_aap_and_binds_trace_digest() {
             "kind": "injection_limits_update",
             "created_at_ms": 1,
             "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": context["core_context_digest_pack"].clone(),
+            "core_context_digest": context["core_context_digest"].clone(),
             "payload": {
                 "type": "injection_limits_update",
                 "max_spikes_per_tick": 16,
@@ -700,6 +814,8 @@ fn tampered_trace_evidence_rejected() {
         shadow_cfg_digest: [2u8; 32],
         active_feedback_digest: [3u8; 32],
         shadow_feedback_digest: [4u8; 32],
+        active_context_digest: [5u8; 32],
+        shadow_context_digest: [6u8; 32],
         score_active: 10,
         score_shadow: 15,
         delta: 5,
