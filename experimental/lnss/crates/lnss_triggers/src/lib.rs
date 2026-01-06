@@ -149,7 +149,7 @@ pub fn extract_triggers(
         triggers.push(Trigger::PolicyClampActive);
     }
 
-    triggers.sort_by(|a, b| trigger_priority(a).cmp(&trigger_priority(b)));
+    triggers.sort_by_key(|trigger| trigger_priority(trigger));
     triggers.truncate(MAX_TRIGGERS);
 
     TriggerSet { triggers }
@@ -188,8 +188,7 @@ pub fn propose_from_triggers(
     if active_cfg.allow_followup
         && active_cfg
             .rlm_directives
-            .iter()
-            .any(|directive| *directive == RlmDirective::FollowUpRiskScan)
+            .contains(&RlmDirective::FollowUpRiskScan)
     {
         reason_codes.push(RC_RLM_RISK_SCAN.to_string());
     }
