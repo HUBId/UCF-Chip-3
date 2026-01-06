@@ -35,9 +35,11 @@ use lnss_lifecycle::{
     ACTIVATION_STATUS_REJECTED, TRACE_VERDICT_NEUTRAL, TRACE_VERDICT_PROMISING,
     TRACE_VERDICT_RISKY,
 };
+#[cfg(feature = "lnss-liquid-ode")]
+use lnss_triggers::liquid_params_update_payload;
 use lnss_triggers::{
-    extract_triggers, liquid_params_update_payload, mapping_update_plan, proposal_is_duplicate,
-    propose_from_triggers, ActiveCfg, ActiveConstraints, LiquidParamsSnapshot,
+    extract_triggers, mapping_update_plan, proposal_is_duplicate, propose_from_triggers, ActiveCfg,
+    ActiveConstraints, LiquidParamsSnapshot,
 };
 use lnss_worldmodulation::{
     compute_world_modulation, BaseLimits, WorldModulationPlan, RC_WM_MODULATION_ACTIVE,
@@ -709,6 +711,7 @@ pub struct LnssRuntime {
     pub last_action_digest: [u8; 32],
     pub last_self_state_digest: [u8; 32],
     pub pred_error_threshold: i32,
+    pub trigger_proposals_enabled: bool,
 }
 
 pub struct LifecycleInputs<'a> {
@@ -1569,54 +1572,58 @@ impl LnssRuntime {
         };
         let trigger_set =
             extract_triggers(&core_context_pack, feedback_snapshot.as_ref(), &constraints);
-        if let Some(proposal) =
-            propose_from_triggers(&trigger_set, &active_cfg, core_context_digest)
-        {
-            let key = LifecycleKey {
-                proposal_digest: proposal.proposal_digest,
-                context_digest: proposal.core_context_digest,
-            };
-            hydrate_lifecycle_from_query(
-                &mut self.lifecycle_index,
-                self.evidence_query_client.as_deref(),
-                key,
-                lifecycle_tick,
-            );
-            if !proposal_is_duplicate(&self.lifecycle_index, &proposal) {
-                self.lifecycle_index.note_proposal(key, lifecycle_tick);
-                let eval = evaluate(&proposal, &eval_ctx);
-                let payload_digest = proposal_payload_digest(&proposal.payload)
-                    .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
-                let evidence = ProposalEvidence {
-                    proposal_id: proposal.proposal_id.clone(),
+        if self.trigger_proposals_enabled {
+            if let Some(proposal) =
+                propose_from_triggers(&trigger_set, &active_cfg, core_context_digest)
+            {
+                let key = LifecycleKey {
                     proposal_digest: proposal.proposal_digest,
-                    kind: proposal.kind.clone(),
-                    base_evidence_digest: proposal.base_evidence_digest,
-                    core_context_digest: proposal.core_context_digest,
-                    payload_digest,
-                    created_at_ms: proposal.created_at_ms,
-                    score: eval.score,
-                    verdict: eval.verdict.clone(),
-                    reason_codes: eval.reason_codes.clone(),
+                    context_digest: proposal.core_context_digest,
                 };
-                let evidence_pb = build_proposal_evidence_pb(&evidence);
-                let payload_bytes = canonical_bytes(&evidence_pb);
-                let committed = match self.pvgs.as_deref_mut() {
-                    Some(client) => match client.commit_proposal_evidence(payload_bytes) {
-                        Ok(receipt) => receipt.status == ucf::v1::ReceiptStatus::Accepted as i32,
-                        Err(_) => false,
-                    },
-                    None => true,
-                };
-                if committed {
-                    if self.shadow.enabled {
-                        self.schedule_shadow_for_proposal(&proposal, &active_cfg);
-                    } else {
-                        eprintln!(
-                            "pending simulation: proposal={} context={}",
-                            hex::encode(&proposal.proposal_digest[..4]),
-                            hex::encode(&proposal.core_context_digest[..4])
-                        );
+                hydrate_lifecycle_from_query(
+                    &mut self.lifecycle_index,
+                    self.evidence_query_client.as_deref(),
+                    key,
+                    lifecycle_tick,
+                );
+                if !proposal_is_duplicate(&self.lifecycle_index, &proposal) {
+                    self.lifecycle_index.note_proposal(key, lifecycle_tick);
+                    let eval = evaluate(&proposal, &eval_ctx);
+                    let payload_digest = proposal_payload_digest(&proposal.payload)
+                        .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
+                    let evidence = ProposalEvidence {
+                        proposal_id: proposal.proposal_id.clone(),
+                        proposal_digest: proposal.proposal_digest,
+                        kind: proposal.kind.clone(),
+                        base_evidence_digest: proposal.base_evidence_digest,
+                        core_context_digest: proposal.core_context_digest,
+                        payload_digest,
+                        created_at_ms: proposal.created_at_ms,
+                        score: eval.score,
+                        verdict: eval.verdict.clone(),
+                        reason_codes: eval.reason_codes.clone(),
+                    };
+                    let evidence_pb = build_proposal_evidence_pb(&evidence);
+                    let payload_bytes = canonical_bytes(&evidence_pb);
+                    let committed = match self.pvgs.as_deref_mut() {
+                        Some(client) => match client.commit_proposal_evidence(payload_bytes) {
+                            Ok(receipt) => {
+                                receipt.status == ucf::v1::ReceiptStatus::Accepted as i32
+                            }
+                            Err(_) => false,
+                        },
+                        None => true,
+                    };
+                    if committed {
+                        if self.shadow.enabled {
+                            self.schedule_shadow_for_proposal(&proposal, &active_cfg);
+                        } else {
+                            eprintln!(
+                                "pending simulation: proposal={} context={}",
+                                hex::encode(&proposal.proposal_digest[..4]),
+                                hex::encode(&proposal.core_context_digest[..4])
+                            );
+                        }
                     }
                 }
             }

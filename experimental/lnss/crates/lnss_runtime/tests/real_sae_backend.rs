@@ -151,6 +151,7 @@ mod real_sae_backend_tests {
             last_action_digest: [0; 32],
             last_self_state_digest: [0; 32],
             pred_error_threshold: 128,
+            trigger_proposals_enabled: false,
         };
         let mut runtime_b = LnssRuntime {
             llm: Box::new(backend_b),
@@ -192,6 +193,7 @@ mod real_sae_backend_tests {
             last_action_digest: [0; 32],
             last_self_state_digest: [0; 32],
             pred_error_threshold: 128,
+            trigger_proposals_enabled: false,
         };
 
         let mods = base_mods();

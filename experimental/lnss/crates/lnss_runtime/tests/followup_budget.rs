@@ -86,6 +86,7 @@ fn build_runtime(hooks: SequencedHookProvider) -> (LnssRuntime, Arc<AtomicUsize>
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
     (runtime, call_count)
 }

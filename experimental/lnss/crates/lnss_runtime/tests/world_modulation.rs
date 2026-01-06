@@ -107,6 +107,7 @@ fn build_runtime(prediction_error_score: i32, mapper: FeatureToBrainMap) -> Lnss
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     }
 }
 
