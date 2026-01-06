@@ -313,9 +313,7 @@ impl ProposalInbox {
         mechint: &mut dyn MechIntWriter,
         mut pvgs: Option<&mut (dyn PvgsClientReader + '_)>,
         trace_state: Option<&TraceRunState>,
-        lifecycle_index: &mut LifecycleIndex,
-        evidence_query: Option<&dyn EvidenceQueryClient>,
-        lifecycle_tick: u64,
+        lifecycle: LifecycleInputs<'_>,
     ) -> Result<usize, LnssRuntimeError> {
         if !self.should_scan() {
             return Ok(0);
@@ -335,13 +333,20 @@ impl ProposalInbox {
                 proposal_digest: proposal.proposal_digest,
                 context_digest: proposal.core_context_digest,
             };
-            lifecycle_index.note_proposal(key, lifecycle_tick);
-            hydrate_lifecycle_from_query(lifecycle_index, evidence_query, key, lifecycle_tick);
+            lifecycle.index.note_proposal(key, lifecycle.tick);
+            hydrate_lifecycle_from_query(
+                lifecycle.index,
+                lifecycle.evidence_query,
+                key,
+                lifecycle.tick,
+            );
             if let Some(trace_state) = trace_state.filter(|state| state.committed) {
                 let verdict = trace_verdict_code(&trace_state.verdict);
-                lifecycle_index.note_trace(key, trace_state.trace_digest, verdict, lifecycle_tick);
+                lifecycle
+                    .index
+                    .note_trace(key, trace_state.trace_digest, verdict, lifecycle.tick);
             }
-            let lifecycle_state = lifecycle_index.state_for(&key).cloned().unwrap_or_default();
+            let lifecycle_state = lifecycle.index.state_for(&key).cloned().unwrap_or_default();
             let lifecycle_trace_digest = lifecycle_state.latest_trace_digest;
             let lifecycle_trace_verdict = lifecycle_state.latest_trace_verdict;
             let activation_applied =
@@ -394,46 +399,48 @@ impl ProposalInbox {
             if !gating_codes.is_empty() {
                 parts.reason_codes.extend(gating_codes.clone());
             }
-            if eval.verdict == EvalVerdict::Promising {
-                if trace_allowed && !activation_applied && !pending_approval {
-                    let trace_state = trace_state
-                        .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
-                        .expect("trace state");
-                    let ruleset_digest = pvgs
-                        .as_deref()
-                        .and_then(|client| client.get_current_ruleset_digest());
-                    let ctx = ApprovalContext {
-                        session_id: parts.session_id.clone(),
-                        ruleset_digest,
-                        current_mapping_digest: Some(parts.mapping_digest),
-                        current_sae_pack_digest: None,
-                        current_liquid_params_digest: None,
-                        latest_scorecard_digest: None,
-                        trace_digest: Some(trace_state.trace_digest),
-                        requested_operation: ucf::v1::OperationCategory::OpException,
-                    };
-                    let aap = match build_aap_for_proposal(&proposal, &ctx) {
-                        Ok(aap) => aap,
-                        Err(_) => {
-                            eprintln!(
-                                "{RC_AAP_MISSING_CONTEXT_BINDING}: proposal missing core context digest"
-                            );
-                            return Err(LnssRuntimeError::Proposal(
-                                "missing core context digest".to_string(),
-                            ));
-                        }
-                    };
-                    let aap_digest = approval_artifact_package_digest(&aap);
-                    parts.aap_digest = Some(aap_digest);
-                    lifecycle_index.note_aap(key, aap_digest, lifecycle_tick);
-                    if let Err(err) = fs::create_dir_all(&self.aap_dir) {
-                        return Err(LnssRuntimeError::Proposal(err.to_string()));
+            if eval.verdict == EvalVerdict::Promising
+                && trace_allowed
+                && !activation_applied
+                && !pending_approval
+            {
+                let trace_state = trace_state
+                    .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
+                    .expect("trace state");
+                let ruleset_digest = pvgs
+                    .as_deref()
+                    .and_then(|client| client.get_current_ruleset_digest());
+                let ctx = ApprovalContext {
+                    session_id: parts.session_id.clone(),
+                    ruleset_digest,
+                    current_mapping_digest: Some(parts.mapping_digest),
+                    current_sae_pack_digest: None,
+                    current_liquid_params_digest: None,
+                    latest_scorecard_digest: None,
+                    trace_digest: Some(trace_state.trace_digest),
+                    requested_operation: ucf::v1::OperationCategory::OpException,
+                };
+                let aap = match build_aap_for_proposal(&proposal, &ctx) {
+                    Ok(aap) => aap,
+                    Err(_) => {
+                        eprintln!(
+                            "{RC_AAP_MISSING_CONTEXT_BINDING}: proposal missing core context digest"
+                        );
+                        return Err(LnssRuntimeError::Proposal(
+                            "missing core context digest".to_string(),
+                        ));
                     }
-                    let filename = format!("aap_{}.bin", hex::encode(aap_digest));
-                    let path = self.aap_dir.join(filename);
-                    if let Err(err) = fs::write(path, lnss_approval::encode_aap(&aap)) {
-                        return Err(LnssRuntimeError::Proposal(err.to_string()));
-                    }
+                };
+                let aap_digest = approval_artifact_package_digest(&aap);
+                parts.aap_digest = Some(aap_digest);
+                lifecycle.index.note_aap(key, aap_digest, lifecycle.tick);
+                if let Err(err) = fs::create_dir_all(&self.aap_dir) {
+                    return Err(LnssRuntimeError::Proposal(err.to_string()));
+                }
+                let filename = format!("aap_{}.bin", hex::encode(aap_digest));
+                let path = self.aap_dir.join(filename);
+                if let Err(err) = fs::write(path, lnss_approval::encode_aap(&aap)) {
+                    return Err(LnssRuntimeError::Proposal(err.to_string()));
                 }
             }
             let evidence = ProposalEvidence {
@@ -697,6 +704,12 @@ pub struct LnssRuntime {
     pub last_action_digest: [u8; 32],
     pub last_self_state_digest: [u8; 32],
     pub pred_error_threshold: i32,
+}
+
+pub struct LifecycleInputs<'a> {
+    pub index: &'a mut LifecycleIndex,
+    pub evidence_query: Option<&'a dyn EvidenceQueryClient>,
+    pub tick: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1512,9 +1525,11 @@ impl LnssRuntime {
                 self.mechint.as_mut(),
                 self.pvgs.as_deref_mut(),
                 self.trace_state.as_ref(),
-                &mut self.lifecycle_index,
-                self.evidence_query_client.as_deref(),
-                lifecycle_tick,
+                LifecycleInputs {
+                    index: &mut self.lifecycle_index,
+                    evidence_query: self.evidence_query_client.as_deref(),
+                    tick: lifecycle_tick,
+                },
             )?;
         }
 
