@@ -18,10 +18,10 @@ use lnss_core::{
     digest, wm_pred_error_bucket, BrainTarget, CfgRootDigestPack, CognitiveCore, ContextBundle,
     ControlIntentClass, CoreContextDigestPack, CoreOrchestrator, CoreStepOutput,
     DeliberationBudget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
-    FeedbackAnomalyFlags, PolicyMode, PolicyView, RecursionPolicy, RlmCore, RlmDirective,
-    RlmInput, TapFrame, TapSpec, WorldModelCore, WorldModelInput, WorldModelCfgSnapshot,
-    RlmCfgSnapshot, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES, MAX_RLM_DIRECTIVES,
-    MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
+    FeedbackAnomalyFlags, PolicyMode, PolicyView, RecursionPolicy, RlmCfgSnapshot, RlmCore,
+    RlmDirective, RlmInput, TapFrame, TapSpec, WorldModelCfgSnapshot, WorldModelCore,
+    WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES,
+    MAX_RLM_DIRECTIVES, MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
@@ -1974,8 +1974,11 @@ impl LnssRuntime {
     ) -> TraceRunState {
         let verdict = trace_verdict_from_delta(score.delta);
         let created_at_ms = trace_context.active_tick.saturating_mul(FIXED_MS_PER_TICK);
-        let trace_id =
-            trace_id_for(active_cfg_root_digest, shadow_cfg_root_digest, trace_context.active_tick);
+        let trace_id = trace_id_for(
+            active_cfg_root_digest,
+            shadow_cfg_root_digest,
+            trace_context.active_tick,
+        );
         let mut trace_reason_codes = reason_codes.to_vec();
         trace_reason_codes.push(trace_verdict_reason_code(&verdict).to_string());
 
@@ -2740,7 +2743,11 @@ pub fn cfg_root_digest_pack(
     let worldmodel_digest = worldmodel_cfg_digest(worldmodel_cfg);
     let rlm_digest = rlm_cfg_digest(rlm_cfg);
     let sae_pack_digest = sae_pack_digest.unwrap_or([0u8; 32]);
-    let sae_digest = sae_cfg_digest(sae_pack_digest, MAX_TOP_FEATURES as u16, &[MAX_TOP_FEATURES as u16]);
+    let sae_digest = sae_cfg_digest(
+        sae_pack_digest,
+        MAX_TOP_FEATURES as u16,
+        &[MAX_TOP_FEATURES as u16],
+    );
     let mapping_digest = mapping_cfg_digest(mapping.map_digest, mapping.map_version);
     let limits_digest = limits_cfg_digest(
         limits,

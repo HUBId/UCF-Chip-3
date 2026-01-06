@@ -1114,7 +1114,11 @@ fn trace_evidence_uses_cfg_root_digests() {
         runtime.active_liquid_params_digest,
     )
     .expect("active cfg pack");
-    let shadow_mapping = runtime.shadow.shadow_mapping.as_ref().expect("shadow mapping");
+    let shadow_mapping = runtime
+        .shadow
+        .shadow_mapping
+        .as_ref()
+        .expect("shadow mapping");
     let shadow_limits = runtime
         .shadow
         .shadow_injection_limits
