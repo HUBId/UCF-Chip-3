@@ -233,6 +233,7 @@ fn end_to_end_stub_pipeline() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -322,6 +323,7 @@ fn core_outputs_are_deterministic() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mut runtime_b = LnssRuntime {
@@ -369,6 +371,7 @@ fn core_outputs_are_deterministic() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mods = EmotionFieldSnapshot::new(

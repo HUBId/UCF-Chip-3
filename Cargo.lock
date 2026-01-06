@@ -1167,6 +1167,7 @@ dependencies = [
  "lnss_rig",
  "lnss_rlm",
  "lnss_sae",
+ "lnss_triggers",
  "lnss_worldmodel",
  "lnss_worldmodulation",
  "prost",
@@ -1188,6 +1189,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "lnss_triggers"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "lnss_core",
+ "lnss_evolve",
+ "lnss_lifecycle",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

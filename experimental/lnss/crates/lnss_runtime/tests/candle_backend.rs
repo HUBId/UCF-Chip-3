@@ -153,6 +153,7 @@ fn candle_end_to_end_is_deterministic() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mods = default_mods();

@@ -318,6 +318,47 @@ pub fn encode_proposal_evidence(pe: &ProposalEvidence) -> Vec<u8> {
     buf
 }
 
+pub fn build_proposal(
+    kind: ProposalKind,
+    created_at_ms: u64,
+    base_evidence_digest: [u8; 32],
+    core_context_digest_pack: CoreContextDigestPack,
+    payload: ProposalPayload,
+    reason_codes: Vec<String>,
+) -> Result<Proposal, LnssEvolveError> {
+    let payload = normalize_payload(payload)?;
+    let reason_codes = normalize_reason_codes(reason_codes);
+    let proposal_id = generate_proposal_id(
+        &kind,
+        created_at_ms,
+        base_evidence_digest,
+        &payload,
+        &reason_codes,
+    );
+    let canonical = ProposalCanonical {
+        proposal_id: &proposal_id,
+        kind: &kind,
+        created_at_ms,
+        base_evidence_digest,
+        payload: &payload,
+        reason_codes: &reason_codes,
+    };
+    let proposal_digest = proposal_digest(&canonical)?;
+    let core_context_digest = core_context_digest_pack.digest();
+
+    Ok(Proposal {
+        proposal_id,
+        proposal_digest,
+        kind,
+        created_at_ms,
+        base_evidence_digest,
+        core_context_digest_pack,
+        core_context_digest,
+        payload,
+        reason_codes,
+    })
+}
+
 fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError> {
     let mut reason_codes = normalize_reason_codes(input.reason_codes);
     reason_codes.truncate(MAX_REASON_CODES);

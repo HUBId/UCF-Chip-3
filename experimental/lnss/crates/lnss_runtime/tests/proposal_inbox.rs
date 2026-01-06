@@ -381,6 +381,7 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -519,6 +520,7 @@ fn proposal_commits_only_once_across_ticks() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -641,6 +643,7 @@ fn proposal_commits_are_bounded_and_ordered() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mods = EmotionFieldSnapshot::new(
@@ -765,6 +768,7 @@ fn local_pvgs_receives_expected_payload() {
         last_action_digest: [0; 32],
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
+        trigger_proposals_enabled: false,
     };
 
     let mods = EmotionFieldSnapshot::new(

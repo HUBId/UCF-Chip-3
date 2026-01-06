@@ -26,13 +26,20 @@ use lnss_core::{
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
     trace_encoding::{build_trace_run_evidence_pb, TraceRunEvidenceLocal},
-    EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind, TraceVerdict,
+    EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind, ProposalPayload,
+    TraceVerdict,
 };
 use lnss_hooks::TapRegistry;
 use lnss_lifecycle::{
     EvidenceQueryClient, LifecycleIndex, LifecycleKey, ACTIVATION_STATUS_APPLIED,
     ACTIVATION_STATUS_REJECTED, TRACE_VERDICT_NEUTRAL, TRACE_VERDICT_PROMISING,
     TRACE_VERDICT_RISKY,
+};
+#[cfg(feature = "lnss-liquid-ode")]
+use lnss_triggers::liquid_params_update_payload;
+use lnss_triggers::{
+    extract_triggers, mapping_update_plan, proposal_is_duplicate, propose_from_triggers, ActiveCfg,
+    ActiveConstraints, LiquidParamsSnapshot,
 };
 use lnss_worldmodulation::{
     compute_world_modulation, BaseLimits, WorldModulationPlan, RC_WM_MODULATION_ACTIVE,
@@ -704,6 +711,7 @@ pub struct LnssRuntime {
     pub last_action_digest: [u8; 32],
     pub last_self_state_digest: [u8; 32],
     pub pred_error_threshold: i32,
+    pub trigger_proposals_enabled: bool,
 }
 
 pub struct LifecycleInputs<'a> {
@@ -1492,33 +1500,139 @@ impl LnssRuntime {
             None
         };
 
+        let eval_ctx = EvalContext {
+            latest_feedback_digest: feedback_snapshot.as_ref().map(|snap| snap.snapshot_digest),
+            trace_run_digest: self
+                .trace_state
+                .as_ref()
+                .filter(|state| state.committed)
+                .map(|state| state.trace_digest),
+            metrics: feedback_snapshot
+                .as_ref()
+                .map(|snap| {
+                    vec![
+                        (
+                            "event_queue_overflowed".to_string(),
+                            i64::from(snap.event_queue_overflowed),
+                        ),
+                        ("events_dropped".to_string(), snap.events_dropped as i64),
+                        ("events_injected".to_string(), snap.events_injected as i64),
+                        ("injected_total".to_string(), snap.injected_total as i64),
+                    ]
+                })
+                .unwrap_or_default(),
+        };
+        let constraints = ActiveConstraints {
+            cooldown_active: !orchestration.deliberation_budget.allow_followup
+                && orchestration
+                    .deliberation_budget
+                    .selected_directive
+                    .is_some(),
+            modulation_active: wm_modulation_reason_codes
+                .iter()
+                .any(|code| code == RC_WM_MODULATION_ACTIVE),
+        };
+        let artifacts_dir = self
+            .proposal_inbox
+            .as_ref()
+            .map(|inbox| inbox.dir.join("generated"));
+        let liquid_params = {
+            #[cfg(feature = "lnss-liquid-ode")]
+            {
+                self.active_liquid_params
+                    .as_ref()
+                    .map(|params| LiquidParamsSnapshot {
+                        dt_ms_q: params.dt_ms_q,
+                        steps_per_call: params.steps_per_call,
+                    })
+                    .unwrap_or_default()
+            }
+            #[cfg(not(feature = "lnss-liquid-ode"))]
+            {
+                LiquidParamsSnapshot::default()
+            }
+        };
+        let active_cfg = ActiveCfg {
+            created_at_ms: feedback_snapshot
+                .as_ref()
+                .map(|snap| snap.tick.saturating_mul(FIXED_MS_PER_TICK))
+                .unwrap_or(0),
+            base_evidence_digest: feedback_snapshot
+                .as_ref()
+                .map(|snap| snap.snapshot_digest)
+                .unwrap_or([0u8; 32]),
+            core_context_digest_pack: core_context_pack.clone(),
+            mapping: self.mapper.clone(),
+            max_spikes_per_tick: self.injection_limits.max_spikes_per_tick,
+            max_targets_per_spike: self.injection_limits.max_targets_per_spike,
+            liquid_params,
+            rlm_directives: rlm_directives.clone(),
+            allow_followup: orchestration.deliberation_budget.allow_followup,
+            artifacts_dir,
+        };
+        let trigger_set =
+            extract_triggers(&core_context_pack, feedback_snapshot.as_ref(), &constraints);
+        if self.trigger_proposals_enabled {
+            if let Some(proposal) =
+                propose_from_triggers(&trigger_set, &active_cfg, core_context_digest)
+            {
+                let key = LifecycleKey {
+                    proposal_digest: proposal.proposal_digest,
+                    context_digest: proposal.core_context_digest,
+                };
+                hydrate_lifecycle_from_query(
+                    &mut self.lifecycle_index,
+                    self.evidence_query_client.as_deref(),
+                    key,
+                    lifecycle_tick,
+                );
+                if !proposal_is_duplicate(&self.lifecycle_index, &proposal) {
+                    self.lifecycle_index.note_proposal(key, lifecycle_tick);
+                    let eval = evaluate(&proposal, &eval_ctx);
+                    let payload_digest = proposal_payload_digest(&proposal.payload)
+                        .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
+                    let evidence = ProposalEvidence {
+                        proposal_id: proposal.proposal_id.clone(),
+                        proposal_digest: proposal.proposal_digest,
+                        kind: proposal.kind.clone(),
+                        base_evidence_digest: proposal.base_evidence_digest,
+                        core_context_digest: proposal.core_context_digest,
+                        payload_digest,
+                        created_at_ms: proposal.created_at_ms,
+                        score: eval.score,
+                        verdict: eval.verdict.clone(),
+                        reason_codes: eval.reason_codes.clone(),
+                    };
+                    let evidence_pb = build_proposal_evidence_pb(&evidence);
+                    let payload_bytes = canonical_bytes(&evidence_pb);
+                    let committed = match self.pvgs.as_deref_mut() {
+                        Some(client) => match client.commit_proposal_evidence(payload_bytes) {
+                            Ok(receipt) => {
+                                receipt.status == ucf::v1::ReceiptStatus::Accepted as i32
+                            }
+                            Err(_) => false,
+                        },
+                        None => true,
+                    };
+                    if committed {
+                        if self.shadow.enabled {
+                            self.schedule_shadow_for_proposal(&proposal, &active_cfg);
+                        } else {
+                            eprintln!(
+                                "pending simulation: proposal={} context={}",
+                                hex::encode(&proposal.proposal_digest[..4]),
+                                hex::encode(&proposal.core_context_digest[..4])
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let mechint_record = MechIntRecord::new(mechint_parts.clone());
         self.mechint.write_step(&mechint_record)?;
 
         if let Some(inbox) = self.proposal_inbox.as_mut() {
-            let trace_run_digest = self
-                .trace_state
-                .as_ref()
-                .filter(|state| state.committed)
-                .map(|state| state.trace_digest);
-            let eval_ctx = EvalContext {
-                latest_feedback_digest: feedback_snapshot.as_ref().map(|snap| snap.snapshot_digest),
-                trace_run_digest,
-                metrics: feedback_snapshot
-                    .as_ref()
-                    .map(|snap| {
-                        vec![
-                            (
-                                "event_queue_overflowed".to_string(),
-                                i64::from(snap.event_queue_overflowed),
-                            ),
-                            ("events_dropped".to_string(), snap.events_dropped as i64),
-                            ("events_injected".to_string(), snap.events_injected as i64),
-                            ("injected_total".to_string(), snap.injected_total as i64),
-                        ]
-                    })
-                    .unwrap_or_default(),
-            };
             inbox.ingest(
                 &eval_ctx,
                 &mechint_parts,
@@ -1545,6 +1659,46 @@ impl LnssRuntime {
             mechint_record,
             shadow: shadow_output,
         })
+    }
+
+    fn schedule_shadow_for_proposal(&mut self, proposal: &Proposal, active_cfg: &ActiveCfg) {
+        if !self.shadow.enabled {
+            return;
+        }
+        match &proposal.payload {
+            ProposalPayload::InjectionLimitsUpdate {
+                max_spikes_per_tick,
+                max_targets_per_spike,
+            } => {
+                self.shadow.shadow_injection_limits = Some(InjectionLimits {
+                    max_spikes_per_tick: *max_spikes_per_tick,
+                    max_targets_per_spike: *max_targets_per_spike,
+                });
+            }
+            ProposalPayload::MappingUpdate { .. } => {
+                let plan = mapping_update_plan(active_cfg);
+                self.shadow.shadow_mapping = Some(plan.map);
+            }
+            ProposalPayload::LiquidParamsUpdate { .. } => {
+                #[cfg(feature = "lnss-liquid-ode")]
+                {
+                    let Some(active) = self.active_liquid_params.as_ref() else {
+                        eprintln!("pending simulation: liquid params update missing active params");
+                        return;
+                    };
+                    let (_payload, snapshot) = liquid_params_update_payload(active_cfg);
+                    let mut next = active.clone();
+                    next.dt_ms_q = snapshot.dt_ms_q;
+                    next.steps_per_call = snapshot.steps_per_call;
+                    self.shadow.shadow_liquid_params = Some(next);
+                }
+                #[cfg(not(feature = "lnss-liquid-ode"))]
+                {
+                    eprintln!("pending simulation: liquid params update requires lnss-liquid-ode");
+                }
+            }
+            ProposalPayload::SaePackUpdate { .. } => {}
+        }
     }
 
     fn handle_approval_activation(

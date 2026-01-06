@@ -1,0 +1,14 @@
+[package]
+name = "lnss_triggers"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+lnss_core = { path = "../lnss_core" }
+lnss_evolve = { path = "../lnss_evolve" }
+lnss_lifecycle = { path = "../lnss_lifecycle" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
