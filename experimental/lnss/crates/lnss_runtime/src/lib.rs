@@ -26,7 +26,8 @@ use lnss_core::{
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
     trace_encoding::{build_trace_run_evidence_pb, TraceRunEvidenceLocal},
-    EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind, TraceVerdict,
+    EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind, ProposalPayload,
+    TraceVerdict,
 };
 use lnss_hooks::TapRegistry;
 use lnss_lifecycle::{
