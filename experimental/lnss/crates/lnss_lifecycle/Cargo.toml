@@ -1,0 +1,18 @@
+[package]
+name = "lnss_lifecycle"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+lnss-chip4-query = ["chip4-pvgs"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+chip4-pvgs = { path = "../../../../tests/chip4-pvgs", optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

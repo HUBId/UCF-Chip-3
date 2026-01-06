@@ -9,6 +9,8 @@ pub use lnss_evolve;
 #[cfg(feature = "lnss")]
 pub use lnss_hooks;
 #[cfg(feature = "lnss")]
+pub use lnss_lifecycle;
+#[cfg(feature = "lnss")]
 pub use lnss_mechint;
 #[cfg(feature = "lnss")]
 pub use lnss_rig;

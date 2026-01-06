@@ -11,6 +11,7 @@ mod real_sae_backend_tests {
         BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
         RecursionPolicy, TapKind, TapSpec,
     };
+    use lnss_lifecycle::LifecycleIndex;
     use lnss_mechint::JsonlMechIntWriter;
     use lnss_rig::InMemoryRigClient;
     use lnss_rlm::RlmController;
@@ -140,6 +141,9 @@ mod real_sae_backend_tests {
             shadow_rig: None,
             trace_state: None,
             seen_trace_digests: std::collections::BTreeSet::new(),
+            lifecycle_index: LifecycleIndex::default(),
+            evidence_query_client: None,
+            lifecycle_tick: 0,
             policy_mode: PolicyMode::Open,
             control_intent_class: ControlIntentClass::Monitor,
             recursion_policy: RecursionPolicy::default(),
@@ -178,6 +182,9 @@ mod real_sae_backend_tests {
             shadow_rig: None,
             trace_state: None,
             seen_trace_digests: std::collections::BTreeSet::new(),
+            lifecycle_index: LifecycleIndex::default(),
+            evidence_query_client: None,
+            lifecycle_tick: 0,
             policy_mode: PolicyMode::Open,
             control_intent_class: ControlIntentClass::Monitor,
             recursion_policy: RecursionPolicy::default(),

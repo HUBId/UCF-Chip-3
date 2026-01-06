@@ -7,9 +7,11 @@ use lnss_core::{
     EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame,
     TapKind, TapSpec,
 };
+use lnss_evolve::load_proposals;
 use lnss_evolve::trace_encoding::{
     build_trace_run_evidence_pb, TraceRunEvidenceLocal, TraceVerdict,
 };
+use lnss_lifecycle::{LifecycleIndex, LifecycleKey, ACTIVATION_STATUS_APPLIED};
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     BrainSpike, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
@@ -101,6 +103,59 @@ impl FeedbackRigClient {
 }
 
 impl RigClient for FeedbackRigClient {
+    fn send_spikes(&mut self, spikes: &[BrainSpike]) -> Result<(), lnss_runtime::LnssRuntimeError> {
+        self.last = Some(self.snapshot_for(spikes));
+        Ok(())
+    }
+
+    fn poll_feedback(&mut self) -> Option<BiophysFeedbackSnapshot> {
+        self.last.clone()
+    }
+}
+
+struct FixedTickRigClient {
+    limits: InjectionLimits,
+    tick: u64,
+    last: Option<BiophysFeedbackSnapshot>,
+}
+
+impl FixedTickRigClient {
+    fn new(limits: InjectionLimits, tick: u64) -> Self {
+        Self {
+            limits,
+            tick,
+            last: None,
+        }
+    }
+
+    fn snapshot_for(&self, spikes: &[BrainSpike]) -> BiophysFeedbackSnapshot {
+        let max_spikes = self.limits.max_spikes_per_tick as usize;
+        let dropped = spikes.len().saturating_sub(max_spikes);
+        let injected = spikes.len().saturating_sub(dropped);
+        let mut buf = Vec::new();
+        write_u32(&mut buf, spikes.len() as u32);
+        write_u32(&mut buf, self.limits.max_spikes_per_tick);
+        write_u32(&mut buf, self.limits.max_targets_per_spike);
+        for spike in spikes {
+            write_string(&mut buf, &spike.target.region);
+            write_string(&mut buf, &spike.target.population);
+            write_u32(&mut buf, spike.target.neuron_group);
+            write_string(&mut buf, &spike.target.syn_kind);
+            write_u16(&mut buf, spike.amplitude_q);
+        }
+        let snapshot_digest = digest("lnss.shadow.feedback.predicted.v1", &buf);
+        BiophysFeedbackSnapshot {
+            tick: self.tick,
+            snapshot_digest,
+            event_queue_overflowed: dropped > 0,
+            events_dropped: dropped as u64,
+            events_injected: injected.min(u32::MAX as usize) as u32,
+            injected_total: injected as u64,
+        }
+    }
+}
+
+impl RigClient for FixedTickRigClient {
     fn send_spikes(&mut self, spikes: &[BrainSpike]) -> Result<(), lnss_runtime::LnssRuntimeError> {
         self.last = Some(self.snapshot_for(spikes));
         Ok(())
@@ -490,6 +545,9 @@ fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
         shadow_rig: fixture.shadow_rig,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
@@ -639,6 +697,89 @@ fn shadow_trace_commits_once_and_is_deterministic() {
         .expect("trace state")
         .created_at_ms;
     assert!(second_created_at >= first_created_at);
+}
+
+#[test]
+fn duplicate_trace_digest_is_skipped() {
+    let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+
+    let feature_ids = vec![1u32, 2u32];
+    let mapper = mapping_for_features(&feature_ids, 2);
+    let shadow_mapping = mapping_for_features(&feature_ids[..1], 1);
+    let limits = InjectionLimits {
+        max_spikes_per_tick: 4,
+        max_targets_per_spike: 4,
+    };
+
+    let mut runtime = runtime_with_shadow(RuntimeFixture {
+        pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
+        proposal_inbox: None,
+        injection_limits: limits.clone(),
+        shadow: ShadowConfig {
+            enabled: true,
+            shadow_mapping: Some(shadow_mapping),
+            #[cfg(feature = "lnss-liquid-ode")]
+            shadow_liquid_params: None,
+            shadow_injection_limits: None,
+        },
+        shadow_rig: None,
+        mapper,
+        sae: Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
+        rig: Box::new(FixedTickRigClient::new(limits, 1)),
+    });
+
+    let initial_world_state = runtime.world_state_digest;
+    let initial_last_action = runtime.last_action_digest;
+    let initial_self_state = runtime.last_self_state_digest;
+    let initial_feedback = runtime.feedback.last.clone();
+
+    let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &default_mods(),
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+    let first_trace_digest = runtime
+        .trace_state
+        .as_ref()
+        .expect("trace state")
+        .trace_digest;
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .committed_trace_run_bytes
+        .len();
+    assert_eq!(committed, 1);
+
+    runtime.world_state_digest = initial_world_state;
+    runtime.last_action_digest = initial_last_action;
+    runtime.last_self_state_digest = initial_self_state;
+    runtime.feedback.last = initial_feedback;
+
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &default_mods(),
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+    let second_trace_state = runtime.trace_state.as_ref().expect("trace state");
+    assert_eq!(second_trace_state.trace_digest, first_trace_digest);
+    assert!(second_trace_state.duplicate_skipped);
+
+    let committed_again = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .committed_trace_run_bytes
+        .len();
+    assert_eq!(committed_again, 1);
 }
 
 #[test]
@@ -804,6 +945,88 @@ fn promising_trace_allows_aap_and_binds_trace_digest() {
         trace_ref.digest.as_ref().expect("trace digest").value,
         trace_digest
     );
+}
+
+#[test]
+fn aap_is_blocked_after_activation_applied() {
+    let dir = temp_dir("lnss_trace_activation_block");
+    let context = core_context_json(3);
+    write_json(
+        &dir.join("proposal.json"),
+        serde_json::json!({
+            "proposal_id": "proposal-a",
+            "kind": "injection_limits_update",
+            "created_at_ms": 1,
+            "base_evidence_digest": vec![1; 32],
+            "core_context_digest_pack": context["core_context_digest_pack"].clone(),
+            "core_context_digest": context["core_context_digest"].clone(),
+            "payload": {
+                "type": "injection_limits_update",
+                "max_spikes_per_tick": 16,
+                "max_targets_per_spike": 4
+            },
+            "reason_codes": []
+        }),
+    );
+
+    let feature_ids = vec![1u32, 2u32];
+    let mapper = mapping_for_features(&feature_ids, 2);
+    let shadow_mapping = mapper.clone();
+
+    let mut runtime = runtime_with_shadow(RuntimeFixture {
+        pvgs: None,
+        proposal_inbox: Some(ProposalInbox::with_limits(&dir, 1, 1)),
+        injection_limits: InjectionLimits {
+            max_spikes_per_tick: 1,
+            max_targets_per_spike: 4,
+        },
+        shadow: ShadowConfig {
+            enabled: true,
+            shadow_mapping: Some(shadow_mapping),
+            #[cfg(feature = "lnss-liquid-ode")]
+            shadow_liquid_params: None,
+            shadow_injection_limits: None,
+        },
+        shadow_rig: None,
+        mapper,
+        sae: Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
+        rig: Box::new(FeedbackRigClient::new(InjectionLimits {
+            max_spikes_per_tick: 1,
+            max_targets_per_spike: 4,
+        })),
+    });
+
+    let proposal = load_proposals(&dir)
+        .expect("load proposals")
+        .into_iter()
+        .next()
+        .expect("proposal");
+    let key = LifecycleKey {
+        proposal_digest: proposal.proposal_digest,
+        context_digest: proposal.core_context_digest,
+    };
+    runtime
+        .lifecycle_index
+        .note_activation(key, [9u8; 32], ACTIVATION_STATUS_APPLIED, 1);
+
+    let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &default_mods(),
+            &[tap_spec],
+        )
+        .expect("runtime step");
+
+    let aap_dir = dir.join("aap");
+    let aap_count = if aap_dir.exists() {
+        fs::read_dir(&aap_dir).expect("read dir").count()
+    } else {
+        0
+    };
+    assert_eq!(aap_count, 0);
 }
 
 #[test]

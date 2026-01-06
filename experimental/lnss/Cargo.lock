@@ -282,6 +282,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chip4-pvgs"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "pvgs_verify",
+ "rand 0.8.5",
+ "rpp_checker",
+ "ucf-protocol",
+ "ucf-test-utils",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -292,6 +304,14 @@ name = "constant_time_eq"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
+
+[[package]]
+name = "control"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "ucf-protocol",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -907,6 +927,7 @@ dependencies = [
  "lnss_core",
  "lnss_evolve",
  "lnss_hooks",
+ "lnss_lifecycle",
  "lnss_mechint",
  "lnss_rig",
  "lnss_rlm",
@@ -974,6 +995,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnss_lifecycle"
+version = "0.1.0"
+dependencies = [
+ "chip4-pvgs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lnss_mechint"
 version = "0.1.0"
 dependencies = [
@@ -1014,6 +1044,7 @@ dependencies = [
  "lnss_core",
  "lnss_evolve",
  "lnss_hooks",
+ "lnss_lifecycle",
  "lnss_mechint",
  "lnss_rig",
  "lnss_rlm",
@@ -1337,6 +1368,7 @@ version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
 dependencies = [
+ "libc",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
@@ -1756,6 +1788,17 @@ dependencies = [
  "blake3",
  "hex",
  "prost",
+]
+
+[[package]]
+name = "ucf-test-utils"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "control",
+ "ed25519-dalek",
+ "pvgs_verify",
+ "ucf-protocol",
 ]
 
 [[package]]

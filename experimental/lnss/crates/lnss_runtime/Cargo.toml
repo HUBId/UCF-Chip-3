@@ -10,6 +10,7 @@ default = []
 lnss-burn = ["burn", "bincode"]
 lnss-candle = []
 lnss-liquid-ode = ["lnss-burn"]
+lnss-chip4-query = ["lnss_lifecycle/lnss-chip4-query"]
 
 [dependencies]
 lnss_core = { path = "../lnss_core" }
@@ -19,6 +20,7 @@ lnss_rlm = { path = "../lnss_rlm" }
 lnss_approval = { path = "../lnss_approval" }
 lnss_evolve = { path = "../lnss_evolve" }
 lnss_hooks = { path = "../lnss_hooks" }
+lnss_lifecycle = { path = "../lnss_lifecycle" }
 pvgs_client = { path = "../../../../crates/pvgs_client" }
 ucf-protocol = { path = "../../../../crates/ucf-protocol" }
 serde = { workspace = true }

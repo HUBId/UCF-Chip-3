@@ -11,6 +11,7 @@ use lnss_core::{
     FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
 };
 use lnss_evolve::load_proposals;
+use lnss_lifecycle::{LifecycleIndex, LifecycleKey, TRACE_VERDICT_PROMISING, TRACE_VERDICT_RISKY};
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     ApprovalInbox, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
@@ -19,6 +20,7 @@ use lnss_runtime::{
 };
 use lnss_sae::StubSaeBackend;
 use lnss_worldmodel::WorldModelCoreStub;
+use prost::Message;
 use pvgs_client::{MockPvgsClient, PvgsClient, PvgsReader};
 use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 
@@ -26,6 +28,8 @@ use ucf_protocol::{canonical_bytes, digest_proto, ucf};
 struct RecordingWriter {
     records: std::sync::Arc<std::sync::Mutex<Vec<MechIntRecord>>>,
 }
+
+const TEST_TRACE_DIGEST: [u8; 32] = [7u8; 32];
 
 impl RecordingWriter {
     fn records(&self) -> Vec<MechIntRecord> {
@@ -397,7 +401,7 @@ fn aap_fixture(dir: &Path, proposal: &lnss_evolve::Proposal) -> ucf::v1::Approva
         current_sae_pack_digest: None,
         current_liquid_params_digest: None,
         latest_scorecard_digest: None,
-        trace_digest: None,
+        trace_digest: Some(TEST_TRACE_DIGEST),
         requested_operation: ucf::v1::OperationCategory::OpException,
     };
     let aap = build_aap_for_proposal(proposal, &ctx).expect("aap");
@@ -483,6 +487,9 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
@@ -491,6 +498,16 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         last_self_state_digest: [0; 32],
         pred_error_threshold: 128,
     }
+}
+
+fn seed_lifecycle_for_proposal(runtime: &mut LnssRuntime, proposal: &lnss_evolve::Proposal) {
+    let key = LifecycleKey {
+        proposal_digest: proposal.proposal_digest,
+        context_digest: proposal.core_context_digest,
+    };
+    runtime
+        .lifecycle_index
+        .note_trace(key, TEST_TRACE_DIGEST, TRACE_VERDICT_PROMISING, 1);
 }
 
 fn runtime_fixture_with_pvgs(
@@ -576,6 +593,7 @@ fn approval_applies_mapping_update() {
 
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture(&dir, writer);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
     run_once(&mut runtime);
 
     assert_eq!(runtime.mapper.map_digest, map.map_digest);
@@ -591,6 +609,7 @@ fn deny_does_not_apply() {
 
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture(&dir, writer);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
     let original_digest = runtime.mapper.map_digest;
     run_once(&mut runtime);
 
@@ -617,6 +636,7 @@ fn loosened_constraints_are_rejected() {
 
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture(&dir, writer);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
     let original_digest = runtime.mapper.map_digest;
     run_once(&mut runtime);
 
@@ -635,6 +655,7 @@ fn approvals_are_idempotent() {
     let writer = RecordingWriter::default();
     let writer_handle = writer.clone();
     let mut runtime = runtime_fixture(&dir, writer);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
     run_once(&mut runtime);
     run_once(&mut runtime);
 
@@ -656,6 +677,7 @@ fn state_persists_active_digests() {
 
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture(&dir, writer);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
     run_once(&mut runtime);
 
     let state_path = dir.join("state/approval_state.json");
@@ -675,6 +697,7 @@ fn activation_commit_on_apply() {
     let pvgs_handle = pvgs_inner.clone();
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
 
     run_once(&mut runtime);
 
@@ -712,6 +735,7 @@ fn activation_commit_is_idempotent() {
     let pvgs_handle = pvgs_inner.clone();
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
 
     run_once(&mut runtime);
     run_once(&mut runtime);
@@ -753,6 +777,8 @@ fn activation_commit_ordering_is_deterministic() {
     let pvgs_handle = pvgs_inner.clone();
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal_a);
+    seed_lifecycle_for_proposal(&mut runtime, &proposal_b);
 
     run_once(&mut runtime);
     run_once(&mut runtime);
@@ -826,6 +852,7 @@ fn activation_commit_on_reject() {
     let writer = RecordingWriter::default();
     let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
     let baseline_mapping = runtime.mapper.map_digest;
+    seed_lifecycle_for_proposal(&mut runtime, &proposal);
 
     run_once(&mut runtime);
 
@@ -849,4 +876,48 @@ fn activation_commit_on_reject() {
     });
     let expected_bytes = canonical_bytes(&build_activation_evidence_pb(&expected));
     assert_eq!(committed[0], expected_bytes);
+}
+
+#[test]
+fn activation_precondition_failure_rejects() {
+    let dir = temp_dir("lnss_activation_precondition_fail");
+    let (map_path, _map, map_digest) = map_fixture(&dir);
+    let proposal = proposal_fixture(&dir, &map_path, map_digest);
+    let aap = aap_fixture(&dir, &proposal);
+    approval_fixture(&dir, &aap.aap_id, ucf::v1::DecisionForm::Allow, None);
+
+    let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+    let writer = RecordingWriter::default();
+    let mut runtime = runtime_fixture_with_pvgs(&dir, writer, pvgs_inner, 123);
+    let key = LifecycleKey {
+        proposal_digest: proposal.proposal_digest,
+        context_digest: proposal.core_context_digest,
+    };
+    runtime
+        .lifecycle_index
+        .note_trace(key, TEST_TRACE_DIGEST, TRACE_VERDICT_RISKY, 1);
+
+    run_once(&mut runtime);
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .local
+        .committed_proposal_activation_bytes
+        .clone();
+    assert_eq!(committed.len(), 1);
+    let activation =
+        ucf::v1::ProposalActivationEvidence::decode(committed[0].as_slice()).expect("decode");
+    let reason_codes = activation
+        .reason_codes
+        .map(|codes| codes.codes)
+        .unwrap_or_default();
+    assert!(reason_codes
+        .iter()
+        .any(|code| code == "RC.GV.PROPOSAL.ACTIVATION_PRECONDITION_FAILED"));
+    assert_eq!(
+        activation.status,
+        ucf::v1::ActivationStatus::Rejected as i32
+    );
 }
