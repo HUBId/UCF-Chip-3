@@ -40,6 +40,7 @@ dependencies = [
  "lnss_core",
  "lnss_frames_bridge",
  "lnss_hooks",
+ "lnss_lifecycle",
  "lnss_mechint",
  "lnss_rig",
  "lnss_rlm",
