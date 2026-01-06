@@ -1025,6 +1025,15 @@ pub struct ShadowScore {
     pub delta: i32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TraceContext {
+    active_tick: u64,
+    active_feedback_digest: [u8; 32],
+    shadow_feedback_digest: [u8; 32],
+    active_context_digest: [u8; 32],
+    shadow_context_digest: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowEvidence {
     pub shadow_mapping_digest: [u8; 32],
@@ -1364,15 +1373,19 @@ impl LnssRuntime {
                 let shadow_record = MechIntRecord::new(shadow_parts);
                 self.mechint.write_step(&shadow_record)?;
 
+                let trace_context = TraceContext {
+                    active_tick: active_feedback.tick,
+                    active_feedback_digest: active_feedback.snapshot_digest,
+                    shadow_feedback_digest: shadow_feedback.snapshot_digest,
+                    active_context_digest: core_context_digest,
+                    shadow_context_digest: core_context_digest,
+                };
                 let trace_state = self.commit_trace_run_evidence(
                     step_id,
                     &score,
                     &reason_codes,
-                    active_feedback,
-                    shadow_feedback,
                     shadow_mapping_digest,
-                    core_context_digest,
-                    core_context_digest,
+                    trace_context,
                 );
                 self.trace_state = Some(trace_state);
 
@@ -1561,18 +1574,15 @@ impl LnssRuntime {
         step_id: &str,
         score: &ShadowScore,
         reason_codes: &[String],
-        active_feedback: &BiophysFeedbackSnapshot,
-        shadow_feedback: &BiophysFeedbackSnapshot,
         shadow_mapping_digest: [u8; 32],
-        active_context_digest: [u8; 32],
-        shadow_context_digest: [u8; 32],
+        trace_context: TraceContext,
     ) -> TraceRunState {
         let verdict = trace_verdict_from_delta(score.delta);
-        let created_at_ms = active_feedback.tick.saturating_mul(FIXED_MS_PER_TICK);
+        let created_at_ms = trace_context.active_tick.saturating_mul(FIXED_MS_PER_TICK);
         let trace_id = trace_id_for(
             self.mapper.map_digest,
             shadow_mapping_digest,
-            active_feedback.tick,
+            trace_context.active_tick,
         );
         let mut trace_reason_codes = reason_codes.to_vec();
         trace_reason_codes.push(trace_verdict_reason_code(&verdict).to_string());
@@ -1581,10 +1591,10 @@ impl LnssRuntime {
             trace_id,
             active_cfg_digest: self.mapper.map_digest,
             shadow_cfg_digest: shadow_mapping_digest,
-            active_feedback_digest: active_feedback.snapshot_digest,
-            shadow_feedback_digest: shadow_feedback.snapshot_digest,
-            active_context_digest,
-            shadow_context_digest,
+            active_feedback_digest: trace_context.active_feedback_digest,
+            shadow_feedback_digest: trace_context.shadow_feedback_digest,
+            active_context_digest: trace_context.active_context_digest,
+            shadow_context_digest: trace_context.shadow_context_digest,
             score_active: score.active,
             score_shadow: score.shadow,
             delta: score.delta,
