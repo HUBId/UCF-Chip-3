@@ -557,7 +557,7 @@ fn proposal_commits_only_once_across_ticks() {
 fn proposal_commits_are_bounded_and_ordered() {
     let dir = temp_dir("lnss_inbox_bounded");
     for idx in 0..20 {
-        let context = core_context_json(idx as u8);
+        let context = core_context_json(idx as u8 + 1);
         write_json(
             &dir.join(format!("{idx:02}.json")),
             serde_json::json!({
