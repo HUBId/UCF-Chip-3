@@ -149,7 +149,7 @@ pub fn extract_triggers(
         triggers.push(Trigger::PolicyClampActive);
     }
 
-    triggers.sort_by_key(|trigger| trigger_priority(trigger));
+    triggers.sort_by_key(trigger_priority);
     triggers.truncate(MAX_TRIGGERS);
 
     TriggerSet { triggers }
