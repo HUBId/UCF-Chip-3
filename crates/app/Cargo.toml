@@ -28,6 +28,7 @@ lnss_rig = { path = "../../experimental/lnss/crates/lnss_rig", optional = true }
 lnss_core = { path = "../../experimental/lnss/crates/lnss_core", optional = true }
 lnss_rlm = { path = "../../experimental/lnss/crates/lnss_rlm", optional = true }
 lnss_worldmodel = { path = "../../experimental/lnss/crates/lnss_worldmodel", optional = true }
+lnss_lifecycle = { path = "../../experimental/lnss/crates/lnss_lifecycle", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
@@ -47,6 +48,7 @@ lnss = [
     "lnss_core",
     "lnss_rlm",
     "lnss_worldmodel",
+    "lnss_lifecycle",
     "serde",
     "serde_json",
 ]
