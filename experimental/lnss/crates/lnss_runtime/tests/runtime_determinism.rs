@@ -1,8 +1,8 @@
 use std::fs;
 
 use lnss_core::{
-    BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
-    PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec, MAX_TOP_FEATURES,
+    BrainTarget, ControlIntentClass, DeliberationBudget, EmotionFieldSnapshot, FeatureEvent,
+    FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec, MAX_TOP_FEATURES,
 };
 use lnss_hooks::TapPlan;
 use lnss_mechint::JsonlMechIntWriter;
@@ -83,6 +83,15 @@ fn boundedness_caps_are_enforced() {
         amp_cap_eff: 1000,
         fanout_eff: 32,
         rlm_directives: vec![],
+        deliberation_budget: DeliberationBudget {
+            allow_followup: false,
+            max_followup_steps: 1,
+            selected_directive: None,
+            reason_codes: Vec::new(),
+        },
+        followup_executed: false,
+        followup_control_frame_digest: None,
+        followup_language_step_digest: None,
         self_state_digest: [5; 32],
         reason_codes: vec![],
         feedback: None,

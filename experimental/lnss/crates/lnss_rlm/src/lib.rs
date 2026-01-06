@@ -2,8 +2,8 @@
 
 use blake3::Hasher;
 use lnss_core::{
-    ControlIntentClass, FeedbackAnomalyFlags, PolicyMode, RecursionDirective,
-    RecursionDirectiveKind, RlmCore, RlmInput, RlmOutput, MAX_RLM_DIRECTIVES,
+    ControlIntentClass, FeedbackAnomalyFlags, PolicyMode, RlmCore, RlmDirective, RlmInput,
+    RlmOutput, MAX_RLM_DIRECTIVES,
 };
 
 #[derive(Debug, Clone)]
@@ -32,10 +32,7 @@ impl RlmCore for RlmController {
         let feedback_flags = input.feedback_flags;
 
         if feedback_flags.any() {
-            directives.push(RecursionDirective::new(
-                RecursionDirectiveKind::Reflect,
-                "Review anomaly signals",
-            ));
+            directives.push(RlmDirective::FollowUpRiskScan);
         }
 
         let allow_followup =
@@ -46,19 +43,21 @@ impl RlmCore for RlmController {
                 ControlIntentClass::Explore | ControlIntentClass::Reflect
             )
         {
-            directives.push(RecursionDirective::new(
-                RecursionDirectiveKind::Followup,
-                "FOLLOWUP: deepen reasoning",
-            ));
+            match input.control_intent {
+                ControlIntentClass::Explore => directives.push(RlmDirective::FollowUpClarify),
+                ControlIntentClass::Reflect => {
+                    directives.push(RlmDirective::FollowUpConsistencyCheck);
+                }
+                _ => {}
+            }
         }
 
         if directives.is_empty() {
-            directives.push(RecursionDirective::new(
-                RecursionDirectiveKind::Hold,
-                "Hold recursion",
-            ));
+            directives.push(RlmDirective::NoFollowUp);
         }
 
+        directives.sort();
+        directives.dedup();
         directives.truncate(self.config.max_directives);
 
         let self_state_digest = digest_self_state(input, feedback_flags, &directives);
@@ -72,7 +71,7 @@ impl RlmCore for RlmController {
 fn digest_self_state(
     input: &RlmInput,
     feedback_flags: FeedbackAnomalyFlags,
-    directives: &[RecursionDirective],
+    directives: &[RlmDirective],
 ) -> [u8; 32] {
     let mut hasher = Hasher::new();
     hasher.update(b"RLM:SELF");
@@ -92,12 +91,7 @@ fn digest_self_state(
     hasher.update(&[u8::from(feedback_flags.event_queue_overflowed)]);
     hasher.update(&[u8::from(feedback_flags.events_dropped)]);
     for directive in directives {
-        hasher.update(&[match directive.kind {
-            RecursionDirectiveKind::Followup => 1,
-            RecursionDirectiveKind::Reflect => 2,
-            RecursionDirectiveKind::Hold => 3,
-        }]);
-        hasher.update(directive.description.as_bytes());
+        hasher.update(&[*directive as u8]);
     }
     *hasher.finalize().as_bytes()
 }
@@ -125,5 +119,9 @@ mod tests {
         assert_eq!(out_a.recursion_directives, out_b.recursion_directives);
         assert_eq!(out_a.self_state_digest, out_b.self_state_digest);
         assert!(out_a.recursion_directives.len() <= controller.config.max_directives);
+        let mut unique = out_a.recursion_directives.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), out_a.recursion_directives.len());
     }
 }

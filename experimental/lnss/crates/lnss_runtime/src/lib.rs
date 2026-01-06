@@ -17,10 +17,10 @@ pub use lnss_core::BiophysFeedbackSnapshot;
 use lnss_core::TapKind;
 use lnss_core::{
     digest, BrainTarget, CognitiveCore, ContextBundle, ControlIntentClass, CoreOrchestrator,
-    CoreStepOutput, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, FeedbackAnomalyFlags,
-    PolicyMode, RecursionDirective, RecursionDirectiveKind, RecursionPolicy, RlmCore, RlmInput,
+    CoreStepOutput, DeliberationBudget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
+    FeedbackAnomalyFlags, PolicyMode, PolicyView, RecursionPolicy, RlmCore, RlmDirective, RlmInput,
     TapFrame, TapSpec, WorldModelCore, WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES,
-    MAX_REASON_CODES, MAX_RLM_DIRECTIVES, MAX_STRING_LEN, MAX_TOP_FEATURES,
+    MAX_REASON_CODES, MAX_RLM_DIRECTIVES, MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
 };
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest,
@@ -30,7 +30,7 @@ use lnss_evolve::{
 use lnss_hooks::TapRegistry;
 use lnss_worldmodulation::{
     compute_world_modulation, BaseLimits, WorldModulationPlan, RC_WM_MODULATION_ACTIVE,
-    RC_WM_PRED_ERROR_HIGH,
+    RC_WM_PRED_ERROR_CRITICAL, RC_WM_PRED_ERROR_HIGH,
 };
 use pvgs_client::PvgsClientReader;
 use ucf_protocol::canonical_bytes;
@@ -63,6 +63,8 @@ const RC_TRACE_RISKY: &str = "RC.GV.TRACE.RISKY";
 const RC_AAP_BLOCKED_BY_TRACE: &str = "RC.GV.AAP.BLOCKED_BY_TRACE";
 const RC_RLM_RECURSION_STEP: &str = "RC.GV.RLM.RECURSION_STEP";
 const RC_RLM_RECURSION_BLOCKED_BY_POLICY: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_POLICY";
+const RC_RLM_RECURSION_BLOCKED_BY_OVERLOAD: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_OVERLOAD";
+const RC_RLM_RECURSION_BLOCKED_BY_WM: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_WM";
 
 #[derive(Debug, Error)]
 pub enum LnssRuntimeError {
@@ -649,7 +651,11 @@ pub struct MechIntRecord {
     pub top_k_eff: u16,
     pub amp_cap_eff: u16,
     pub fanout_eff: u32,
-    pub rlm_directives: Vec<RecursionDirective>,
+    pub rlm_directives: Vec<RlmDirective>,
+    pub deliberation_budget: DeliberationBudget,
+    pub followup_executed: bool,
+    pub followup_control_frame_digest: Option<[u8; 32]>,
+    pub followup_language_step_digest: Option<[u8; 32]>,
     pub self_state_digest: [u8; 32],
     pub reason_codes: Vec<String>,
     pub feedback: Option<FeedbackSummary>,
@@ -689,7 +695,11 @@ pub struct MechIntRecordParts {
     pub top_k_eff: u16,
     pub amp_cap_eff: u16,
     pub fanout_eff: u32,
-    pub rlm_directives: Vec<RecursionDirective>,
+    pub rlm_directives: Vec<RlmDirective>,
+    pub deliberation_budget: DeliberationBudget,
+    pub followup_executed: bool,
+    pub followup_control_frame_digest: Option<[u8; 32]>,
+    pub followup_language_step_digest: Option<[u8; 32]>,
     pub self_state_digest: [u8; 32],
     pub reason_codes: Vec<String>,
     pub feedback: Option<FeedbackSummary>,
@@ -821,6 +831,19 @@ impl MechIntRecord {
         parts.reason_codes.dedup();
         parts.reason_codes.truncate(MAX_REASON_CODES);
         parts
+            .deliberation_budget
+            .reason_codes
+            .iter_mut()
+            .for_each(|code| {
+                *code = bound_string(code);
+            });
+        parts.deliberation_budget.reason_codes.sort();
+        parts.deliberation_budget.reason_codes.dedup();
+        parts
+            .deliberation_budget
+            .reason_codes
+            .truncate(MAX_RLM_REASON_CODES);
+        parts
             .wm_modulation_reason_codes
             .iter_mut()
             .for_each(|code| {
@@ -858,6 +881,10 @@ impl MechIntRecord {
             amp_cap_eff: parts.amp_cap_eff,
             fanout_eff: parts.fanout_eff,
             rlm_directives: parts.rlm_directives,
+            deliberation_budget: parts.deliberation_budget,
+            followup_executed: parts.followup_executed,
+            followup_control_frame_digest: parts.followup_control_frame_digest,
+            followup_language_step_digest: parts.followup_language_step_digest,
             self_state_digest: parts.self_state_digest,
             reason_codes: parts.reason_codes,
             feedback: parts.feedback,
@@ -908,12 +935,35 @@ fn record_digest(parts: &MechIntRecordParts) -> [u8; 32] {
     buf.extend_from_slice(&parts.self_state_digest);
     buf.extend_from_slice(&(parts.rlm_directives.len() as u32).to_le_bytes());
     for directive in &parts.rlm_directives {
-        buf.push(match directive.kind {
-            RecursionDirectiveKind::Followup => 1,
-            RecursionDirectiveKind::Reflect => 2,
-            RecursionDirectiveKind::Hold => 3,
-        });
-        write_string(&mut buf, &directive.description);
+        buf.push(*directive as u8);
+    }
+    buf.push(u8::from(parts.deliberation_budget.allow_followup));
+    buf.push(parts.deliberation_budget.max_followup_steps);
+    buf.push(
+        parts
+            .deliberation_budget
+            .selected_directive
+            .map(|directive| directive as u8)
+            .unwrap_or(0),
+    );
+    buf.extend_from_slice(&(parts.deliberation_budget.reason_codes.len() as u32).to_le_bytes());
+    for code in &parts.deliberation_budget.reason_codes {
+        write_string(&mut buf, code);
+    }
+    buf.push(u8::from(parts.followup_executed));
+    match parts.followup_control_frame_digest {
+        Some(digest_bytes) => {
+            buf.push(1);
+            buf.extend_from_slice(&digest_bytes);
+        }
+        None => buf.push(0),
+    }
+    match parts.followup_language_step_digest {
+        Some(digest_bytes) => {
+            buf.push(1);
+            buf.extend_from_slice(&digest_bytes);
+        }
+        None => buf.push(0),
     }
     buf.extend_from_slice(&(parts.reason_codes.len() as u32).to_le_bytes());
     for code in &parts.reason_codes {
@@ -1023,6 +1073,11 @@ impl LnssRuntime {
             tap_specs,
             self.limits.clone(),
         );
+        let policy_view = PolicyView {
+            allow_internal_reflection: self.recursion_policy.allow_followup,
+            feedback_drop_threshold: self.adaptation.events_dropped_threshold,
+            worldmodel_pred_error_critical: false,
+        };
         let orchestration = self.orchestrator.run_tick(
             self.worldmodel.as_mut(),
             &mut language,
@@ -1031,16 +1086,24 @@ impl LnssRuntime {
             context,
             &world_input,
             &rlm_input,
-            self.recursion_policy,
+            policy_view,
+            self.feedback.last.as_ref(),
         );
 
         let CoreStepOutput {
             output_bytes: primary_output_bytes,
-            taps,
+            taps: primary_taps,
         } = orchestration.language_output;
         let followup_output_bytes = orchestration
             .followup_output
-            .map(|output| output.output_bytes);
+            .as_ref()
+            .map(|output| output.output_bytes.clone());
+        let mut taps = primary_taps;
+        if let Some(followup) = orchestration.followup_output.as_ref() {
+            // Deterministic combine: concat first-pass taps with follow-up taps, then cap.
+            taps.extend(followup.taps.clone());
+        }
+        taps.truncate(self.limits.max_taps);
         let output_bytes = followup_output_bytes
             .clone()
             .unwrap_or_else(|| primary_output_bytes.clone());
@@ -1068,13 +1131,42 @@ impl LnssRuntime {
             reason_codes.push(RC_RLM_RECURSION_STEP.to_string());
         }
         if orchestration.recursion_blocked {
-            reason_codes.push(RC_RLM_RECURSION_BLOCKED_BY_POLICY.to_string());
+            if orchestration
+                .deliberation_budget
+                .reason_codes
+                .iter()
+                .any(|code| code == RC_RLM_RECURSION_BLOCKED_BY_POLICY)
+            {
+                reason_codes.push(RC_RLM_RECURSION_BLOCKED_BY_POLICY.to_string());
+            }
+            if orchestration
+                .deliberation_budget
+                .reason_codes
+                .iter()
+                .any(|code| code == RC_RLM_RECURSION_BLOCKED_BY_OVERLOAD)
+            {
+                reason_codes.push(RC_RLM_RECURSION_BLOCKED_BY_OVERLOAD.to_string());
+            }
+            if orchestration
+                .deliberation_budget
+                .reason_codes
+                .iter()
+                .any(|code| code == RC_RLM_RECURSION_BLOCKED_BY_WM)
+            {
+                reason_codes.push(RC_RLM_RECURSION_BLOCKED_BY_WM.to_string());
+            }
         }
         if wm_modulation_reason_codes
             .iter()
             .any(|code| code == RC_WM_MODULATION_ACTIVE)
         {
             reason_codes.push(RC_WM_MODULATION_ACTIVE.to_string());
+        }
+        if wm_modulation_reason_codes
+            .iter()
+            .any(|code| code == RC_WM_PRED_ERROR_CRITICAL)
+        {
+            reason_codes.push(RC_WM_PRED_ERROR_CRITICAL.to_string());
         }
 
         let mut feature_events = Vec::new();
@@ -1138,6 +1230,10 @@ impl LnssRuntime {
             amp_cap_eff: effective_limits.amplitude_cap_q,
             fanout_eff: effective_limits.fanout_cap,
             rlm_directives: rlm_directives.clone(),
+            deliberation_budget: orchestration.deliberation_budget.clone(),
+            followup_executed: orchestration.followup_output.is_some(),
+            followup_control_frame_digest: orchestration.followup_control_frame_digest,
+            followup_language_step_digest: orchestration.followup_language_step_digest,
             self_state_digest: orchestration.rlm_output.self_state_digest,
             reason_codes,
             feedback: feedback_summary,
