@@ -15,6 +15,7 @@ use lnss_runtime::{
 };
 use lnss_sae::StubSaeBackend;
 use lnss_worldmodel::WorldModelCoreStub;
+use lnss_worldmodulation::WorldModulationPlan;
 
 #[test]
 fn deterministic_feature_event_ordering() {
@@ -74,6 +75,13 @@ fn boundedness_caps_are_enforced() {
         mapping_digest: [3; 32],
         world_state_digest: [4; 32],
         prediction_error_score: 12,
+        wm_prediction_error_score: 12,
+        wm_modulation_plan: WorldModulationPlan::default(),
+        wm_modulation_reason_codes: Vec::new(),
+        max_spikes_eff: 32,
+        top_k_eff: 4,
+        amp_cap_eff: 1000,
+        fanout_eff: 32,
         rlm_directives: vec![],
         self_state_digest: [5; 32],
         reason_codes: vec![],
