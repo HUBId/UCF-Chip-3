@@ -19,6 +19,7 @@ lnss_worldmodel = { path = "../lnss_worldmodel" }
 lnss_rlm = { path = "../lnss_rlm" }
 lnss_approval = { path = "../lnss_approval" }
 lnss_evolve = { path = "../lnss_evolve" }
+lnss_triggers = { path = "../lnss_triggers" }
 lnss_hooks = { path = "../lnss_hooks" }
 lnss_lifecycle = { path = "../lnss_lifecycle" }
 pvgs_client = { path = "../../../../crates/pvgs_client" }
