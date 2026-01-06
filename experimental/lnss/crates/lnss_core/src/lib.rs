@@ -12,6 +12,8 @@ pub const MAX_ACTIVATION_BYTES: usize = 1024 * 1024;
 pub const MAX_MAPPING_ENTRIES: usize = 4096;
 pub const MAX_OVERLAYS: usize = 16;
 pub const MAX_RLM_DIRECTIVES: usize = 3;
+pub const MAX_RLM_REASON_CODES: usize = 12;
+pub const WM_PRED_ERROR_CRITICAL_THRESHOLD: i32 = 80;
 
 #[derive(Debug, Error)]
 pub enum LnssCoreError {
@@ -291,6 +293,7 @@ pub struct ContextBundle {
     pub world_state_digest: [u8; 32],
     pub last_self_state_digest: [u8; 32],
     pub emotion_snapshot_digest: Option<[u8; 32]>,
+    pub followup_control_frame: Option<FollowUpControlFrame>,
 }
 
 impl ContextBundle {
@@ -309,6 +312,7 @@ impl ContextBundle {
             world_state_digest,
             last_self_state_digest,
             emotion_snapshot_digest,
+            followup_control_frame: None,
         }
     }
 }
@@ -326,6 +330,23 @@ pub enum PolicyMode {
     Open,
     Guarded,
     Strict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyView {
+    pub allow_internal_reflection: bool,
+    pub feedback_drop_threshold: u64,
+    pub worldmodel_pred_error_critical: bool,
+}
+
+impl Default for PolicyView {
+    fn default() -> Self {
+        Self {
+            allow_internal_reflection: true,
+            feedback_drop_threshold: 1,
+            worldmodel_pred_error_critical: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -358,26 +379,13 @@ pub trait WorldModelCore {
     fn step(&mut self, input: &WorldModelInput) -> WorldModelOutput;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RecursionDirectiveKind {
-    Followup,
-    Reflect,
-    Hold,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecursionDirective {
-    pub kind: RecursionDirectiveKind,
-    pub description: String,
-}
-
-impl RecursionDirective {
-    pub fn new(kind: RecursionDirectiveKind, description: &str) -> Self {
-        Self {
-            kind,
-            description: bound_string(description),
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum RlmDirective {
+    FollowUpRiskScan = 1,
+    FollowUpConsistencyCheck = 2,
+    FollowUpClarify = 3,
+    NoFollowUp = 4,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,7 +399,7 @@ pub struct RlmInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RlmOutput {
-    pub recursion_directives: Vec<RecursionDirective>,
+    pub recursion_directives: Vec<RlmDirective>,
     pub self_state_digest: [u8; 32],
 }
 
@@ -399,6 +407,96 @@ pub trait RlmCore {
     fn step(&mut self, input: &RlmInput) -> RlmOutput;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliberationBudget {
+    pub allow_followup: bool,
+    pub max_followup_steps: u8,
+    pub selected_directive: Option<RlmDirective>,
+    pub reason_codes: Vec<String>,
+}
+
+pub fn decide_deliberation_budget(
+    directives: &[RlmDirective],
+    policy: &PolicyView,
+    feedback: Option<&BiophysFeedbackSnapshot>,
+) -> DeliberationBudget {
+    let selected_directive = select_followup_directive(directives);
+    let mut reason_codes = Vec::new();
+    let mut allow_followup = false;
+
+    if selected_directive.is_some() {
+        if !policy.allow_internal_reflection {
+            reason_codes.push("RC.GV.RLM.RECURSION_BLOCKED_BY_POLICY".to_string());
+        }
+        if feedback_overloaded(feedback, policy.feedback_drop_threshold) {
+            reason_codes.push("RC.GV.RLM.RECURSION_BLOCKED_BY_OVERLOAD".to_string());
+        }
+        if policy.worldmodel_pred_error_critical {
+            reason_codes.push("RC.GV.RLM.RECURSION_BLOCKED_BY_WM".to_string());
+        }
+        if reason_codes.is_empty() {
+            allow_followup = true;
+            reason_codes.push("RC.GV.RLM.FOLLOWUP_ALLOWED".to_string());
+        }
+    }
+
+    reason_codes.iter_mut().for_each(|code| {
+        *code = bound_string(code);
+    });
+    reason_codes.sort();
+    reason_codes.dedup();
+    reason_codes.truncate(MAX_RLM_REASON_CODES);
+
+    DeliberationBudget {
+        allow_followup,
+        max_followup_steps: 1,
+        selected_directive,
+        reason_codes,
+    }
+}
+
+fn select_followup_directive(directives: &[RlmDirective]) -> Option<RlmDirective> {
+    if directives.contains(&RlmDirective::FollowUpRiskScan) {
+        return Some(RlmDirective::FollowUpRiskScan);
+    }
+    if directives.contains(&RlmDirective::FollowUpConsistencyCheck) {
+        return Some(RlmDirective::FollowUpConsistencyCheck);
+    }
+    if directives.contains(&RlmDirective::FollowUpClarify) {
+        return Some(RlmDirective::FollowUpClarify);
+    }
+    None
+}
+
+fn feedback_overloaded(
+    feedback: Option<&BiophysFeedbackSnapshot>,
+    events_dropped_threshold: u64,
+) -> bool {
+    let feedback = match feedback {
+        Some(feedback) => feedback,
+        None => return false,
+    };
+    feedback.event_queue_overflowed || feedback.events_dropped >= events_dropped_threshold
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUpControlFrame {
+    pub directive: RlmDirective,
+    pub world_state_digest: [u8; 32],
+    pub self_state_digest: [u8; 32],
+    pub last_feedback_digest: [u8; 32],
+}
+
+impl FollowUpControlFrame {
+    pub fn digest(&self) -> [u8; 32] {
+        let mut buf = Vec::new();
+        buf.push(self.directive as u8);
+        buf.extend_from_slice(&self.world_state_digest);
+        buf.extend_from_slice(&self.self_state_digest);
+        buf.extend_from_slice(&self.last_feedback_digest);
+        digest("lnss.followup.control_frame.v1", &buf)
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecursionPolicy {
     pub allow_followup: bool,
@@ -420,6 +518,9 @@ pub struct OrchestratorOutput {
     pub language_output: CoreStepOutput,
     pub rlm_output: RlmOutput,
     pub followup_output: Option<CoreStepOutput>,
+    pub deliberation_budget: DeliberationBudget,
+    pub followup_control_frame_digest: Option<[u8; 32]>,
+    pub followup_language_step_digest: Option<[u8; 32]>,
     pub recursion_used: bool,
     pub recursion_blocked: bool,
 }
@@ -438,7 +539,8 @@ impl CoreOrchestrator {
         mut context: ContextBundle,
         world_input: &WorldModelInput,
         rlm_input: &RlmInput,
-        policy: RecursionPolicy,
+        policy_view: PolicyView,
+        feedback: Option<&BiophysFeedbackSnapshot>,
     ) -> OrchestratorOutput
     where
         W: WorldModelCore + ?Sized,
@@ -450,25 +552,46 @@ impl CoreOrchestrator {
         let language_output = language.step(input, &context);
         let rlm_output = rlm.step(rlm_input);
 
-        let wants_followup = rlm_output
-            .recursion_directives
-            .iter()
-            .any(|directive| directive.kind == RecursionDirectiveKind::Followup);
-        let depth_ok = rlm_input.current_depth < policy.max_depth;
-        let allow_followup = policy.allow_followup && depth_ok;
-        let followup_output = if wants_followup && allow_followup {
+        let mut policy_view = policy_view;
+        policy_view.worldmodel_pred_error_critical =
+            world_output.prediction_error_score >= WM_PRED_ERROR_CRITICAL_THRESHOLD;
+        let deliberation_budget =
+            decide_deliberation_budget(&rlm_output.recursion_directives, &policy_view, feedback);
+        let wants_followup = deliberation_budget.selected_directive.is_some();
+        let followup_control_frame = deliberation_budget.selected_directive.map(|directive| {
+            let last_feedback_digest = feedback
+                .map(|snapshot| snapshot.snapshot_digest)
+                .unwrap_or([0; 32]);
+            FollowUpControlFrame {
+                directive,
+                world_state_digest: context.world_state_digest,
+                self_state_digest: rlm_output.self_state_digest,
+                last_feedback_digest,
+            }
+        });
+        let followup_control_frame_digest =
+            followup_control_frame.as_ref().map(|frame| frame.digest());
+        let (followup_output, followup_language_step_digest) = if deliberation_budget.allow_followup
+        {
             context.last_self_state_digest = rlm_output.self_state_digest;
-            Some(language.step(input, &context))
+            context.followup_control_frame = followup_control_frame;
+            let output = language.step(input, &context);
+            let digest = digest("lnss.followup.language_step.v1", &output.output_bytes);
+            (Some(output), Some(digest))
         } else {
-            None
+            (None, None)
         };
+        let followup_executed = followup_output.is_some();
         OrchestratorOutput {
             world_output,
             language_output,
             rlm_output,
             followup_output,
-            recursion_used: wants_followup && allow_followup,
-            recursion_blocked: wants_followup && !allow_followup,
+            deliberation_budget,
+            followup_control_frame_digest,
+            followup_language_step_digest,
+            recursion_used: wants_followup && followup_executed,
+            recursion_blocked: wants_followup && !followup_executed,
         }
     }
 }
@@ -541,7 +664,7 @@ mod tests {
 
     struct TestRlm {
         log: Arc<Mutex<Vec<&'static str>>>,
-        directives: Vec<RecursionDirective>,
+        directives: Vec<RlmDirective>,
     }
 
     impl RlmCore for TestRlm {
@@ -561,10 +684,7 @@ mod tests {
         let mut language = TestLanguage { log: log.clone() };
         let mut rlm = TestRlm {
             log: log.clone(),
-            directives: vec![RecursionDirective::new(
-                RecursionDirectiveKind::Hold,
-                "hold",
-            )],
+            directives: vec![RlmDirective::NoFollowUp],
         };
         let mut orchestrator = CoreOrchestrator;
         let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
@@ -588,7 +708,8 @@ mod tests {
             context,
             &world_input,
             &rlm_input,
-            RecursionPolicy::default(),
+            PolicyView::default(),
+            None,
         );
 
         let steps = log.lock().expect("log lock").clone();
@@ -596,16 +717,13 @@ mod tests {
     }
 
     #[test]
-    fn recursion_is_blocked_when_depth_exceeds_policy() {
+    fn recursion_is_blocked_by_policy() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let mut world = TestWorldModel { log: log.clone() };
         let mut language = TestLanguage { log: log.clone() };
         let mut rlm = TestRlm {
             log: log.clone(),
-            directives: vec![RecursionDirective::new(
-                RecursionDirectiveKind::Followup,
-                "FOLLOWUP",
-            )],
+            directives: vec![RlmDirective::FollowUpClarify],
         };
         let mut orchestrator = CoreOrchestrator;
         let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
@@ -629,13 +747,92 @@ mod tests {
             context,
             &world_input,
             &rlm_input,
-            RecursionPolicy {
-                allow_followup: true,
-                max_depth: 2,
+            PolicyView {
+                allow_internal_reflection: false,
+                feedback_drop_threshold: 1,
+                worldmodel_pred_error_critical: false,
             },
+            None,
         );
 
         assert!(output.followup_output.is_none());
         assert!(output.recursion_blocked);
+    }
+
+    #[test]
+    fn deliberation_budget_is_deterministic() {
+        let directives = vec![
+            RlmDirective::FollowUpClarify,
+            RlmDirective::FollowUpRiskScan,
+        ];
+        let policy = PolicyView {
+            allow_internal_reflection: true,
+            feedback_drop_threshold: 2,
+            worldmodel_pred_error_critical: false,
+        };
+        let feedback = BiophysFeedbackSnapshot {
+            tick: 1,
+            snapshot_digest: [4; 32],
+            event_queue_overflowed: false,
+            events_dropped: 0,
+            events_injected: 0,
+            injected_total: 0,
+        };
+        let a = decide_deliberation_budget(&directives, &policy, Some(&feedback));
+        let b = decide_deliberation_budget(&directives, &policy, Some(&feedback));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn policy_gate_blocks_followup() {
+        let directives = vec![RlmDirective::FollowUpClarify];
+        let policy = PolicyView {
+            allow_internal_reflection: false,
+            feedback_drop_threshold: 1,
+            worldmodel_pred_error_critical: false,
+        };
+        let budget = decide_deliberation_budget(&directives, &policy, None);
+        assert!(!budget.allow_followup);
+        assert!(budget
+            .reason_codes
+            .contains(&"RC.GV.RLM.RECURSION_BLOCKED_BY_POLICY".to_string()));
+    }
+
+    #[test]
+    fn overload_gate_blocks_followup() {
+        let directives = vec![RlmDirective::FollowUpClarify];
+        let policy = PolicyView {
+            allow_internal_reflection: true,
+            feedback_drop_threshold: 1,
+            worldmodel_pred_error_critical: false,
+        };
+        let feedback = BiophysFeedbackSnapshot {
+            tick: 1,
+            snapshot_digest: [4; 32],
+            event_queue_overflowed: true,
+            events_dropped: 0,
+            events_injected: 0,
+            injected_total: 0,
+        };
+        let budget = decide_deliberation_budget(&directives, &policy, Some(&feedback));
+        assert!(!budget.allow_followup);
+        assert!(budget
+            .reason_codes
+            .contains(&"RC.GV.RLM.RECURSION_BLOCKED_BY_OVERLOAD".to_string()));
+    }
+
+    #[test]
+    fn worldmodel_gate_blocks_followup() {
+        let directives = vec![RlmDirective::FollowUpClarify];
+        let policy = PolicyView {
+            allow_internal_reflection: true,
+            feedback_drop_threshold: 1,
+            worldmodel_pred_error_critical: true,
+        };
+        let budget = decide_deliberation_budget(&directives, &policy, None);
+        assert!(!budget.allow_followup);
+        assert!(budget
+            .reason_codes
+            .contains(&"RC.GV.RLM.RECURSION_BLOCKED_BY_WM".to_string()));
     }
 }
