@@ -1520,7 +1520,10 @@ impl LnssRuntime {
         };
         let constraints = ActiveConstraints {
             cooldown_active: !orchestration.deliberation_budget.allow_followup
-                && orchestration.deliberation_budget.selected_directive.is_some(),
+                && orchestration
+                    .deliberation_budget
+                    .selected_directive
+                    .is_some(),
             modulation_active: wm_modulation_reason_codes
                 .iter()
                 .any(|code| code == RC_WM_MODULATION_ACTIVE),

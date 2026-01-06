@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 
-use lnss_core::{
-    BiophysFeedbackSnapshot, CoreContextDigestPack, FeatureToBrainMap, RlmDirective,
-};
+use lnss_core::{BiophysFeedbackSnapshot, CoreContextDigestPack, FeatureToBrainMap, RlmDirective};
 use lnss_evolve::{build_proposal, Proposal, ProposalKind, ProposalPayload};
 use lnss_lifecycle::{LifecycleIndex, LifecycleKey};
 use serde::{Deserialize, Serialize};
@@ -227,8 +225,14 @@ pub fn mapping_update_plan(active_cfg: &ActiveCfg) -> MappingUpdatePlan {
     let map_digest = map.map_digest;
     let map_path = map_path_for(active_cfg.artifacts_dir.as_ref(), &map);
     let change_summary = vec![
-        format!("amplitude_q scaled by {}/{}", MAPPING_AMPLITUDE_FACTOR_NUM, MAPPING_AMPLITUDE_FACTOR_DEN),
-        format!("fanout capped to {}/{} per feature", MAPPING_FANOUT_FACTOR_NUM, MAPPING_FANOUT_FACTOR_DEN),
+        format!(
+            "amplitude_q scaled by {}/{}",
+            MAPPING_AMPLITUDE_FACTOR_NUM, MAPPING_AMPLITUDE_FACTOR_DEN
+        ),
+        format!(
+            "fanout capped to {}/{} per feature",
+            MAPPING_FANOUT_FACTOR_NUM, MAPPING_FANOUT_FACTOR_DEN
+        ),
     ];
     let payload = ProposalPayload::MappingUpdate {
         new_map_path: map_path,
@@ -313,8 +317,7 @@ pub fn tightened_mapping(active_cfg: &ActiveCfg) -> FeatureToBrainMap {
             idx += 1;
         }
         let group = &entries[start..idx];
-        let mut limit = (group.len() as u32)
-            .saturating_mul(MAPPING_FANOUT_FACTOR_NUM)
+        let mut limit = (group.len() as u32).saturating_mul(MAPPING_FANOUT_FACTOR_NUM)
             / MAPPING_FANOUT_FACTOR_DEN;
         if limit == 0 {
             limit = 1;
@@ -423,18 +426,9 @@ mod tests {
         let map = FeatureToBrainMap::new(
             1,
             vec![
-                (
-                    1,
-                    lnss_core::BrainTarget::new("r", "p", 1, "syn", 1000),
-                ),
-                (
-                    1,
-                    lnss_core::BrainTarget::new("r", "p", 2, "syn", 900),
-                ),
-                (
-                    2,
-                    lnss_core::BrainTarget::new("r", "p", 3, "syn", 800),
-                ),
+                (1, lnss_core::BrainTarget::new("r", "p", 1, "syn", 1000)),
+                (1, lnss_core::BrainTarget::new("r", "p", 2, "syn", 900)),
+                (2, lnss_core::BrainTarget::new("r", "p", 3, "syn", 800)),
             ],
         );
         ActiveCfg {
