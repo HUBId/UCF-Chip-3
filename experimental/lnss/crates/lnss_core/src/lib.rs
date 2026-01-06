@@ -456,22 +456,13 @@ pub fn decide_deliberation_budget(
 }
 
 fn select_followup_directive(directives: &[RlmDirective]) -> Option<RlmDirective> {
-    if directives
-        .iter()
-        .any(|directive| *directive == RlmDirective::FollowUpRiskScan)
-    {
+    if directives.contains(&RlmDirective::FollowUpRiskScan) {
         return Some(RlmDirective::FollowUpRiskScan);
     }
-    if directives
-        .iter()
-        .any(|directive| *directive == RlmDirective::FollowUpConsistencyCheck)
-    {
+    if directives.contains(&RlmDirective::FollowUpConsistencyCheck) {
         return Some(RlmDirective::FollowUpConsistencyCheck);
     }
-    if directives
-        .iter()
-        .any(|directive| *directive == RlmDirective::FollowUpClarify)
-    {
+    if directives.contains(&RlmDirective::FollowUpClarify) {
         return Some(RlmDirective::FollowUpClarify);
     }
     None
