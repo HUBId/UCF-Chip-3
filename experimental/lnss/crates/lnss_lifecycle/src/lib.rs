@@ -16,7 +16,7 @@ pub struct LifecycleKey {
     pub context_digest: [u8; 32],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LifecycleState {
     pub latest_trace_digest: Option<[u8; 32]>,
     pub latest_trace_verdict: Option<u8>,
@@ -25,20 +25,6 @@ pub struct LifecycleState {
     pub latest_activation_digest: Option<[u8; 32]>,
     pub latest_activation_status: Option<u8>,
     pub updated_at_tick: u64,
-}
-
-impl Default for LifecycleState {
-    fn default() -> Self {
-        Self {
-            latest_trace_digest: None,
-            latest_trace_verdict: None,
-            latest_aap_digest: None,
-            latest_approval_digest: None,
-            latest_activation_digest: None,
-            latest_activation_status: None,
-            updated_at_tick: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

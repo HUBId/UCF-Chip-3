@@ -1112,6 +1112,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnss_lifecycle"
+version = "0.1.0"
+dependencies = [
+ "chip4-pvgs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lnss_mechint"
 version = "0.1.0"
 dependencies = [
@@ -1152,6 +1161,7 @@ dependencies = [
  "lnss_core",
  "lnss_evolve",
  "lnss_hooks",
+ "lnss_lifecycle",
  "lnss_mechint",
  "lnss_rig",
  "lnss_rlm",
