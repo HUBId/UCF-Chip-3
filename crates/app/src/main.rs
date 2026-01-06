@@ -271,6 +271,7 @@ mod lnss_cli {
             last_action_digest: [0; 32],
             last_self_state_digest: [0; 32],
             pred_error_threshold: 128,
+            trigger_proposals_enabled: true,
         };
 
         let mods = EmotionFieldSnapshot::new(
