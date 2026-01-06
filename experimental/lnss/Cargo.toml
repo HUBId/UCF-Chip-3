@@ -9,6 +9,7 @@ publish = false
 members = [
     "crates/chip2",
     "crates/lnss_core",
+    "crates/lnss_lifecycle",
     "crates/lnss_worldmodulation",
     "crates/lnss_worldmodel",
     "crates/lnss_rlm",
@@ -26,6 +27,7 @@ resolver = "2"
 [features]
 default = []
 lnss = [
+    "lnss_lifecycle",
     "lnss_core",
     "lnss_worldmodulation",
     "lnss_worldmodel",
@@ -51,9 +53,11 @@ lnss-pyo3 = ["lnss_bluebridge/lnss-pyo3"]
 lnss-cxx = ["lnss_bluebridge/lnss-cxx"]
 lnss-rig-sdk = ["lnss_rig/lnss-rig-sdk"]
 lnss-chip2-bridge = ["lnss_bluebridge/lnss-chip2-bridge"]
+lnss-chip4-query = ["lnss_lifecycle/lnss-chip4-query", "lnss_runtime/lnss-chip4-query"]
 
 [dependencies]
 lnss_core = { path = "crates/lnss_core", optional = true }
+lnss_lifecycle = { path = "crates/lnss_lifecycle", optional = true }
 lnss_worldmodulation = { path = "crates/lnss_worldmodulation", optional = true }
 lnss_worldmodel = { path = "crates/lnss_worldmodel", optional = true }
 lnss_rlm = { path = "crates/lnss_rlm", optional = true }

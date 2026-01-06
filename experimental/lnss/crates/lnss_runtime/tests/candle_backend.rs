@@ -8,6 +8,7 @@ use lnss_core::{
     TapSpec,
 };
 use lnss_hooks::TapRegistry;
+use lnss_lifecycle::LifecycleIndex;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_rlm::RlmController;
@@ -142,6 +143,9 @@ fn candle_end_to_end_is_deterministic() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),

@@ -11,6 +11,7 @@ use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest, EvalContext,
     ProposalEvidence, ProposalKind,
 };
+use lnss_lifecycle::LifecycleIndex;
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter,
@@ -370,6 +371,9 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
@@ -505,6 +509,9 @@ fn proposal_commits_only_once_across_ticks() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
@@ -624,6 +631,9 @@ fn proposal_commits_are_bounded_and_ordered() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
@@ -745,6 +755,9 @@ fn local_pvgs_receives_expected_payload() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),

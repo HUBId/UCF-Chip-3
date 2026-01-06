@@ -5,6 +5,7 @@ use lnss_core::{
     FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec, MAX_TOP_FEATURES,
 };
 use lnss_hooks::TapPlan;
+use lnss_lifecycle::LifecycleIndex;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rig::InMemoryRigClient;
 use lnss_rlm::RlmController;
@@ -222,6 +223,9 @@ fn end_to_end_stub_pipeline() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
@@ -308,6 +312,9 @@ fn core_outputs_are_deterministic() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
@@ -352,6 +359,9 @@ fn core_outputs_are_deterministic() {
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),

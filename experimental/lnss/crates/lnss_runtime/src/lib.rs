@@ -29,6 +29,11 @@ use lnss_evolve::{
     EvalContext, EvalVerdict, Proposal, ProposalEvidence, ProposalKind, TraceVerdict,
 };
 use lnss_hooks::TapRegistry;
+use lnss_lifecycle::{
+    EvidenceQueryClient, LifecycleIndex, LifecycleKey, ACTIVATION_STATUS_APPLIED,
+    ACTIVATION_STATUS_REJECTED, TRACE_VERDICT_NEUTRAL, TRACE_VERDICT_PROMISING,
+    TRACE_VERDICT_RISKY,
+};
 use lnss_worldmodulation::{
     compute_world_modulation, BaseLimits, WorldModulationPlan, RC_WM_MODULATION_ACTIVE,
     RC_WM_PRED_ERROR_CRITICAL, RC_WM_PRED_ERROR_HIGH,
@@ -61,8 +66,12 @@ const RC_SHADOW_EQUAL: &str = "RC.GV.SHADOW.EQUAL";
 const RC_TRACE_PROMISING: &str = "RC.GV.TRACE.PROMISING";
 const RC_TRACE_NEUTRAL: &str = "RC.GV.TRACE.NEUTRAL";
 const RC_TRACE_RISKY: &str = "RC.GV.TRACE.RISKY";
+const RC_TRACE_DUPLICATE_SKIPPED: &str = "RC.GV.TRACE.DUPLICATE_SKIPPED";
 const RC_AAP_BLOCKED_BY_TRACE: &str = "RC.GV.AAP.BLOCKED_BY_TRACE";
+const RC_AAP_BLOCKED_ALREADY_ACTIVATED: &str = "RC.GV.AAP.BLOCKED_ALREADY_ACTIVATED";
 const RC_AAP_MISSING_CONTEXT_BINDING: &str = "RC.GV.AAP.MISSING_CONTEXT_BINDING";
+const RC_PROPOSAL_ACTIVATION_PRECONDITION_FAILED: &str =
+    "RC.GV.PROPOSAL.ACTIVATION_PRECONDITION_FAILED";
 const RC_RLM_RECURSION_STEP: &str = "RC.GV.RLM.RECURSION_STEP";
 const RC_RLM_RECURSION_BLOCKED_BY_POLICY: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_POLICY";
 const RC_RLM_RECURSION_BLOCKED_BY_OVERLOAD: &str = "RC.GV.RLM.RECURSION_BLOCKED_BY_OVERLOAD";
@@ -304,6 +313,9 @@ impl ProposalInbox {
         mechint: &mut dyn MechIntWriter,
         mut pvgs: Option<&mut (dyn PvgsClientReader + '_)>,
         trace_state: Option<&TraceRunState>,
+        lifecycle_index: &mut LifecycleIndex,
+        evidence_query: Option<&dyn EvidenceQueryClient>,
+        lifecycle_tick: u64,
     ) -> Result<usize, LnssRuntimeError> {
         if !self.should_scan() {
             return Ok(0);
@@ -319,18 +331,56 @@ impl ProposalInbox {
                     "proposal missing core context digest".to_string(),
                 ));
             }
+            let key = LifecycleKey {
+                proposal_digest: proposal.proposal_digest,
+                context_digest: proposal.core_context_digest,
+            };
+            lifecycle_index.note_proposal(key, lifecycle_tick);
+            hydrate_lifecycle_from_query(lifecycle_index, evidence_query, key, lifecycle_tick);
+            if let Some(trace_state) = trace_state.filter(|state| state.committed) {
+                let verdict = trace_verdict_code(&trace_state.verdict);
+                lifecycle_index.note_trace(key, trace_state.trace_digest, verdict, lifecycle_tick);
+            }
+            let lifecycle_state = lifecycle_index.state_for(&key).cloned().unwrap_or_default();
+            let lifecycle_trace_digest = lifecycle_state.latest_trace_digest;
+            let lifecycle_trace_verdict = lifecycle_state.latest_trace_verdict;
+            let activation_applied =
+                lifecycle_state.latest_activation_status == Some(ACTIVATION_STATUS_APPLIED);
+            let pending_approval =
+                lifecycle_state.latest_approval_digest.is_some() && !activation_applied;
+            eprintln!(
+                "lifecycle: proposal={} context={} trace_verdict={:?} trace_digest={} activation={:?}",
+                hex::encode(&key.proposal_digest[..4]),
+                hex::encode(&key.context_digest[..4]),
+                lifecycle_trace_verdict,
+                lifecycle_trace_digest
+                    .map(|digest| hex::encode(&digest[..4]))
+                    .unwrap_or_else(|| "none".to_string()),
+                lifecycle_state.latest_activation_status
+            );
             let eval = evaluate(&proposal, eval_ctx);
             let base_evidence_digest = eval_ctx.latest_feedback_digest.unwrap_or([0u8; 32]);
             let mut reason_codes = eval.reason_codes.clone();
+            let mut gating_codes = Vec::new();
             if base_evidence_digest == [0u8; 32] {
                 reason_codes.push("RC.GV.PROPOSAL.MISSING_BASE_EVIDENCE".to_string());
             }
-            if eval.verdict == EvalVerdict::Promising
-                && trace_state
-                    .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
-                    .is_none()
+            let trace_allowed = match trace_state
+                .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
             {
+                Some(state) => {
+                    lifecycle_trace_verdict == Some(TRACE_VERDICT_PROMISING)
+                        && lifecycle_trace_digest == Some(state.trace_digest)
+                }
+                None => false,
+            };
+            if eval.verdict == EvalVerdict::Promising && !trace_allowed {
                 reason_codes.push(RC_AAP_BLOCKED_BY_TRACE.to_string());
+                gating_codes.push(RC_AAP_BLOCKED_BY_TRACE.to_string());
+            }
+            if activation_applied {
+                reason_codes.push(RC_AAP_BLOCKED_ALREADY_ACTIVATED.to_string());
+                gating_codes.push(RC_AAP_BLOCKED_ALREADY_ACTIVATED.to_string());
             }
             let payload_digest = proposal_payload_digest(&proposal.payload)
                 .map_err(|err| LnssRuntimeError::Proposal(err.to_string()))?;
@@ -341,10 +391,14 @@ impl ProposalInbox {
             parts.proposal_eval_score = Some(eval.score);
             parts.proposal_verdict = Some(eval.verdict.clone());
             parts.proposal_base_evidence_digest = Some(proposal.base_evidence_digest);
+            if !gating_codes.is_empty() {
+                parts.reason_codes.extend(gating_codes.clone());
+            }
             if eval.verdict == EvalVerdict::Promising {
-                let trace_allowed = trace_state
-                    .filter(|state| state.committed && state.verdict == TraceVerdict::Promising);
-                if let Some(trace_state) = trace_allowed {
+                if trace_allowed && !activation_applied && !pending_approval {
+                    let trace_state = trace_state
+                        .filter(|state| state.committed && state.verdict == TraceVerdict::Promising)
+                        .expect("trace state");
                     let ruleset_digest = pvgs
                         .as_deref()
                         .and_then(|client| client.get_current_ruleset_digest());
@@ -371,6 +425,7 @@ impl ProposalInbox {
                     };
                     let aap_digest = approval_artifact_package_digest(&aap);
                     parts.aap_digest = Some(aap_digest);
+                    lifecycle_index.note_aap(key, aap_digest, lifecycle_tick);
                     if let Err(err) = fs::create_dir_all(&self.aap_dir) {
                         return Err(LnssRuntimeError::Proposal(err.to_string()));
                     }
@@ -462,6 +517,8 @@ pub struct ApprovalInbox {
 struct PendingAap {
     aap_digest: [u8; 32],
     proposal_digest: [u8; 32],
+    trace_digest: Option<[u8; 32]>,
+    context_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -470,6 +527,8 @@ struct ActivationPlan {
     approval: ucf::v1::ApprovalDecision,
     proposal: Proposal,
     aap_digest: [u8; 32],
+    aap_trace_digest: Option<[u8; 32]>,
+    aap_context_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -587,6 +646,8 @@ impl ApprovalInbox {
                 approval,
                 proposal,
                 aap_digest: pending.aap_digest,
+                aap_trace_digest: pending.trace_digest,
+                aap_context_digest: pending.context_digest,
             });
         }
 
@@ -626,6 +687,9 @@ pub struct LnssRuntime {
     pub shadow_rig: Option<Box<dyn RigClient>>,
     pub trace_state: Option<TraceRunState>,
     pub seen_trace_digests: BTreeSet<[u8; 32]>,
+    pub lifecycle_index: LifecycleIndex,
+    pub evidence_query_client: Option<Box<dyn EvidenceQueryClient>>,
+    pub lifecycle_tick: u64,
     pub policy_mode: PolicyMode,
     pub control_intent_class: ControlIntentClass,
     pub recursion_policy: RecursionPolicy,
@@ -1057,6 +1121,7 @@ pub struct TraceRunState {
     pub trace_digest: [u8; 32],
     pub verdict: TraceVerdict,
     pub committed: bool,
+    pub duplicate_skipped: bool,
     pub active_cfg_digest: [u8; 32],
     pub shadow_cfg_digest: [u8; 32],
     pub created_at_ms: u64,
@@ -1242,6 +1307,11 @@ impl LnssRuntime {
             self.feedback.ingest(snapshot);
         }
         let feedback_snapshot = self.feedback.last.clone();
+        let lifecycle_tick = feedback_snapshot
+            .as_ref()
+            .map(|snap| snap.tick)
+            .unwrap_or(0);
+        self.lifecycle_tick = lifecycle_tick;
         let feedback_summary = feedback_snapshot
             .as_ref()
             .map(FeedbackSummary::from_snapshot);
@@ -1252,7 +1322,7 @@ impl LnssRuntime {
             .iter()
             .map(|event| event.event_digest)
             .collect();
-        let mechint_parts = MechIntRecordParts {
+        let mut mechint_parts = MechIntRecordParts {
             session_id: session_id.to_string(),
             step_id: step_id.to_string(),
             token_digest,
@@ -1388,6 +1458,13 @@ impl LnssRuntime {
                     trace_context,
                 );
                 self.trace_state = Some(trace_state);
+                if let Some(state) = self.trace_state.as_ref() {
+                    if state.duplicate_skipped {
+                        mechint_parts
+                            .reason_codes
+                            .push(RC_TRACE_DUPLICATE_SKIPPED.to_string());
+                    }
+                }
 
                 Some(ShadowRunOutput {
                     spikes: shadow_spikes,
@@ -1435,10 +1512,13 @@ impl LnssRuntime {
                 self.mechint.as_mut(),
                 self.pvgs.as_deref_mut(),
                 self.trace_state.as_ref(),
+                &mut self.lifecycle_index,
+                self.evidence_query_client.as_deref(),
+                lifecycle_tick,
             )?;
         }
 
-        self.handle_approval_activation(&mechint_parts)?;
+        self.handle_approval_activation(&mechint_parts, lifecycle_tick)?;
 
         Ok(RuntimeOutput {
             output_bytes,
@@ -1455,6 +1535,7 @@ impl LnssRuntime {
     fn handle_approval_activation(
         &mut self,
         base_parts: &MechIntRecordParts,
+        lifecycle_tick: u64,
     ) -> Result<(), LnssRuntimeError> {
         let (plan, current_state) = match self.approval_inbox.as_mut() {
             Some(inbox) => {
@@ -1481,7 +1562,52 @@ impl LnssRuntime {
             return Ok(());
         };
 
-        let outcome = self.apply_activation_plan(&plan, &current_state);
+        let key = LifecycleKey {
+            proposal_digest: plan.proposal.proposal_digest,
+            context_digest: plan.proposal.core_context_digest,
+        };
+        hydrate_lifecycle_from_query(
+            &mut self.lifecycle_index,
+            self.evidence_query_client.as_deref(),
+            key,
+            lifecycle_tick,
+        );
+        self.lifecycle_index
+            .note_approval(key, plan.approval_digest, lifecycle_tick);
+        let lifecycle_state = self
+            .lifecycle_index
+            .state_for(&key)
+            .cloned()
+            .unwrap_or_default();
+        let activation_applied =
+            lifecycle_state.latest_activation_status == Some(ACTIVATION_STATUS_APPLIED);
+        let trace_verdict_ok =
+            lifecycle_state.latest_trace_verdict == Some(TRACE_VERDICT_PROMISING);
+        let trace_digest_ok = plan
+            .aap_trace_digest
+            .map(|digest| Some(digest) == lifecycle_state.latest_trace_digest)
+            .unwrap_or(false);
+        let context_ok = plan
+            .aap_context_digest
+            .map(|digest| digest == plan.proposal.core_context_digest)
+            .unwrap_or(true);
+        let preconditions_ok =
+            trace_verdict_ok && trace_digest_ok && context_ok && !activation_applied;
+        if !preconditions_ok {
+            eprintln!(
+                "{RC_PROPOSAL_ACTIVATION_PRECONDITION_FAILED}: proposal={} context={} trace_ok={} activation_applied={}",
+                hex::encode(&key.proposal_digest[..4]),
+                hex::encode(&key.context_digest[..4]),
+                trace_verdict_ok && trace_digest_ok && context_ok,
+                activation_applied
+            );
+        }
+
+        let outcome = if preconditions_ok {
+            self.apply_activation_plan(&plan, &current_state)
+        } else {
+            ActivationOutcome::rejected(current_state.clone())
+        };
         let activation_status = match outcome.result {
             ActivationResult::Applied => ActivationStatus::Applied,
             ActivationResult::Rejected => ActivationStatus::Rejected,
@@ -1494,13 +1620,21 @@ impl LnssRuntime {
                 .map(|feedback| feedback.tick.saturating_mul(FIXED_MS_PER_TICK))
                 .unwrap_or(0)
         });
+        let activation_reason_code = if preconditions_ok {
+            match outcome.result {
+                ActivationResult::Applied => RC_PROPOSAL_ACTIVATED.to_string(),
+                ActivationResult::Rejected => RC_PROPOSAL_REJECTED.to_string(),
+            }
+        } else {
+            RC_PROPOSAL_ACTIVATION_PRECONDITION_FAILED.to_string()
+        };
         let mut activation =
             ProposalActivationEvidenceLocal {
                 activation_id,
                 proposal_digest: plan.proposal.proposal_digest,
                 approval_digest: plan.approval_digest,
                 core_context_digest: plan.proposal.core_context_digest,
-                status: activation_status,
+                status: activation_status.clone(),
                 active_mapping_digest: outcome.state.active_mapping_digest,
                 active_sae_pack_digest: outcome.state.active_sae_pack_digest,
                 active_liquid_params_digest: outcome.state.active_liquid_params_digest,
@@ -1511,10 +1645,7 @@ impl LnssRuntime {
                     },
                 ),
                 created_at_ms,
-                reason_codes: vec![match outcome.result {
-                    ActivationResult::Applied => RC_PROPOSAL_ACTIVATED.to_string(),
-                    ActivationResult::Rejected => RC_PROPOSAL_REJECTED.to_string(),
-                }],
+                reason_codes: vec![activation_reason_code.clone()],
                 activation_digest: [0u8; 32],
             };
         let activation_pb = build_activation_evidence_pb(&activation);
@@ -1548,6 +1679,11 @@ impl LnssRuntime {
         }
 
         let mut activation_parts = base_parts.clone();
+        if !preconditions_ok {
+            activation_parts
+                .reason_codes
+                .push(RC_PROPOSAL_ACTIVATION_PRECONDITION_FAILED.to_string());
+        }
         activation_parts.proposal_digest = Some(plan.proposal.proposal_digest);
         activation_parts.proposal_kind = Some(plan.proposal.kind.clone());
         activation_parts.aap_digest = Some(plan.aap_digest);
@@ -1564,6 +1700,15 @@ impl LnssRuntime {
 
         if let Some(inbox) = self.approval_inbox.as_mut() {
             inbox.set_state(outcome.state)?;
+        }
+
+        if let Some(activation_digest) = activation_digest {
+            let status = match activation_status {
+                ActivationStatus::Applied => ACTIVATION_STATUS_APPLIED,
+                ActivationStatus::Rejected => ACTIVATION_STATUS_REJECTED,
+            };
+            self.lifecycle_index
+                .note_activation(key, activation_digest, status, lifecycle_tick);
         }
 
         Ok(())
@@ -1612,7 +1757,8 @@ impl LnssRuntime {
         trace_evidence.trace_digest = trace_digest;
         let payload_bytes = canonical_bytes(&trace_pb);
 
-        let committed = if self.seen_trace_digests.contains(&trace_digest) {
+        let duplicate_skipped = self.seen_trace_digests.contains(&trace_digest);
+        let committed = if duplicate_skipped {
             true
         } else {
             let committed = match self.pvgs.as_deref_mut() {
@@ -1635,6 +1781,7 @@ impl LnssRuntime {
             trace_digest,
             verdict,
             committed,
+            duplicate_skipped,
             active_cfg_digest: self.mapper.map_digest,
             shadow_cfg_digest: shadow_mapping_digest,
             created_at_ms,
@@ -1939,6 +2086,35 @@ fn trace_verdict_reason_code(verdict: &TraceVerdict) -> &'static str {
         TraceVerdict::Promising => RC_TRACE_PROMISING,
         TraceVerdict::Neutral => RC_TRACE_NEUTRAL,
         TraceVerdict::Risky => RC_TRACE_RISKY,
+    }
+}
+
+fn trace_verdict_code(verdict: &TraceVerdict) -> u8 {
+    match verdict {
+        TraceVerdict::Promising => TRACE_VERDICT_PROMISING,
+        TraceVerdict::Neutral => TRACE_VERDICT_NEUTRAL,
+        TraceVerdict::Risky => TRACE_VERDICT_RISKY,
+    }
+}
+
+fn hydrate_lifecycle_from_query(
+    index: &mut LifecycleIndex,
+    evidence_query: Option<&dyn EvidenceQueryClient>,
+    key: LifecycleKey,
+    tick: u64,
+) {
+    let Some(client) = evidence_query else {
+        return;
+    };
+    if let Some((trace_digest, verdict)) =
+        client.latest_trace_for(key.proposal_digest, key.context_digest)
+    {
+        index.note_trace(key, trace_digest, verdict, tick);
+    }
+    if let Some((activation_digest, status)) =
+        client.latest_activation_for(key.proposal_digest, key.context_digest)
+    {
+        index.note_activation(key, activation_digest, status, tick);
     }
 }
 
@@ -2263,12 +2439,26 @@ fn load_pending_aaps(
             Some(digest) => digest,
             None => continue,
         };
+        let trace_digest = aap
+            .evidence_refs
+            .iter()
+            .find(|reference| reference.id == "trace_digest")
+            .and_then(|reference| reference.digest.as_ref())
+            .and_then(digest_bytes);
+        let context_digest = aap
+            .evidence_refs
+            .iter()
+            .find(|reference| reference.id == "core_context_digest")
+            .and_then(|reference| reference.digest.as_ref())
+            .and_then(digest_bytes);
         if !aap.aap_id.is_empty() {
             pending.insert(
                 aap.aap_id.clone(),
                 PendingAap {
                     aap_digest,
                     proposal_digest,
+                    trace_digest,
+                    context_digest,
                 },
             );
         }

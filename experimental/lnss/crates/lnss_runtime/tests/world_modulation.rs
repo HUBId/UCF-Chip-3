@@ -3,6 +3,7 @@ use lnss_core::{
     PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec, WorldModelCore, WorldModelInput,
     WorldModelOutput,
 };
+use lnss_lifecycle::LifecycleIndex;
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     apply_world_modulation_limits, effective_top_k, map_features_to_spikes_with_limits,
@@ -96,6 +97,9 @@ fn build_runtime(prediction_error_score: i32, mapper: FeatureToBrainMap) -> Lnss
         shadow_rig: None,
         trace_state: None,
         seen_trace_digests: std::collections::BTreeSet::new(),
+        lifecycle_index: LifecycleIndex::default(),
+        evidence_query_client: None,
+        lifecycle_tick: 0,
         policy_mode: PolicyMode::Open,
         control_intent_class: ControlIntentClass::Monitor,
         recursion_policy: RecursionPolicy::default(),
