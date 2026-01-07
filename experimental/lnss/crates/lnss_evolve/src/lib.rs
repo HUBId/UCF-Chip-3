@@ -41,6 +41,7 @@ pub struct Proposal {
     pub kind: ProposalKind,
     pub created_at_ms: u64,
     pub base_evidence_digest: [u8; 32],
+    pub base_active_cfg_digest: Option<[u8; 32]>,
     pub core_context_digest_pack: CoreContextDigestPack,
     pub core_context_digest: [u8; 32],
     pub payload: ProposalPayload,
@@ -122,6 +123,8 @@ struct ProposalInput {
     kind: ProposalKind,
     created_at_ms: u64,
     base_evidence_digest: [u8; 32],
+    #[serde(default)]
+    base_active_cfg_digest: Option<[u8; 32]>,
     core_context_digest_pack: CoreContextDigestPack,
     core_context_digest: [u8; 32],
     payload: ProposalPayload,
@@ -135,6 +138,7 @@ struct ProposalCanonical<'a> {
     kind: &'a ProposalKind,
     created_at_ms: u64,
     base_evidence_digest: [u8; 32],
+    base_active_cfg_digest: Option<[u8; 32]>,
     payload: &'a ProposalPayload,
     reason_codes: &'a [String],
 }
@@ -322,6 +326,7 @@ pub fn build_proposal(
     kind: ProposalKind,
     created_at_ms: u64,
     base_evidence_digest: [u8; 32],
+    base_active_cfg_digest: Option<[u8; 32]>,
     core_context_digest_pack: CoreContextDigestPack,
     payload: ProposalPayload,
     reason_codes: Vec<String>,
@@ -332,6 +337,7 @@ pub fn build_proposal(
         &kind,
         created_at_ms,
         base_evidence_digest,
+        base_active_cfg_digest,
         &payload,
         &reason_codes,
     );
@@ -340,6 +346,7 @@ pub fn build_proposal(
         kind: &kind,
         created_at_ms,
         base_evidence_digest,
+        base_active_cfg_digest,
         payload: &payload,
         reason_codes: &reason_codes,
     };
@@ -352,6 +359,7 @@ pub fn build_proposal(
         kind,
         created_at_ms,
         base_evidence_digest,
+        base_active_cfg_digest,
         core_context_digest_pack,
         core_context_digest,
         payload,
@@ -370,6 +378,7 @@ fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError>
             &input.kind,
             input.created_at_ms,
             input.base_evidence_digest,
+            input.base_active_cfg_digest,
             &payload,
             &reason_codes,
         ),
@@ -393,6 +402,7 @@ fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError>
         kind: &input.kind,
         created_at_ms: input.created_at_ms,
         base_evidence_digest: input.base_evidence_digest,
+        base_active_cfg_digest: input.base_active_cfg_digest,
         payload: &payload,
         reason_codes: &reason_codes,
     };
@@ -405,6 +415,7 @@ fn normalize_proposal(input: ProposalInput) -> Result<Proposal, LnssEvolveError>
         kind: input.kind,
         created_at_ms: input.created_at_ms,
         base_evidence_digest: input.base_evidence_digest,
+        base_active_cfg_digest: input.base_active_cfg_digest,
         core_context_digest_pack: input.core_context_digest_pack,
         core_context_digest: input.core_context_digest,
         payload,
@@ -535,6 +546,7 @@ fn generate_proposal_id(
     kind: &ProposalKind,
     created_at_ms: u64,
     base_evidence_digest: [u8; 32],
+    base_active_cfg_digest: Option<[u8; 32]>,
     payload: &ProposalPayload,
     reason_codes: &[String],
 ) -> String {
@@ -543,6 +555,7 @@ fn generate_proposal_id(
         kind,
         created_at_ms,
         base_evidence_digest,
+        base_active_cfg_digest,
         payload,
         reason_codes,
     };
@@ -805,6 +818,7 @@ mod tests {
             kind: ProposalKind::InjectionLimitsUpdate,
             created_at_ms: 1,
             base_evidence_digest: [0; 32],
+            base_active_cfg_digest: None,
             core_context_digest_pack: core_context_pack(1),
             core_context_digest: core_context_pack(1).digest(),
             payload: ProposalPayload::InjectionLimitsUpdate {

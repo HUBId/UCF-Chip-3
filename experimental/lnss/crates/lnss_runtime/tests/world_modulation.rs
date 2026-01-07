@@ -85,6 +85,8 @@ fn build_runtime(prediction_error_score: i32, mapper: FeatureToBrainMap) -> Lnss
         },
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: lnss_runtime::FeedbackConsumer::default(),

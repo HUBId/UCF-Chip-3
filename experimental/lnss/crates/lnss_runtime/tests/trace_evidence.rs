@@ -14,9 +14,9 @@ use lnss_evolve::trace_encoding::{
 use lnss_lifecycle::{LifecycleIndex, LifecycleKey, ACTIVATION_STATUS_APPLIED};
 use lnss_rlm::RlmController;
 use lnss_runtime::{
-    BrainSpike, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
-    MechIntRecord, MechIntWriter, ProposalInbox, RigClient, SaeBackend, ShadowConfig,
-    StubHookProvider, StubLlmBackend, StubRigClient,
+    cfg_root_digest_pack, BrainSpike, CfgRootDigestInputs, FeedbackConsumer, InjectionLimits,
+    Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter, ProposalInbox,
+    RigClient, SaeBackend, ShadowConfig, StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_worldmodel::WorldModelCoreStub;
 use prost::Message;
@@ -533,6 +533,8 @@ fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
         injection_limits: fixture.injection_limits,
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -1005,6 +1007,7 @@ fn aap_is_blocked_after_activation_applied() {
     let key = LifecycleKey {
         proposal_digest: proposal.proposal_digest,
         context_digest: proposal.core_context_digest,
+        active_cfg_root_digest: proposal.base_active_cfg_digest,
     };
     runtime
         .lifecycle_index
@@ -1028,6 +1031,116 @@ fn aap_is_blocked_after_activation_applied() {
         0
     };
     assert_eq!(aap_count, 0);
+}
+
+#[test]
+fn trace_evidence_uses_cfg_root_digests() {
+    let pvgs_inner = std::sync::Arc::new(std::sync::Mutex::new(MockPvgsClient::default()));
+    let pvgs_handle = pvgs_inner.clone();
+
+    let feature_ids = vec![1u32, 2u32];
+    let mapper = mapping_for_features(&feature_ids, 2);
+    let shadow_mapping = mapping_for_features(&feature_ids[..1], 1);
+
+    let mut runtime = runtime_with_shadow(RuntimeFixture {
+        pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
+        proposal_inbox: None,
+        injection_limits: InjectionLimits {
+            max_spikes_per_tick: 4,
+            max_targets_per_spike: 4,
+        },
+        shadow: ShadowConfig {
+            enabled: true,
+            shadow_mapping: Some(shadow_mapping),
+            #[cfg(feature = "lnss-liquid-ode")]
+            shadow_liquid_params: None,
+            shadow_injection_limits: None,
+        },
+        shadow_rig: None,
+        mapper,
+        sae: Box::new(FixedSaeBackend::new(vec![(1, 1000), (2, 1000)])),
+        rig: Box::new(StubRigClient::default()),
+    });
+
+    let tap_spec = TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid");
+    runtime
+        .run_step(
+            "session-1",
+            "step-1",
+            b"input",
+            &default_mods(),
+            std::slice::from_ref(&tap_spec),
+        )
+        .expect("runtime step");
+
+    let committed = pvgs_handle
+        .lock()
+        .expect("pvgs lock")
+        .committed_trace_run_bytes
+        .clone();
+    assert_eq!(committed.len(), 1);
+    let evidence =
+        ucf::v1::TraceRunEvidence::decode(committed[0].as_slice()).expect("decode trace evidence");
+    let active_cfg_digest: [u8; 32] = evidence
+        .active_cfg_digest
+        .as_ref()
+        .expect("active cfg digest")
+        .value
+        .as_slice()
+        .try_into()
+        .expect("active cfg bytes");
+    let shadow_cfg_digest: [u8; 32] = evidence
+        .shadow_cfg_digest
+        .as_ref()
+        .expect("shadow cfg digest")
+        .value
+        .as_slice()
+        .try_into()
+        .expect("shadow cfg bytes");
+
+    let world_cfg = runtime.worldmodel.cfg_snapshot();
+    let rlm_cfg = runtime.rlm.cfg_snapshot();
+    let active_pack = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: runtime.llm.as_ref(),
+        tap_specs: std::slice::from_ref(&tap_spec),
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: runtime.active_sae_pack_digest,
+        mapping: &runtime.mapper,
+        limits: &runtime.limits,
+        injection_limits: &runtime.injection_limits,
+        amplitude_cap_q: lnss_runtime::DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: runtime.active_liquid_params_digest,
+    })
+    .expect("active cfg pack");
+    let shadow_mapping = runtime
+        .shadow
+        .shadow_mapping
+        .as_ref()
+        .expect("shadow mapping");
+    let shadow_limits = runtime
+        .shadow
+        .shadow_injection_limits
+        .as_ref()
+        .unwrap_or(&runtime.injection_limits);
+    let shadow_pack = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: runtime.llm.as_ref(),
+        tap_specs: std::slice::from_ref(&tap_spec),
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: runtime.active_sae_pack_digest,
+        mapping: shadow_mapping,
+        limits: &runtime.limits,
+        injection_limits: shadow_limits,
+        amplitude_cap_q: lnss_runtime::DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: runtime.active_liquid_params_digest,
+    })
+    .expect("shadow cfg pack");
+
+    assert_eq!(active_cfg_digest, active_pack.root_cfg_digest);
+    assert_eq!(shadow_cfg_digest, shadow_pack.root_cfg_digest);
 }
 
 #[test]

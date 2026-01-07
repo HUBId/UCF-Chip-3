@@ -14,6 +14,8 @@ pub const ACTIVATION_STATUS_REJECTED: u8 = 2;
 pub struct LifecycleKey {
     pub proposal_digest: [u8; 32],
     pub context_digest: [u8; 32],
+    #[serde(default)]
+    pub active_cfg_root_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -159,6 +161,7 @@ impl MockEvidenceQueryClient {
         let key = LifecycleKey {
             proposal_digest,
             context_digest,
+            active_cfg_root_digest: None,
         };
         self.latest_trace.insert(key, (trace_digest, verdict));
     }
@@ -173,6 +176,7 @@ impl MockEvidenceQueryClient {
         let key = LifecycleKey {
             proposal_digest,
             context_digest,
+            active_cfg_root_digest: None,
         };
         self.latest_activation
             .insert(key, (activation_digest, status));
@@ -188,6 +192,7 @@ impl EvidenceQueryClient for MockEvidenceQueryClient {
         let key = LifecycleKey {
             proposal_digest,
             context_digest,
+            active_cfg_root_digest: None,
         };
         self.latest_trace.get(&key).copied()
     }
@@ -200,6 +205,7 @@ impl EvidenceQueryClient for MockEvidenceQueryClient {
         let key = LifecycleKey {
             proposal_digest,
             context_digest,
+            active_cfg_root_digest: None,
         };
         self.latest_activation.get(&key).copied()
     }
@@ -241,6 +247,7 @@ mod tests {
         let key = LifecycleKey {
             proposal_digest: [1u8; 32],
             context_digest: [2u8; 32],
+            active_cfg_root_digest: None,
         };
         let mut index_a = LifecycleIndex::default();
         let mut index_b = LifecycleIndex::default();
@@ -265,6 +272,7 @@ mod tests {
         let key = LifecycleKey {
             proposal_digest: [9u8; 32],
             context_digest: [8u8; 32],
+            active_cfg_root_digest: None,
         };
         let mut index = LifecycleIndex::default();
         index.note_trace(key, [1u8; 32], TRACE_VERDICT_PROMISING, 10);

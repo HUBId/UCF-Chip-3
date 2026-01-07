@@ -402,6 +402,8 @@ fn aap_fixture(dir: &Path, proposal: &lnss_evolve::Proposal) -> ucf::v1::Approva
         current_liquid_params_digest: None,
         latest_scorecard_digest: None,
         trace_digest: Some(TEST_TRACE_DIGEST),
+        active_cfg_root_digest: Some([1u8; 32]),
+        shadow_cfg_root_digest: Some([2u8; 32]),
         requested_operation: ucf::v1::OperationCategory::OpException,
     };
     let aap = build_aap_for_proposal(proposal, &ctx).expect("aap");
@@ -472,6 +474,8 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         injection_limits: InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
+        active_cfg_root_digest: None,
+        shadow_cfg_root_digest: None,
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -505,6 +509,7 @@ fn seed_lifecycle_for_proposal(runtime: &mut LnssRuntime, proposal: &lnss_evolve
     let key = LifecycleKey {
         proposal_digest: proposal.proposal_digest,
         context_digest: proposal.core_context_digest,
+        active_cfg_root_digest: proposal.base_active_cfg_digest,
     };
     runtime
         .lifecycle_index
@@ -894,6 +899,7 @@ fn activation_precondition_failure_rejects() {
     let key = LifecycleKey {
         proposal_digest: proposal.proposal_digest,
         context_digest: proposal.core_context_digest,
+        active_cfg_root_digest: proposal.base_active_cfg_digest,
     };
     runtime
         .lifecycle_index

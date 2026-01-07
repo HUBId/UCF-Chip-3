@@ -2,8 +2,8 @@
 
 use blake3::Hasher;
 use lnss_core::{
-    ControlIntentClass, FeedbackAnomalyFlags, PolicyMode, RlmCore, RlmDirective, RlmInput,
-    RlmOutput, MAX_RLM_DIRECTIVES,
+    ControlIntentClass, FeedbackAnomalyFlags, PolicyMode, RlmCfgSnapshot, RlmCore, RlmDirective,
+    RlmInput, RlmOutput, MAX_RLM_DIRECTIVES,
 };
 
 #[derive(Debug, Clone)]
@@ -64,6 +64,19 @@ impl RlmCore for RlmController {
         RlmOutput {
             recursion_directives: directives,
             self_state_digest,
+        }
+    }
+
+    fn cfg_snapshot(&self) -> RlmCfgSnapshot {
+        RlmCfgSnapshot {
+            recursion_depth_cap: self.config.max_depth,
+            directive_set: vec![
+                RlmDirective::FollowUpRiskScan,
+                RlmDirective::FollowUpConsistencyCheck,
+                RlmDirective::FollowUpClarify,
+                RlmDirective::NoFollowUp,
+            ],
+            max_directives: self.config.max_directives.min(u8::MAX as usize) as u8,
         }
     }
 }
