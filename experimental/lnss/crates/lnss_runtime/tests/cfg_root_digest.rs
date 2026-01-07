@@ -1,7 +1,8 @@
-use lnss_core::{FeatureToBrainMap, TapKind, TapSpec};
+use lnss_core::{FeatureToBrainMap, RlmCore, TapKind, TapSpec, WorldModelCore};
 use lnss_rlm::RlmController;
 use lnss_runtime::{
-    cfg_root_digest_pack, InjectionLimits, Limits, StubLlmBackend, DEFAULT_AMPLITUDE_CAP_Q,
+    cfg_root_digest_pack, CfgRootDigestInputs, InjectionLimits, Limits, StubLlmBackend,
+    DEFAULT_AMPLITUDE_CAP_Q,
 };
 use lnss_worldmodel::WorldModelCoreStub;
 
@@ -34,33 +35,33 @@ fn cfg_root_digest_is_deterministic() {
     let world_cfg = worldmodel.cfg_snapshot();
     let rlm_cfg = rlm.cfg_snapshot();
 
-    let first = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &mapping,
-        &limits,
-        &injection_limits,
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let first = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &mapping,
+        limits: &limits,
+        injection_limits: &injection_limits,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
-    let second = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &mapping,
-        &limits,
-        &injection_limits,
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let second = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &mapping,
+        limits: &limits,
+        injection_limits: &injection_limits,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
 
     assert_eq!(first.root_cfg_digest, second.root_cfg_digest);
@@ -72,52 +73,52 @@ fn cfg_root_digest_changes_with_limits_or_mapping() {
     let mapping = sample_mapping(1, 900);
     let world_cfg = worldmodel.cfg_snapshot();
     let rlm_cfg = rlm.cfg_snapshot();
-    let baseline = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &mapping,
-        &limits,
-        &injection_limits,
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let baseline = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &mapping,
+        limits: &limits,
+        injection_limits: &injection_limits,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
 
     injection_limits.max_spikes_per_tick += 1;
-    let updated_limits = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &mapping,
-        &limits,
-        &injection_limits,
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let updated_limits = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &mapping,
+        limits: &limits,
+        injection_limits: &injection_limits,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
     assert_ne!(baseline.root_cfg_digest, updated_limits.root_cfg_digest);
 
     let mapping_changed = sample_mapping(2, 900);
-    let updated_mapping = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &mapping_changed,
-        &limits,
-        &InjectionLimits::default(),
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let updated_mapping = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &mapping_changed,
+        limits: &limits,
+        injection_limits: &InjectionLimits::default(),
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
     assert_ne!(baseline.root_cfg_digest, updated_mapping.root_cfg_digest);
 }
@@ -129,50 +130,50 @@ fn shadow_cfg_root_digest_changes_only_with_shadow_config() {
     let world_cfg = worldmodel.cfg_snapshot();
     let rlm_cfg = rlm.cfg_snapshot();
 
-    let active = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &mapping,
-        &limits,
-        &injection_limits,
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let active = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &mapping,
+        limits: &limits,
+        injection_limits: &injection_limits,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
-    let shadow_same = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &mapping,
-        &limits,
-        &injection_limits,
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let shadow_same = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &mapping,
+        limits: &limits,
+        injection_limits: &injection_limits,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
     assert_eq!(active.root_cfg_digest, shadow_same.root_cfg_digest);
 
     let shadow_mapping = sample_mapping(1, 800);
-    let shadow_changed = cfg_root_digest_pack(
-        &llm,
-        &tap_specs,
-        &world_cfg,
-        &rlm_cfg,
-        Some([7u8; 32]),
-        &shadow_mapping,
-        &limits,
-        &injection_limits,
-        DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        None,
-    )
+    let shadow_changed = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: &llm,
+        tap_specs: &tap_specs,
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: Some([7u8; 32]),
+        mapping: &shadow_mapping,
+        limits: &limits,
+        injection_limits: &injection_limits,
+        amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: None,
+    })
     .expect("cfg pack");
     assert_ne!(active.root_cfg_digest, shadow_changed.root_cfg_digest);
 }
