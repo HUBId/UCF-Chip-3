@@ -2,7 +2,8 @@ use std::fs;
 
 use lnss_core::{
     BrainTarget, ControlIntentClass, DeliberationBudget, EmotionFieldSnapshot, FeatureEvent,
-    FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec, MAX_TOP_FEATURES,
+    FeatureToBrainMap, PolicyMode, RecursionPolicy, RlmCoreAdapter, TapFrame, TapKind, TapSpec,
+    WorldModelCoreAdapter, MAX_TOP_FEATURES,
 };
 use lnss_hooks::TapPlan;
 use lnss_lifecycle::LifecycleIndex;
@@ -12,7 +13,7 @@ use lnss_rlm::RlmController;
 use lnss_runtime::{
     map_features_to_spikes, BiophysFeedbackSnapshot, FeedbackConsumer, Limits, LnssRuntime,
     MappingAdaptationConfig, MappingAdaptationSuggestion, MechIntRecord, MechIntRecordParts,
-    StubHookProvider, StubLlmBackend, TapSummary,
+    RuntimeLanguageBackend, StubHookProvider, StubLlmBackend, TapSummary,
 };
 use lnss_sae::StubSaeBackend;
 use lnss_worldmodel::WorldModelCoreStub;
@@ -194,25 +195,35 @@ fn end_to_end_stub_pipeline() {
     let mechint = JsonlMechIntWriter::new(&tmp_path, Some(1024)).expect("jsonl writer");
     let rig = InMemoryRigClient::default();
 
-    let mut runtime = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame.clone()],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    let mut runtime = LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
         rig: Box::new(rig),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -280,14 +291,22 @@ fn core_outputs_are_deterministic() {
         )],
     );
 
-    let mut runtime_a = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend_a = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame.clone()],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend_a = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend_a = RlmCoreAdapter::new(RlmController::default());
+    let mut runtime_a = LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend_a),
+            Box::new(language_backend_a),
+            Box::new(rlm_backend_a),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(
             JsonlMechIntWriter::new(
@@ -299,12 +318,14 @@ fn core_outputs_are_deterministic() {
         pvgs: None,
         rig: Box::new(InMemoryRigClient::default()),
         mapper: mapper.clone(),
-        limits: Limits::default(),
+        limits: limits.clone(),
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -330,14 +351,19 @@ fn core_outputs_are_deterministic() {
         trigger_proposals_enabled: false,
     };
 
+    let language_backend_b = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider { taps: vec![tap_frame] }),
+        limits.clone(),
+    );
+    let worldmodel_backend_b = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend_b = RlmCoreAdapter::new(RlmController::default());
     let mut runtime_b = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
-            taps: vec![tap_frame],
-        }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend_b),
+            Box::new(language_backend_b),
+            Box::new(rlm_backend_b),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(
             JsonlMechIntWriter::new(
@@ -349,12 +375,14 @@ fn core_outputs_are_deterministic() {
         pvgs: None,
         rig: Box::new(InMemoryRigClient::default()),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

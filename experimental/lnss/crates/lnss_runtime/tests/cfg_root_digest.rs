@@ -1,10 +1,10 @@
-use lnss_core::{FeatureToBrainMap, RlmCore, TapKind, TapSpec, WorldModelCore};
-use lnss_rlm::RlmController;
-use lnss_runtime::{
-    cfg_root_digest_pack, CfgRootDigestInputs, InjectionLimits, Limits, StubLlmBackend,
-    DEFAULT_AMPLITUDE_CAP_Q,
+use lnss_core::{
+    BackendCfgDigestPack, FeatureToBrainMap, LanguageBackend, StubLanguageBackend, StubRlmBackend,
+    StubWorldModelBackend, TapKind, TapSpec,
 };
-use lnss_worldmodel::WorldModelCoreStub;
+use lnss_runtime::{
+    cfg_root_digest_pack, CfgRootDigestInputs, InjectionLimits, Limits, DEFAULT_AMPLITUDE_CAP_Q,
+};
 
 fn sample_mapping(version: u32, amplitude_q: u16) -> FeatureToBrainMap {
     let target = lnss_core::BrainTarget::new("v1", "pop", 1, "syn", amplitude_q);
@@ -12,34 +12,33 @@ fn sample_mapping(version: u32, amplitude_q: u16) -> FeatureToBrainMap {
 }
 
 fn base_inputs() -> (
-    StubLlmBackend,
+    BackendCfgDigestPack,
     Vec<TapSpec>,
-    WorldModelCoreStub,
-    RlmController,
     Limits,
     InjectionLimits,
 ) {
-    let llm = StubLlmBackend;
+    let llm = StubLanguageBackend::default();
     let tap_specs = vec![TapSpec::new("hook-a", TapKind::ResidualStream, 0, "resid")];
-    let worldmodel = WorldModelCoreStub;
-    let rlm = RlmController::default();
+    let worldmodel = StubWorldModelBackend::default();
+    let rlm = StubRlmBackend::default();
     let limits = Limits::default();
     let injection_limits = InjectionLimits::default();
-    (llm, tap_specs, worldmodel, rlm, limits, injection_limits)
+    let backend_cfg_digests = BackendCfgDigestPack {
+        language_cfg_digest: llm.cfg_digest(),
+        worldmodel_cfg_digest: worldmodel.cfg_digest(),
+        rlm_cfg_digest: rlm.cfg_digest(),
+    };
+    (backend_cfg_digests, tap_specs, limits, injection_limits)
 }
 
 #[test]
 fn cfg_root_digest_is_deterministic() {
-    let (llm, tap_specs, worldmodel, rlm, limits, injection_limits) = base_inputs();
+    let (backend_cfg_digests, tap_specs, limits, injection_limits) = base_inputs();
     let mapping = sample_mapping(1, 900);
-    let world_cfg = worldmodel.cfg_snapshot();
-    let rlm_cfg = rlm.cfg_snapshot();
 
     let first = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &mapping,
         limits: &limits,
@@ -50,10 +49,8 @@ fn cfg_root_digest_is_deterministic() {
     })
     .expect("cfg pack");
     let second = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &mapping,
         limits: &limits,
@@ -69,15 +66,11 @@ fn cfg_root_digest_is_deterministic() {
 
 #[test]
 fn cfg_root_digest_changes_with_limits_or_mapping() {
-    let (llm, tap_specs, worldmodel, rlm, limits, mut injection_limits) = base_inputs();
+    let (backend_cfg_digests, tap_specs, limits, mut injection_limits) = base_inputs();
     let mapping = sample_mapping(1, 900);
-    let world_cfg = worldmodel.cfg_snapshot();
-    let rlm_cfg = rlm.cfg_snapshot();
     let baseline = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &mapping,
         limits: &limits,
@@ -90,10 +83,8 @@ fn cfg_root_digest_changes_with_limits_or_mapping() {
 
     injection_limits.max_spikes_per_tick += 1;
     let updated_limits = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &mapping,
         limits: &limits,
@@ -107,10 +98,8 @@ fn cfg_root_digest_changes_with_limits_or_mapping() {
 
     let mapping_changed = sample_mapping(2, 900);
     let updated_mapping = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &mapping_changed,
         limits: &limits,
@@ -125,16 +114,12 @@ fn cfg_root_digest_changes_with_limits_or_mapping() {
 
 #[test]
 fn shadow_cfg_root_digest_changes_only_with_shadow_config() {
-    let (llm, tap_specs, worldmodel, rlm, limits, injection_limits) = base_inputs();
+    let (backend_cfg_digests, tap_specs, limits, injection_limits) = base_inputs();
     let mapping = sample_mapping(1, 900);
-    let world_cfg = worldmodel.cfg_snapshot();
-    let rlm_cfg = rlm.cfg_snapshot();
 
     let active = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &mapping,
         limits: &limits,
@@ -145,10 +130,8 @@ fn shadow_cfg_root_digest_changes_only_with_shadow_config() {
     })
     .expect("cfg pack");
     let shadow_same = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &mapping,
         limits: &limits,
@@ -162,10 +145,8 @@ fn shadow_cfg_root_digest_changes_only_with_shadow_config() {
 
     let shadow_mapping = sample_mapping(1, 800);
     let shadow_changed = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: &llm,
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: &tap_specs,
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: Some([7u8; 32]),
         mapping: &shadow_mapping,
         limits: &limits,

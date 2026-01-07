@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_core::{
     digest, BiophysFeedbackSnapshot, BrainTarget, ControlIntentClass, CoreContextDigestPack,
-    EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame,
-    TapKind, TapSpec,
+    EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, PolicyMode, RecursionPolicy,
+    RlmCoreAdapter, TapFrame, TapKind, TapSpec, WorldModelCoreAdapter,
 };
 use lnss_evolve::load_proposals;
 use lnss_evolve::trace_encoding::{
@@ -16,7 +16,8 @@ use lnss_rlm::RlmController;
 use lnss_runtime::{
     cfg_root_digest_pack, BrainSpike, CfgRootDigestInputs, FeedbackConsumer, InjectionLimits,
     Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter, ProposalInbox,
-    RigClient, SaeBackend, ShadowConfig, StubHookProvider, StubLlmBackend, StubRigClient,
+    RigClient, RuntimeLanguageBackend, SaeBackend, ShadowConfig, StubHookProvider, StubLlmBackend,
+    StubRigClient,
 };
 use lnss_worldmodel::WorldModelCoreStub;
 use prost::Message;
@@ -516,25 +517,35 @@ struct RuntimeFixture {
 }
 
 fn runtime_with_shadow(fixture: RuntimeFixture) -> LnssRuntime {
-    LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![TapFrame::new("hook-a", vec![1, 2, 3])],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: fixture.sae,
         mechint: Box::new(RecordingWriter::default()),
         pvgs: fixture.pvgs,
         rig: fixture.rig,
         mapper: fixture.mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: fixture.injection_limits,
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -1098,13 +1109,10 @@ fn trace_evidence_uses_cfg_root_digests() {
         .try_into()
         .expect("shadow cfg bytes");
 
-    let world_cfg = runtime.worldmodel.cfg_snapshot();
-    let rlm_cfg = runtime.rlm.cfg_snapshot();
+    let backend_cfg_digests = runtime.orchestrator.backend_cfg_digests();
     let active_pack = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: runtime.llm.as_ref(),
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: std::slice::from_ref(&tap_spec),
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: runtime.active_sae_pack_digest,
         mapping: &runtime.mapper,
         limits: &runtime.limits,
@@ -1125,10 +1133,8 @@ fn trace_evidence_uses_cfg_root_digests() {
         .as_ref()
         .unwrap_or(&runtime.injection_limits);
     let shadow_pack = cfg_root_digest_pack(CfgRootDigestInputs {
-        llm: runtime.llm.as_ref(),
+        backend_cfg_digests: &backend_cfg_digests,
         tap_specs: std::slice::from_ref(&tap_spec),
-        worldmodel_cfg: &world_cfg,
-        rlm_cfg: &rlm_cfg,
         sae_pack_digest: runtime.active_sae_pack_digest,
         mapping: shadow_mapping,
         limits: &runtime.limits,

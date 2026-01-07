@@ -1,14 +1,14 @@
 use lnss_core::{
     BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
-    PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec, WorldModelCore, WorldModelInput,
-    WorldModelOutput,
+    PolicyMode, RecursionPolicy, RlmCoreAdapter, TapFrame, TapKind, TapSpec, WorldModelCore,
+    WorldModelCoreAdapter, WorldModelInput, WorldModelOutput,
 };
 use lnss_lifecycle::LifecycleIndex;
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     apply_world_modulation_limits, effective_top_k, map_features_to_spikes_with_limits,
     InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig, MechIntWriter,
-    SpikeBudgetResult, StubHookProvider, StubLlmBackend,
+    RuntimeLanguageBackend, SpikeBudgetResult, StubHookProvider, StubLlmBackend,
 };
 use lnss_worldmodulation::{compute_world_modulation, BaseLimits, RC_WM_MODULATION_ACTIVE};
 
@@ -63,22 +63,30 @@ impl MechIntWriter for RecordingWriter {
 
 fn build_runtime(prediction_error_score: i32, mapper: FeatureToBrainMap) -> LnssRuntime {
     let tap_frame = TapFrame::new("hook-a", vec![1, 2, 3]);
-    LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(FixedWorldModel {
-            prediction_error_score,
-        }),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(FixedWorldModel {
+        prediction_error_score,
+    });
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(FixedSaeBackend::new(vec![(1, 900), (2, 800), (3, 700)])),
         mechint: Box::new(RecordingWriter),
         pvgs: None,
         rig: Box::new(lnss_runtime::StubRigClient::default()),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: InjectionLimits {
             max_spikes_per_tick: 9,
             max_targets_per_spike: 3,
@@ -87,6 +95,8 @@ fn build_runtime(prediction_error_score: i32, mapper: FeatureToBrainMap) -> Lnss
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: lnss_runtime::FeedbackConsumer::default(),

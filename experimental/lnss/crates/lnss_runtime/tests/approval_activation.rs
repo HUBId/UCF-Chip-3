@@ -8,15 +8,16 @@ use lnss_approval::{
 };
 use lnss_core::{
     BrainTarget, ControlIntentClass, CoreContextDigestPack, EmotionFieldSnapshot,
-    FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
+    FeatureToBrainMap, PolicyMode, RecursionPolicy, RlmCoreAdapter, TapFrame, TapKind, TapSpec,
+    WorldModelCoreAdapter,
 };
 use lnss_evolve::load_proposals;
 use lnss_lifecycle::{LifecycleIndex, LifecycleKey, TRACE_VERDICT_PROMISING, TRACE_VERDICT_RISKY};
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     ApprovalInbox, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime, MappingAdaptationConfig,
-    MechIntRecord, MechIntWriter, StubHookProvider, StubLlmBackend, StubRigClient,
-    FILE_DIGEST_DOMAIN,
+    MechIntRecord, MechIntWriter, RuntimeLanguageBackend, StubHookProvider, StubLlmBackend,
+    StubRigClient, FILE_DIGEST_DOMAIN,
 };
 use lnss_sae::StubSaeBackend;
 use lnss_worldmodel::WorldModelCoreStub;
@@ -457,25 +458,35 @@ fn runtime_fixture(dir: &Path, writer: RecordingWriter) -> LnssRuntime {
         )],
     );
 
-    LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(writer),
         pvgs: None,
         rig: Box::new(StubRigClient::default()),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

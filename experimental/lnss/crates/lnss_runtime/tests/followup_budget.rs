@@ -5,15 +5,16 @@ use std::sync::{
 
 use lnss_core::{
     BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
-    RecursionPolicy, RlmDirective, TapFrame, TapKind, TapSpec, WorldModelCore, WorldModelInput,
-    WorldModelOutput,
+    RecursionPolicy, RlmCoreAdapter, RlmDirective, TapFrame, TapKind, TapSpec, WorldModelCore,
+    WorldModelCoreAdapter, WorldModelInput, WorldModelOutput,
 };
 use lnss_hooks::TapPlan;
 use lnss_lifecycle::LifecycleIndex;
 use lnss_mechint::JsonlMechIntWriter;
 use lnss_rlm::RlmController;
 use lnss_runtime::{
-    HookProvider, Limits, LnssRuntime, MappingAdaptationConfig, StubLlmBackend, StubRigClient,
+    HookProvider, Limits, LnssRuntime, MappingAdaptationConfig, RuntimeLanguageBackend,
+    StubLlmBackend, StubRigClient,
 };
 use lnss_sae::StubSaeBackend;
 struct SequencedHookProvider {
@@ -46,26 +47,33 @@ fn build_runtime(hooks: SequencedHookProvider) -> (LnssRuntime, Arc<AtomicUsize>
     let mechint = JsonlMechIntWriter::new(&tmp_path, Some(1024)).expect("jsonl writer");
     let mapper = FeatureToBrainMap::new(1, vec![(0, BrainTarget::new("r", "p", 1, "syn", 500))]);
     let call_count = hooks.call_count.clone();
+    let limits = Limits {
+        max_taps: 3,
+        ..Limits::default()
+    };
+    let language_backend =
+        RuntimeLanguageBackend::new(Box::new(StubLlmBackend), Box::new(hooks), limits.clone());
+    let worldmodel_backend = WorldModelCoreAdapter::new(CalmWorldModel);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
     let runtime = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(hooks),
-        worldmodel: Box::new(CalmWorldModel),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
         rig: Box::new(StubRigClient::new()),
         mapper,
-        limits: Limits {
-            max_taps: 3,
-            ..Limits::default()
-        },
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: lnss_runtime::FeedbackConsumer::default(),

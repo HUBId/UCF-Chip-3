@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 use blake3::Hasher;
+#[cfg(any(feature = "lang-candle", feature = "wm-candle", feature = "rlm-candle", test))]
+use lnss_assets::{asset_handle_digest, AssetHandle};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -14,6 +16,14 @@ pub const MAX_OVERLAYS: usize = 16;
 pub const MAX_RLM_DIRECTIVES: usize = 3;
 pub const MAX_RLM_REASON_CODES: usize = 12;
 pub const WM_PRED_ERROR_CRITICAL_THRESHOLD: i32 = 80;
+pub const RC_ASSET_VERIFIED: &str = "RC.GV.ASSET.VERIFIED";
+pub const RC_ASSET_DIGEST_MISMATCH: &str = "RC.GV.ASSET.DIGEST_MISMATCH";
+pub const RC_LANG_BACKEND_ASSET_MISSING: &str = "RC.GV.LANG.BACKEND_ASSET_MISSING";
+pub const RC_WM_BACKEND_ASSET_MISSING: &str = "RC.GV.WM.BACKEND_ASSET_MISSING";
+pub const RC_RLM_BACKEND_ASSET_MISSING: &str = "RC.GV.RLM.BACKEND_ASSET_MISSING";
+const LANG_CFG_DOMAIN: &str = "lnss.language_cfg.v2";
+const WM_CFG_DOMAIN: &str = "lnss.worldmodel_cfg.v2";
+const RLM_CFG_DOMAIN: &str = "lnss.rlm_cfg.v2";
 
 #[derive(Debug, Error)]
 pub enum LnssCoreError {
@@ -154,6 +164,10 @@ fn write_u32(buf: &mut Vec<u8>, value: u32) {
 }
 
 fn write_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_i64(buf: &mut Vec<u8>, value: i64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -354,6 +368,42 @@ fn mapping_digest(map_version: u32, entries: &[(u32, BrainTarget)]) -> [u8; 32] 
     digest("lnss.feature_map.v1", &buf)
 }
 
+pub fn language_cfg_digest(backend_cfg_digest: [u8; 32], hook_digest: [u8; 32]) -> [u8; 32] {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&backend_cfg_digest);
+    buf.extend_from_slice(&hook_digest);
+    digest(LANG_CFG_DOMAIN, &buf)
+}
+
+pub fn worldmodel_cfg_digest(snapshot: &WorldModelCfgSnapshot) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_string(&mut buf, &snapshot.mode);
+    write_string(&mut buf, &snapshot.encoder_id);
+    write_string(&mut buf, &snapshot.predictor_id);
+    let mut constants = snapshot.constants.clone();
+    constants.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    write_u32(&mut buf, constants.len() as u32);
+    for (name, value) in constants {
+        write_string(&mut buf, &name);
+        write_i64(&mut buf, value);
+    }
+    digest(WM_CFG_DOMAIN, &buf)
+}
+
+pub fn rlm_cfg_digest(snapshot: &RlmCfgSnapshot) -> [u8; 32] {
+    let mut buf = Vec::new();
+    buf.push(snapshot.recursion_depth_cap);
+    let mut directives = snapshot.directive_set.clone();
+    directives.sort();
+    directives.dedup();
+    write_u32(&mut buf, directives.len() as u32);
+    for directive in directives {
+        buf.push(directive as u8);
+    }
+    buf.push(snapshot.max_directives);
+    digest(RLM_CFG_DOMAIN, &buf)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmotionFieldSnapshot {
     pub noise: String,
@@ -371,6 +421,27 @@ pub type CoreTapFrame = TapFrame;
 pub struct CoreStepOutput {
     pub output_bytes: Vec<u8>,
     pub taps: Vec<CoreTapFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlFrame {
+    pub input_bytes: Vec<u8>,
+    pub emotion_snapshot: EmotionFieldSnapshot,
+    pub tap_specs: Vec<TapSpec>,
+}
+
+impl ControlFrame {
+    pub fn new(
+        input_bytes: &[u8],
+        emotion_snapshot: &EmotionFieldSnapshot,
+        tap_specs: &[TapSpec],
+    ) -> Self {
+        Self {
+            input_bytes: input_bytes.to_vec(),
+            emotion_snapshot: emotion_snapshot.clone(),
+            tap_specs: tap_specs.to_vec(),
+        }
+    }
 }
 
 pub trait CognitiveCore {
@@ -590,6 +661,373 @@ pub trait RlmCore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendCfgDigestPack {
+    pub language_cfg_digest: [u8; 32],
+    pub worldmodel_cfg_digest: [u8; 32],
+    pub rlm_cfg_digest: [u8; 32],
+}
+
+pub trait LanguageBackend {
+    fn backend_id(&self) -> &'static str;
+    fn cfg_digest(&self) -> [u8; 32];
+    fn step(&mut self, frame: &ControlFrame, ctx: &ContextBundle) -> CoreStepOutput;
+
+    fn startup_reason_codes(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+pub trait WorldModelBackend {
+    fn backend_id(&self) -> &'static str;
+    fn cfg_digest(&self) -> [u8; 32];
+    fn step_world(&mut self, input: &WorldModelInput) -> WorldModelOutput;
+
+    fn startup_reason_codes(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+pub trait RlmBackend {
+    fn backend_id(&self) -> &'static str;
+    fn cfg_digest(&self) -> [u8; 32];
+    fn step_rlm(&mut self, input: &RlmInput) -> RlmOutput;
+
+    fn startup_reason_codes(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StubLanguageBackend;
+
+impl LanguageBackend for StubLanguageBackend {
+    fn backend_id(&self) -> &'static str {
+        "stub-language"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        digest("lnss.language_backend.stub.v1", self.backend_id().as_bytes())
+    }
+
+    fn step(&mut self, frame: &ControlFrame, _ctx: &ContextBundle) -> CoreStepOutput {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&frame.input_bytes);
+        buf.extend_from_slice(frame.emotion_snapshot.noise.as_bytes());
+        buf.extend_from_slice(frame.emotion_snapshot.priority.as_bytes());
+        let output_bytes = digest("lnss.language_backend.stub.step.v1", &buf).to_vec();
+        CoreStepOutput {
+            output_bytes,
+            taps: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StubWorldModelBackend;
+
+impl WorldModelBackend for StubWorldModelBackend {
+    fn backend_id(&self) -> &'static str {
+        "stub-worldmodel"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        let snapshot = WorldModelCfgSnapshot {
+            mode: "stub".to_string(),
+            encoder_id: "stub-encoder".to_string(),
+            predictor_id: "stub-predictor".to_string(),
+            constants: vec![("pred_error_cap".to_string(), 1024)],
+        };
+        worldmodel_cfg_digest(&snapshot)
+    }
+
+    fn step_world(&mut self, input: &WorldModelInput) -> WorldModelOutput {
+        let world_state_digest =
+            digest_concat("WM:ENC", &[&input.input_digest, &input.prev_world_digest]);
+        let pred_world_digest =
+            digest_concat("WM:PRED", &[&world_state_digest, &input.action_digest]);
+        let prediction_error_score =
+            hamming_distance(&world_state_digest, &pred_world_digest).min(1024) as i32;
+        WorldModelOutput {
+            world_state_digest,
+            prediction_error_score,
+            world_taps: None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StubRlmBackend;
+
+impl RlmBackend for StubRlmBackend {
+    fn backend_id(&self) -> &'static str {
+        "stub-rlm"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        let snapshot = RlmCfgSnapshot {
+            recursion_depth_cap: 0,
+            directive_set: vec![RlmDirective::NoFollowUp],
+            max_directives: 1,
+        };
+        rlm_cfg_digest(&snapshot)
+    }
+
+    fn step_rlm(&mut self, _input: &RlmInput) -> RlmOutput {
+        let mut buf = Vec::new();
+        buf.push(RlmDirective::NoFollowUp as u8);
+        let self_state_digest = digest("lnss.rlm.stub.step.v1", &buf);
+        RlmOutput {
+            recursion_directives: vec![RlmDirective::NoFollowUp],
+            self_state_digest,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WorldModelCoreAdapter<T: WorldModelCore> {
+    core: T,
+}
+
+impl<T: WorldModelCore> WorldModelCoreAdapter<T> {
+    pub fn new(core: T) -> Self {
+        Self { core }
+    }
+}
+
+impl<T: WorldModelCore> WorldModelBackend for WorldModelCoreAdapter<T> {
+    fn backend_id(&self) -> &'static str {
+        "core-adapter-worldmodel"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        worldmodel_cfg_digest(&self.core.cfg_snapshot())
+    }
+
+    fn step_world(&mut self, input: &WorldModelInput) -> WorldModelOutput {
+        self.core.step(input)
+    }
+}
+
+#[derive(Debug)]
+pub struct RlmCoreAdapter<T: RlmCore> {
+    core: T,
+}
+
+impl<T: RlmCore> RlmCoreAdapter<T> {
+    pub fn new(core: T) -> Self {
+        Self { core }
+    }
+}
+
+impl<T: RlmCore> RlmBackend for RlmCoreAdapter<T> {
+    fn backend_id(&self) -> &'static str {
+        "core-adapter-rlm"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        rlm_cfg_digest(&self.core.cfg_snapshot())
+    }
+
+    fn step_rlm(&mut self, input: &RlmInput) -> RlmOutput {
+        self.core.step(input)
+    }
+}
+
+#[cfg(feature = "lang-candle")]
+#[derive(Debug)]
+pub struct CandleLanguageBackend {
+    asset: Option<AssetHandle>,
+    status: AssetStatus,
+    stub: StubLanguageBackend,
+}
+
+#[cfg(feature = "lang-candle")]
+impl CandleLanguageBackend {
+    pub fn new(asset: Option<AssetHandle>) -> Self {
+        let status = asset_status(asset.as_ref());
+        Self {
+            asset,
+            status,
+            stub: StubLanguageBackend,
+        }
+    }
+}
+
+#[cfg(feature = "lang-candle")]
+impl LanguageBackend for CandleLanguageBackend {
+    fn backend_id(&self) -> &'static str {
+        "candle-language"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        backend_cfg_digest(self.backend_id(), self.asset.as_ref(), self.status)
+    }
+
+    fn step(&mut self, frame: &ControlFrame, ctx: &ContextBundle) -> CoreStepOutput {
+        match self.status {
+            AssetStatus::Verified => self.stub.step(frame, ctx),
+            _ => self.stub.step(frame, ctx),
+        }
+    }
+
+    fn startup_reason_codes(&self) -> Vec<String> {
+        candle_reason_codes(self.status, RC_LANG_BACKEND_ASSET_MISSING)
+    }
+}
+
+#[cfg(feature = "wm-candle")]
+#[derive(Debug)]
+pub struct CandleWorldModelBackend {
+    asset: Option<AssetHandle>,
+    status: AssetStatus,
+    stub: StubWorldModelBackend,
+}
+
+#[cfg(feature = "wm-candle")]
+impl CandleWorldModelBackend {
+    pub fn new(asset: Option<AssetHandle>) -> Self {
+        let status = asset_status(asset.as_ref());
+        Self {
+            asset,
+            status,
+            stub: StubWorldModelBackend,
+        }
+    }
+}
+
+#[cfg(feature = "wm-candle")]
+impl WorldModelBackend for CandleWorldModelBackend {
+    fn backend_id(&self) -> &'static str {
+        "candle-worldmodel"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        backend_cfg_digest(self.backend_id(), self.asset.as_ref(), self.status)
+    }
+
+    fn step_world(&mut self, input: &WorldModelInput) -> WorldModelOutput {
+        self.stub.step_world(input)
+    }
+
+    fn startup_reason_codes(&self) -> Vec<String> {
+        candle_reason_codes(self.status, RC_WM_BACKEND_ASSET_MISSING)
+    }
+}
+
+#[cfg(feature = "rlm-candle")]
+#[derive(Debug)]
+pub struct CandleRlmBackend {
+    asset: Option<AssetHandle>,
+    status: AssetStatus,
+    stub: StubRlmBackend,
+}
+
+#[cfg(feature = "rlm-candle")]
+impl CandleRlmBackend {
+    pub fn new(asset: Option<AssetHandle>) -> Self {
+        let status = asset_status(asset.as_ref());
+        Self {
+            asset,
+            status,
+            stub: StubRlmBackend,
+        }
+    }
+}
+
+#[cfg(feature = "rlm-candle")]
+impl RlmBackend for CandleRlmBackend {
+    fn backend_id(&self) -> &'static str {
+        "candle-rlm"
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        backend_cfg_digest(self.backend_id(), self.asset.as_ref(), self.status)
+    }
+
+    fn step_rlm(&mut self, input: &RlmInput) -> RlmOutput {
+        self.stub.step_rlm(input)
+    }
+
+    fn startup_reason_codes(&self) -> Vec<String> {
+        candle_reason_codes(self.status, RC_RLM_BACKEND_ASSET_MISSING)
+    }
+}
+
+#[cfg(any(feature = "lang-candle", feature = "wm-candle", feature = "rlm-candle", test))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetStatus {
+    Verified,
+    Missing,
+    DigestMismatch,
+}
+
+#[cfg(any(feature = "lang-candle", feature = "wm-candle", feature = "rlm-candle", test))]
+#[allow(dead_code)]
+fn asset_status(handle: Option<&AssetHandle>) -> AssetStatus {
+    let Some(handle) = handle else {
+        return AssetStatus::Missing;
+    };
+    match handle.verify() {
+        Ok(()) => AssetStatus::Verified,
+        Err(lnss_assets::AssetError::DigestMismatch(_)) => AssetStatus::DigestMismatch,
+        Err(lnss_assets::AssetError::MissingAsset(_)) => AssetStatus::Missing,
+        Err(_) => AssetStatus::DigestMismatch,
+    }
+}
+
+#[cfg(any(feature = "lang-candle", feature = "wm-candle", feature = "rlm-candle", test))]
+#[allow(dead_code)]
+fn backend_cfg_digest(
+    backend_id: &str,
+    handle: Option<&AssetHandle>,
+    status: AssetStatus,
+) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_string(&mut buf, backend_id);
+    buf.push(match status {
+        AssetStatus::Verified => 1,
+        AssetStatus::Missing => 2,
+        AssetStatus::DigestMismatch => 3,
+    });
+    match handle {
+        Some(handle) => {
+            buf.extend_from_slice(&asset_handle_digest(handle));
+        }
+        None => buf.extend_from_slice(&[0u8; 32]),
+    }
+    digest("lnss.backend.cfg.v1", &buf)
+}
+
+#[cfg(any(feature = "lang-candle", feature = "wm-candle", feature = "rlm-candle", test))]
+#[allow(dead_code)]
+fn candle_reason_codes(status: AssetStatus, missing_code: &str) -> Vec<String> {
+    let mut codes = Vec::new();
+    match status {
+        AssetStatus::Verified => codes.push(RC_ASSET_VERIFIED.to_string()),
+        AssetStatus::Missing => codes.push(missing_code.to_string()),
+        AssetStatus::DigestMismatch => codes.push(RC_ASSET_DIGEST_MISMATCH.to_string()),
+    }
+    codes
+}
+
+fn digest_concat(domain: &str, parts: &[&[u8; 32]]) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(domain.as_bytes());
+    for part in parts {
+        hasher.update(*part);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn hamming_distance(a: &[u8; 32], b: &[u8; 32]) -> u32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(left, right)| (left ^ right).count_ones())
+        .sum()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliberationBudget {
     pub allow_followup: bool,
     pub max_followup_steps: u8,
@@ -707,32 +1145,55 @@ pub struct OrchestratorOutput {
     pub recursion_blocked: bool,
 }
 
-#[derive(Debug, Default)]
-pub struct CoreOrchestrator;
+pub struct CoreOrchestrator {
+    worldmodel: Box<dyn WorldModelBackend>,
+    language: Box<dyn LanguageBackend>,
+    rlm: Box<dyn RlmBackend>,
+}
 
 impl CoreOrchestrator {
+    pub fn new(
+        worldmodel: Box<dyn WorldModelBackend>,
+        language: Box<dyn LanguageBackend>,
+        rlm: Box<dyn RlmBackend>,
+    ) -> Self {
+        Self {
+            worldmodel,
+            language,
+            rlm,
+        }
+    }
+
+    pub fn backend_cfg_digests(&self) -> BackendCfgDigestPack {
+        BackendCfgDigestPack {
+            language_cfg_digest: self.language.cfg_digest(),
+            worldmodel_cfg_digest: self.worldmodel.cfg_digest(),
+            rlm_cfg_digest: self.rlm.cfg_digest(),
+        }
+    }
+
+    pub fn backend_reason_codes(&self) -> Vec<String> {
+        let mut codes = Vec::new();
+        codes.extend(self.language.startup_reason_codes());
+        codes.extend(self.worldmodel.startup_reason_codes());
+        codes.extend(self.rlm.startup_reason_codes());
+        codes
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub fn run_tick<W, L, R>(
+    pub fn run_tick(
         &mut self,
-        worldmodel: &mut W,
-        language: &mut L,
-        rlm: &mut R,
-        input: &[u8],
+        frame: &ControlFrame,
         mut context: ContextBundle,
         world_input: &WorldModelInput,
         rlm_input: &RlmInput,
         policy_view: PolicyView,
         feedback: Option<&BiophysFeedbackSnapshot>,
-    ) -> OrchestratorOutput
-    where
-        W: WorldModelCore + ?Sized,
-        L: CognitiveCore + ?Sized,
-        R: RlmCore + ?Sized,
-    {
-        let world_output = worldmodel.step(world_input);
+    ) -> OrchestratorOutput {
+        let world_output = self.worldmodel.step_world(world_input);
         context.world_state_digest = world_output.world_state_digest;
-        let language_output = language.step(input, &context);
-        let rlm_output = rlm.step(rlm_input);
+        let language_output = self.language.step(frame, &context);
+        let rlm_output = self.rlm.step_rlm(rlm_input);
 
         let mut policy_view = policy_view;
         policy_view.worldmodel_pred_error_critical =
@@ -757,7 +1218,7 @@ impl CoreOrchestrator {
         {
             context.last_self_state_digest = rlm_output.self_state_digest;
             context.followup_control_frame = followup_control_frame;
-            let output = language.step(input, &context);
+            let output = self.language.step(frame, &context);
             let digest = digest("lnss.followup.language_step.v1", &output.output_bytes);
             (Some(output), Some(digest))
         } else {
@@ -819,8 +1280,16 @@ mod tests {
         log: Arc<Mutex<Vec<&'static str>>>,
     }
 
-    impl WorldModelCore for TestWorldModel {
-        fn step(&mut self, _input: &WorldModelInput) -> WorldModelOutput {
+    impl WorldModelBackend for TestWorldModel {
+        fn backend_id(&self) -> &'static str {
+            "test-worldmodel"
+        }
+
+        fn cfg_digest(&self) -> [u8; 32] {
+            [7; 32]
+        }
+
+        fn step_world(&mut self, _input: &WorldModelInput) -> WorldModelOutput {
             self.log.lock().expect("log lock").push("world");
             WorldModelOutput {
                 world_state_digest: [1; 32],
@@ -834,8 +1303,16 @@ mod tests {
         log: Arc<Mutex<Vec<&'static str>>>,
     }
 
-    impl CognitiveCore for TestLanguage {
-        fn step(&mut self, _input: &[u8], _context: &ContextBundle) -> CoreStepOutput {
+    impl LanguageBackend for TestLanguage {
+        fn backend_id(&self) -> &'static str {
+            "test-language"
+        }
+
+        fn cfg_digest(&self) -> [u8; 32] {
+            [8; 32]
+        }
+
+        fn step(&mut self, _frame: &ControlFrame, _context: &ContextBundle) -> CoreStepOutput {
             self.log.lock().expect("log lock").push("language");
             CoreStepOutput {
                 output_bytes: vec![1],
@@ -849,8 +1326,16 @@ mod tests {
         directives: Vec<RlmDirective>,
     }
 
-    impl RlmCore for TestRlm {
-        fn step(&mut self, _input: &RlmInput) -> RlmOutput {
+    impl RlmBackend for TestRlm {
+        fn backend_id(&self) -> &'static str {
+            "test-rlm"
+        }
+
+        fn cfg_digest(&self) -> [u8; 32] {
+            [9; 32]
+        }
+
+        fn step_rlm(&mut self, _input: &RlmInput) -> RlmOutput {
             self.log.lock().expect("log lock").push("rlm");
             RlmOutput {
                 recursion_directives: self.directives.clone(),
@@ -862,14 +1347,16 @@ mod tests {
     #[test]
     fn orchestrator_order_is_fixed() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut world = TestWorldModel { log: log.clone() };
-        let mut language = TestLanguage { log: log.clone() };
-        let mut rlm = TestRlm {
+        let world = TestWorldModel { log: log.clone() };
+        let language = TestLanguage { log: log.clone() };
+        let rlm = TestRlm {
             log: log.clone(),
             directives: vec![RlmDirective::NoFollowUp],
         };
-        let mut orchestrator = CoreOrchestrator;
+        let mut orchestrator =
+            CoreOrchestrator::new(Box::new(world), Box::new(language), Box::new(rlm));
         let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
+        let frame = ControlFrame::new(b"input", &EmotionFieldSnapshot::new("", "", "", "", "", vec![], vec![]), &[]);
         let world_input = WorldModelInput {
             input_digest: [0; 32],
             prev_world_digest: [0; 32],
@@ -883,10 +1370,7 @@ mod tests {
             current_depth: 0,
         };
         orchestrator.run_tick(
-            &mut world,
-            &mut language,
-            &mut rlm,
-            b"input",
+            &frame,
             context,
             &world_input,
             &rlm_input,
@@ -901,14 +1385,16 @@ mod tests {
     #[test]
     fn recursion_is_blocked_by_policy() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut world = TestWorldModel { log: log.clone() };
-        let mut language = TestLanguage { log: log.clone() };
-        let mut rlm = TestRlm {
+        let world = TestWorldModel { log: log.clone() };
+        let language = TestLanguage { log: log.clone() };
+        let rlm = TestRlm {
             log: log.clone(),
             directives: vec![RlmDirective::FollowUpClarify],
         };
-        let mut orchestrator = CoreOrchestrator;
+        let mut orchestrator =
+            CoreOrchestrator::new(Box::new(world), Box::new(language), Box::new(rlm));
         let context = ContextBundle::new([0; 32], None, None, [0; 32], [0; 32], None);
+        let frame = ControlFrame::new(b"input", &EmotionFieldSnapshot::new("", "", "", "", "", vec![], vec![]), &[]);
         let world_input = WorldModelInput {
             input_digest: [0; 32],
             prev_world_digest: [0; 32],
@@ -922,10 +1408,7 @@ mod tests {
             current_depth: 2,
         };
         let output = orchestrator.run_tick(
-            &mut world,
-            &mut language,
-            &mut rlm,
-            b"input",
+            &frame,
             context,
             &world_input,
             &rlm_input,
@@ -955,6 +1438,47 @@ mod tests {
         let first = pack.digest();
         let second = pack.digest();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn backend_cfg_digest_is_stable() {
+        let handle = AssetHandle::new("asset-a", [5; 32], "local.bin", lnss_assets::AssetFormat::Bin);
+        let first = backend_cfg_digest("backend", Some(&handle), AssetStatus::Verified);
+        let second = backend_cfg_digest("backend", Some(&handle), AssetStatus::Verified);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn backend_cfg_digest_changes_when_missing() {
+        let handle = AssetHandle::new("asset-b", [6; 32], "local.bin", lnss_assets::AssetFormat::Bin);
+        let present = backend_cfg_digest("backend", Some(&handle), AssetStatus::Verified);
+        let missing = backend_cfg_digest("backend", None, AssetStatus::Missing);
+        let missing_again = backend_cfg_digest("backend", None, AssetStatus::Missing);
+        assert_ne!(present, missing);
+        assert_eq!(missing, missing_again);
+    }
+
+    #[test]
+    fn cfg_root_digest_changes_with_backend_digest() {
+        let base = CfgRootDigestPack::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            None,
+        );
+        let updated = CfgRootDigestPack::new(
+            [9; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            None,
+        );
+        assert_ne!(base.root_cfg_digest, updated.root_cfg_digest);
     }
 
     #[test]

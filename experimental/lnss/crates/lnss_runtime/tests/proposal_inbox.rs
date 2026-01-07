@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lnss_core::{
     BrainTarget, ControlIntentClass, CoreContextDigestPack, EmotionFieldSnapshot,
-    FeatureToBrainMap, PolicyMode, RecursionPolicy, TapFrame, TapKind, TapSpec,
+    FeatureToBrainMap, PolicyMode, RecursionPolicy, RlmCoreAdapter, TapFrame, TapKind, TapSpec,
+    WorldModelCoreAdapter,
 };
 use lnss_evolve::{
     build_proposal_evidence_pb, evaluate, load_proposals, proposal_payload_digest, EvalContext,
@@ -15,7 +16,7 @@ use lnss_lifecycle::LifecycleIndex;
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     FeedbackConsumer, Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter,
-    ProposalInbox, StubHookProvider, StubLlmBackend, StubRigClient,
+    ProposalInbox, RuntimeLanguageBackend, StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_sae::StubSaeBackend;
 use lnss_worldmodel::WorldModelCoreStub;
@@ -342,25 +343,35 @@ fn proposal_ingestion_is_bounded_and_does_not_apply() {
     let writer = RecordingWriter::default();
     let writer_handle = writer.clone();
 
-    let mut runtime = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    let mut runtime = LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(writer),
         pvgs: None,
         rig: Box::new(StubRigClient::default()),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -483,25 +494,35 @@ fn proposal_commits_only_once_across_ticks() {
     let pvgs_inner = Arc::new(Mutex::new(MockPvgsClient::default()));
     let pvgs_handle = pvgs_inner.clone();
 
-    let mut runtime = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    let mut runtime = LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(RecordingWriter::default()),
         pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
         rig: Box::new(StubRigClient::default()),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -608,25 +629,35 @@ fn proposal_commits_are_bounded_and_ordered() {
     let pvgs_inner = Arc::new(Mutex::new(MockPvgsClient::default()));
     let pvgs_handle = pvgs_inner.clone();
 
-    let mut runtime = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    let mut runtime = LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(RecordingWriter::default()),
         pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
         rig: Box::new(StubRigClient::default()),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
@@ -735,25 +766,35 @@ fn local_pvgs_receives_expected_payload() {
     let pvgs_inner = Arc::new(Mutex::new(MockPvgsClient::default()));
     let pvgs_handle = pvgs_inner.clone();
 
-    let mut runtime = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    let mut runtime = LnssRuntime {
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(RecordingWriter::default()),
         pvgs: Some(Box::new(SharedPvgsClient::new(pvgs_inner))),
         rig: Box::new(StubRigClient::default()),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

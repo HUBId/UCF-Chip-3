@@ -10,13 +10,14 @@ use lnss::lnss_bluebridge::{
 };
 use lnss::lnss_core::{
     BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
-    RecursionPolicy, TapFrame, TapKind, TapSpec,
+    RecursionPolicy, RlmCoreAdapter, TapFrame, TapKind, TapSpec, WorldModelCoreAdapter,
 };
 use lnss::lnss_mechint::JsonlMechIntWriter;
 use lnss::lnss_rlm::RlmController;
 use lnss::lnss_runtime::{
     BiophysFeedbackSnapshot, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime,
-    MappingAdaptationConfig, MechIntRecord, StubHookProvider, StubLlmBackend,
+    MappingAdaptationConfig, MechIntRecord, RuntimeLanguageBackend, StubHookProvider,
+    StubLlmBackend,
 };
 use lnss::lnss_sae::StubSaeBackend;
 use lnss::lnss_worldmodel::WorldModelCoreStub;
@@ -110,25 +111,35 @@ fn run_once(seed: u64, path: &Path) -> (MechIntRecord, BiophysFeedbackSnapshot) 
     let _ = fs::remove_file(path);
     let mechint = JsonlMechIntWriter::new(path, Some(2048)).expect("jsonl writer");
 
-    let mut runtime = LnssRuntime {
-        llm: Box::new(StubLlmBackend),
-        hooks: Box::new(StubHookProvider {
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(StubLlmBackend),
+        Box::new(StubHookProvider {
             taps: vec![tap_frame],
         }),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss::lnss_core::CoreOrchestrator,
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
+    let mut runtime = LnssRuntime {
+        orchestrator: lnss::lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(StubSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
         rig: Box::new(client),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),
