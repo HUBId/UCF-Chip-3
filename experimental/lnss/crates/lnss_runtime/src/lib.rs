@@ -416,6 +416,10 @@ impl ProposalInbox {
             if !gating_codes.is_empty() {
                 parts.reason_codes.extend(gating_codes.clone());
             }
+            let active_cfg_root_digest = proposal
+                .base_active_cfg_digest
+                .or(trace_state.map(|state| state.active_cfg_digest));
+            let shadow_cfg_root_digest = trace_state.map(|state| state.shadow_cfg_digest);
             if eval.verdict == EvalVerdict::Promising
                 && trace_allowed
                 && !activation_applied
@@ -467,7 +471,10 @@ impl ProposalInbox {
                 && !activation_applied
                 && !pending_approval
             {
-                eprintln!("cfg root digest missing: aap disabled for step {step_id}");
+                eprintln!(
+                    "cfg root digest missing: aap disabled for step {}",
+                    parts.step_id
+                );
             }
             let evidence = ProposalEvidence {
                 proposal_id: proposal.proposal_id.clone(),
