@@ -1267,19 +1267,19 @@ impl LnssRuntime {
         };
         let worldmodel_cfg = self.worldmodel.cfg_snapshot();
         let rlm_cfg = self.rlm.cfg_snapshot();
-        let active_cfg_pack = cfg_root_digest_pack(
-            self.llm.as_ref(),
+        let active_cfg_pack = cfg_root_digest_pack(CfgRootDigestInputs {
+            llm: self.llm.as_ref(),
             tap_specs,
-            &worldmodel_cfg,
-            &rlm_cfg,
-            self.active_sae_pack_digest,
-            &self.mapper,
-            &self.limits,
-            &self.injection_limits,
-            DEFAULT_AMPLITUDE_CAP_Q,
-            core_context_pack.policy_digest,
-            self.active_liquid_params_digest,
-        );
+            worldmodel_cfg: &worldmodel_cfg,
+            rlm_cfg: &rlm_cfg,
+            sae_pack_digest: self.active_sae_pack_digest,
+            mapping: &self.mapper,
+            limits: &self.limits,
+            injection_limits: &self.injection_limits,
+            amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+            policy_digest: core_context_pack.policy_digest,
+            liquid_params_digest: self.active_liquid_params_digest,
+        });
         let active_cfg_root_digest = active_cfg_pack.as_ref().map(|pack| pack.root_cfg_digest);
         self.active_cfg_root_digest = active_cfg_root_digest;
         let shadow_cfg_root_digest = if self.shadow.enabled {
@@ -1294,19 +1294,19 @@ impl LnssRuntime {
                 shadow_liquid_params_digest(self.shadow.shadow_liquid_params.as_ref());
             #[cfg(not(feature = "lnss-liquid-ode"))]
             let shadow_liquid_digest = None;
-            cfg_root_digest_pack(
-                self.llm.as_ref(),
+            cfg_root_digest_pack(CfgRootDigestInputs {
+                llm: self.llm.as_ref(),
                 tap_specs,
-                &worldmodel_cfg,
-                &rlm_cfg,
-                self.active_sae_pack_digest,
-                shadow_mapping,
-                &self.limits,
-                shadow_limits,
-                DEFAULT_AMPLITUDE_CAP_Q,
-                core_context_pack.policy_digest,
-                shadow_liquid_digest.or(self.active_liquid_params_digest),
-            )
+                worldmodel_cfg: &worldmodel_cfg,
+                rlm_cfg: &rlm_cfg,
+                sae_pack_digest: self.active_sae_pack_digest,
+                mapping: shadow_mapping,
+                limits: &self.limits,
+                injection_limits: shadow_limits,
+                amplitude_cap_q: DEFAULT_AMPLITUDE_CAP_Q,
+                policy_digest: core_context_pack.policy_digest,
+                liquid_params_digest: shadow_liquid_digest.or(self.active_liquid_params_digest),
+            })
             .map(|pack| pack.root_cfg_digest)
         } else {
             None
@@ -2715,52 +2715,54 @@ fn limits_cfg_digest(
     digest(LIMITS_CFG_DOMAIN, &buf)
 }
 
-pub fn cfg_root_digest_pack(
-    llm: &dyn LlmBackend,
-    tap_specs: &[TapSpec],
-    worldmodel_cfg: &WorldModelCfgSnapshot,
-    rlm_cfg: &RlmCfgSnapshot,
-    sae_pack_digest: Option<[u8; 32]>,
-    mapping: &FeatureToBrainMap,
-    limits: &Limits,
-    injection_limits: &InjectionLimits,
-    amplitude_cap_q: u16,
-    policy_digest: Option<[u8; 32]>,
-    liquid_params_digest: Option<[u8; 32]>,
-) -> Option<CfgRootDigestPack> {
-    if mapping.map_digest == [0u8; 32] {
+pub struct CfgRootDigestInputs<'a> {
+    pub llm: &'a dyn LlmBackend,
+    pub tap_specs: &'a [TapSpec],
+    pub worldmodel_cfg: &'a WorldModelCfgSnapshot,
+    pub rlm_cfg: &'a RlmCfgSnapshot,
+    pub sae_pack_digest: Option<[u8; 32]>,
+    pub mapping: &'a FeatureToBrainMap,
+    pub limits: &'a Limits,
+    pub injection_limits: &'a InjectionLimits,
+    pub amplitude_cap_q: u16,
+    pub policy_digest: Option<[u8; 32]>,
+    pub liquid_params_digest: Option<[u8; 32]>,
+}
+
+pub fn cfg_root_digest_pack(inputs: CfgRootDigestInputs<'_>) -> Option<CfgRootDigestPack> {
+    if inputs.mapping.map_digest == [0u8; 32] {
         return None;
     }
-    let backend_id = llm.backend_identifier();
+    let backend_id = inputs.llm.backend_identifier();
     if backend_id.is_empty() {
         return None;
     }
-    let model_revision = llm.model_revision();
+    let model_revision = inputs.llm.model_revision();
     if model_revision.is_empty() {
         return None;
     }
-    if worldmodel_cfg.mode.is_empty()
-        || worldmodel_cfg.encoder_id.is_empty()
-        || worldmodel_cfg.predictor_id.is_empty()
+    if inputs.worldmodel_cfg.mode.is_empty()
+        || inputs.worldmodel_cfg.encoder_id.is_empty()
+        || inputs.worldmodel_cfg.predictor_id.is_empty()
     {
         return None;
     }
-    let hook_digest = hook_config_digest(tap_specs);
+    let hook_digest = hook_config_digest(inputs.tap_specs);
     let language_digest = language_cfg_digest(backend_id, &model_revision, hook_digest);
-    let worldmodel_digest = worldmodel_cfg_digest(worldmodel_cfg);
-    let rlm_digest = rlm_cfg_digest(rlm_cfg);
-    let sae_pack_digest = sae_pack_digest.unwrap_or([0u8; 32]);
+    let worldmodel_digest = worldmodel_cfg_digest(inputs.worldmodel_cfg);
+    let rlm_digest = rlm_cfg_digest(inputs.rlm_cfg);
+    let sae_pack_digest = inputs.sae_pack_digest.unwrap_or([0u8; 32]);
     let sae_digest = sae_cfg_digest(
         sae_pack_digest,
         MAX_TOP_FEATURES as u16,
         &[MAX_TOP_FEATURES as u16],
     );
-    let mapping_digest = mapping_cfg_digest(mapping.map_digest, mapping.map_version);
+    let mapping_digest = mapping_cfg_digest(inputs.mapping.map_digest, inputs.mapping.map_version);
     let limits_digest = limits_cfg_digest(
-        limits,
-        injection_limits,
-        amplitude_cap_q,
-        liquid_params_digest,
+        inputs.limits,
+        inputs.injection_limits,
+        inputs.amplitude_cap_q,
+        inputs.liquid_params_digest,
     );
     Some(CfgRootDigestPack::new(
         language_digest,
@@ -2769,7 +2771,7 @@ pub fn cfg_root_digest_pack(
         sae_digest,
         mapping_digest,
         limits_digest,
-        policy_digest,
+        inputs.policy_digest,
     ))
 }
 

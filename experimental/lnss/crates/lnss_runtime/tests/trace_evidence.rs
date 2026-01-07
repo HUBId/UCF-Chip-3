@@ -14,9 +14,9 @@ use lnss_evolve::trace_encoding::{
 use lnss_lifecycle::{LifecycleIndex, LifecycleKey, ACTIVATION_STATUS_APPLIED};
 use lnss_rlm::RlmController;
 use lnss_runtime::{
-    cfg_root_digest_pack, BrainSpike, FeedbackConsumer, InjectionLimits, Limits, LnssRuntime,
-    MappingAdaptationConfig, MechIntRecord, MechIntWriter, ProposalInbox, RigClient, SaeBackend,
-    ShadowConfig, StubHookProvider, StubLlmBackend, StubRigClient,
+    cfg_root_digest_pack, BrainSpike, CfgRootDigestInputs, FeedbackConsumer, InjectionLimits,
+    Limits, LnssRuntime, MappingAdaptationConfig, MechIntRecord, MechIntWriter, ProposalInbox,
+    RigClient, SaeBackend, ShadowConfig, StubHookProvider, StubLlmBackend, StubRigClient,
 };
 use lnss_worldmodel::WorldModelCoreStub;
 use prost::Message;
@@ -1100,19 +1100,19 @@ fn trace_evidence_uses_cfg_root_digests() {
 
     let world_cfg = runtime.worldmodel.cfg_snapshot();
     let rlm_cfg = runtime.rlm.cfg_snapshot();
-    let active_pack = cfg_root_digest_pack(
-        runtime.llm.as_ref(),
-        std::slice::from_ref(&tap_spec),
-        &world_cfg,
-        &rlm_cfg,
-        runtime.active_sae_pack_digest,
-        &runtime.mapper,
-        &runtime.limits,
-        &runtime.injection_limits,
-        lnss_runtime::DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        runtime.active_liquid_params_digest,
-    )
+    let active_pack = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: runtime.llm.as_ref(),
+        tap_specs: std::slice::from_ref(&tap_spec),
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: runtime.active_sae_pack_digest,
+        mapping: &runtime.mapper,
+        limits: &runtime.limits,
+        injection_limits: &runtime.injection_limits,
+        amplitude_cap_q: lnss_runtime::DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: runtime.active_liquid_params_digest,
+    })
     .expect("active cfg pack");
     let shadow_mapping = runtime
         .shadow
@@ -1124,19 +1124,19 @@ fn trace_evidence_uses_cfg_root_digests() {
         .shadow_injection_limits
         .as_ref()
         .unwrap_or(&runtime.injection_limits);
-    let shadow_pack = cfg_root_digest_pack(
-        runtime.llm.as_ref(),
-        std::slice::from_ref(&tap_spec),
-        &world_cfg,
-        &rlm_cfg,
-        runtime.active_sae_pack_digest,
-        shadow_mapping,
-        &runtime.limits,
-        shadow_limits,
-        lnss_runtime::DEFAULT_AMPLITUDE_CAP_Q,
-        None,
-        runtime.active_liquid_params_digest,
-    )
+    let shadow_pack = cfg_root_digest_pack(CfgRootDigestInputs {
+        llm: runtime.llm.as_ref(),
+        tap_specs: std::slice::from_ref(&tap_spec),
+        worldmodel_cfg: &world_cfg,
+        rlm_cfg: &rlm_cfg,
+        sae_pack_digest: runtime.active_sae_pack_digest,
+        mapping: shadow_mapping,
+        limits: &runtime.limits,
+        injection_limits: shadow_limits,
+        amplitude_cap_q: lnss_runtime::DEFAULT_AMPLITUDE_CAP_Q,
+        policy_digest: None,
+        liquid_params_digest: runtime.active_liquid_params_digest,
+    })
     .expect("shadow cfg pack");
 
     assert_eq!(active_cfg_digest, active_pack.root_cfg_digest);
