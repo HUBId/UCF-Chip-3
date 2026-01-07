@@ -15,11 +15,11 @@ use lnss_approval::{
 pub use lnss_core::BiophysFeedbackSnapshot;
 use lnss_core::TapKind;
 use lnss_core::{
-    digest, wm_pred_error_bucket, BrainTarget, CfgRootDigestPack, CognitiveCore, ContextBundle,
-    ControlIntentClass, CoreContextDigestPack, CoreOrchestrator, CoreStepOutput,
-    DeliberationBudget, EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap,
-    FeedbackAnomalyFlags, PolicyMode, PolicyView, RecursionPolicy, RlmCfgSnapshot, RlmCore,
-    RlmDirective, RlmInput, TapFrame, TapSpec, WorldModelCfgSnapshot, WorldModelCore,
+    digest, language_cfg_digest, wm_pred_error_bucket, BackendCfgDigestPack, BrainTarget,
+    CfgRootDigestPack, CognitiveCore, ContextBundle, ControlFrame, ControlIntentClass,
+    CoreContextDigestPack, CoreOrchestrator, CoreStepOutput, DeliberationBudget,
+    EmotionFieldSnapshot, FeatureEvent, FeatureToBrainMap, FeedbackAnomalyFlags, LanguageBackend,
+    PolicyMode, PolicyView, RecursionPolicy, RlmDirective, RlmInput, TapFrame, TapSpec,
     WorldModelInput, MAX_ACTIVATION_BYTES, MAX_MAPPING_ENTRIES, MAX_REASON_CODES,
     MAX_RLM_DIRECTIVES, MAX_RLM_REASON_CODES, MAX_STRING_LEN, MAX_TOP_FEATURES,
 };
@@ -62,9 +62,6 @@ pub const DEFAULT_APPROVAL_SCAN_TICKS: u64 = 10;
 pub const DEFAULT_APPROVAL_MAX_PER_TICK: usize = 1;
 pub const FILE_DIGEST_DOMAIN: &str = "lnss.file.bytes.v1";
 pub const LIQUID_PARAMS_DOMAIN: &str = "lnss.liquid.params.v1";
-const LANG_CFG_DOMAIN: &str = "UCF:LNSS:LANG_CFG";
-const WM_CFG_DOMAIN: &str = "UCF:LNSS:WM_CFG";
-const RLM_CFG_DOMAIN: &str = "UCF:LNSS:RLM_CFG";
 const SAE_CFG_DOMAIN: &str = "UCF:LNSS:SAE_CFG";
 const MAP_CFG_DOMAIN: &str = "UCF:LNSS:MAP_CFG";
 const LIMITS_CFG_DOMAIN: &str = "UCF:LNSS:LIMITS_CFG";
@@ -154,6 +151,50 @@ impl<'a> CognitiveCore for LanguageCore<'a> {
             Vec::new()
         };
         CoreStepOutput { output_bytes, taps }
+    }
+}
+
+pub struct RuntimeLanguageBackend {
+    llm: Box<dyn LlmBackend>,
+    hooks: Box<dyn HookProvider>,
+    limits: Limits,
+}
+
+impl RuntimeLanguageBackend {
+    pub fn new(
+        llm: Box<dyn LlmBackend>,
+        hooks: Box<dyn HookProvider>,
+        limits: Limits,
+    ) -> Self {
+        Self {
+            llm,
+            hooks,
+            limits,
+        }
+    }
+}
+
+impl LanguageBackend for RuntimeLanguageBackend {
+    fn backend_id(&self) -> &'static str {
+        self.llm.backend_identifier()
+    }
+
+    fn cfg_digest(&self) -> [u8; 32] {
+        let mut buf = Vec::new();
+        write_string(&mut buf, self.llm.backend_identifier());
+        write_string(&mut buf, &self.llm.model_revision());
+        digest("lnss.runtime.language_backend.v1", &buf)
+    }
+
+    fn step(&mut self, frame: &ControlFrame, context: &ContextBundle) -> CoreStepOutput {
+        let mut language = LanguageCore::new(
+            self.llm.as_mut(),
+            self.hooks.as_mut(),
+            &frame.emotion_snapshot,
+            &frame.tap_specs,
+            self.limits.clone(),
+        );
+        language.step(&frame.input_bytes, context)
     }
 }
 
@@ -701,10 +742,6 @@ impl ApprovalInbox {
 }
 
 pub struct LnssRuntime {
-    pub llm: Box<dyn LlmBackend>,
-    pub hooks: Box<dyn HookProvider>,
-    pub worldmodel: Box<dyn WorldModelCore>,
-    pub rlm: Box<dyn RlmCore>,
     pub orchestrator: CoreOrchestrator,
     pub sae: Box<dyn SaeBackend>,
     pub mechint: Box<dyn MechIntWriter>,
@@ -717,6 +754,8 @@ pub struct LnssRuntime {
     pub active_liquid_params_digest: Option<[u8; 32]>,
     pub active_cfg_root_digest: Option<[u8; 32]>,
     pub shadow_cfg_root_digest: Option<[u8; 32]>,
+    pub backend_reason_codes: Vec<String>,
+    pub pending_backend_reason_codes: Vec<String>,
     #[cfg(feature = "lnss-liquid-ode")]
     pub active_liquid_params: Option<LiquidOdeConfig>,
     pub feedback: FeedbackConsumer,
@@ -1209,23 +1248,14 @@ impl LnssRuntime {
             self.last_self_state_digest,
             emotion_snapshot_digest,
         );
-        let mut language = LanguageCore::new(
-            self.llm.as_mut(),
-            self.hooks.as_mut(),
-            mods,
-            tap_specs,
-            self.limits.clone(),
-        );
+        let control_frame = ControlFrame::new(input, mods, tap_specs);
         let policy_view = PolicyView {
             allow_internal_reflection: self.recursion_policy.allow_followup,
             feedback_drop_threshold: self.adaptation.events_dropped_threshold,
             worldmodel_pred_error_critical: false,
         };
         let orchestration = self.orchestrator.run_tick(
-            self.worldmodel.as_mut(),
-            &mut language,
-            self.rlm.as_mut(),
-            input,
+            &control_frame,
             context,
             &world_input,
             &rlm_input,
@@ -1265,13 +1295,10 @@ impl LnssRuntime {
             wm_pred_error_bucket: wm_pred_error_bucket(prediction_error_score),
             rlm_followup_executed: orchestration.followup_output.is_some(),
         };
-        let worldmodel_cfg = self.worldmodel.cfg_snapshot();
-        let rlm_cfg = self.rlm.cfg_snapshot();
+        let backend_cfg_digests = self.orchestrator.backend_cfg_digests();
         let active_cfg_pack = cfg_root_digest_pack(CfgRootDigestInputs {
-            llm: self.llm.as_ref(),
+            backend_cfg_digests: &backend_cfg_digests,
             tap_specs,
-            worldmodel_cfg: &worldmodel_cfg,
-            rlm_cfg: &rlm_cfg,
             sae_pack_digest: self.active_sae_pack_digest,
             mapping: &self.mapper,
             limits: &self.limits,
@@ -1281,6 +1308,15 @@ impl LnssRuntime {
             liquid_params_digest: self.active_liquid_params_digest,
         });
         let active_cfg_root_digest = active_cfg_pack.as_ref().map(|pack| pack.root_cfg_digest);
+        if self.backend_reason_codes.is_empty() {
+            self.backend_reason_codes = self.orchestrator.backend_reason_codes();
+            self.pending_backend_reason_codes = self.backend_reason_codes.clone();
+        }
+        if self.active_cfg_root_digest != active_cfg_root_digest {
+            if !self.backend_reason_codes.is_empty() {
+                self.pending_backend_reason_codes = self.backend_reason_codes.clone();
+            }
+        }
         self.active_cfg_root_digest = active_cfg_root_digest;
         let shadow_cfg_root_digest = if self.shadow.enabled {
             let shadow_mapping = self.shadow.shadow_mapping.as_ref().unwrap_or(&self.mapper);
@@ -1294,11 +1330,10 @@ impl LnssRuntime {
                 shadow_liquid_params_digest(self.shadow.shadow_liquid_params.as_ref());
             #[cfg(not(feature = "lnss-liquid-ode"))]
             let shadow_liquid_digest = None;
+            let backend_cfg_digests = self.orchestrator.backend_cfg_digests();
             cfg_root_digest_pack(CfgRootDigestInputs {
-                llm: self.llm.as_ref(),
+                backend_cfg_digests: &backend_cfg_digests,
                 tap_specs,
-                worldmodel_cfg: &worldmodel_cfg,
-                rlm_cfg: &rlm_cfg,
                 sae_pack_digest: self.active_sae_pack_digest,
                 mapping: shadow_mapping,
                 limits: &self.limits,
@@ -1367,6 +1402,9 @@ impl LnssRuntime {
             .any(|code| code == RC_WM_PRED_ERROR_CRITICAL)
         {
             reason_codes.push(RC_WM_PRED_ERROR_CRITICAL.to_string());
+        }
+        if !self.pending_backend_reason_codes.is_empty() {
+            reason_codes.extend(self.pending_backend_reason_codes.drain(..));
         }
 
         let mut feature_events = Vec::new();
@@ -2627,43 +2665,6 @@ fn hook_config_digest(specs: &[TapSpec]) -> [u8; 32] {
     digest(HOOK_CFG_DOMAIN, &buf)
 }
 
-fn language_cfg_digest(backend_id: &str, model_revision: &str, hook_digest: [u8; 32]) -> [u8; 32] {
-    let mut buf = Vec::new();
-    write_string(&mut buf, backend_id);
-    write_string(&mut buf, model_revision);
-    buf.extend_from_slice(&hook_digest);
-    digest(LANG_CFG_DOMAIN, &buf)
-}
-
-fn worldmodel_cfg_digest(snapshot: &WorldModelCfgSnapshot) -> [u8; 32] {
-    let mut buf = Vec::new();
-    write_string(&mut buf, &snapshot.mode);
-    write_string(&mut buf, &snapshot.encoder_id);
-    write_string(&mut buf, &snapshot.predictor_id);
-    let mut constants = snapshot.constants.clone();
-    constants.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    write_u32(&mut buf, constants.len() as u32);
-    for (name, value) in constants {
-        write_string(&mut buf, &name);
-        write_i64(&mut buf, value);
-    }
-    digest(WM_CFG_DOMAIN, &buf)
-}
-
-fn rlm_cfg_digest(snapshot: &RlmCfgSnapshot) -> [u8; 32] {
-    let mut buf = Vec::new();
-    buf.push(snapshot.recursion_depth_cap);
-    let mut directives = snapshot.directive_set.clone();
-    directives.sort();
-    directives.dedup();
-    write_u32(&mut buf, directives.len() as u32);
-    for directive in directives {
-        buf.push(directive as u8);
-    }
-    buf.push(snapshot.max_directives);
-    digest(RLM_CFG_DOMAIN, &buf)
-}
-
 fn sae_cfg_digest(sae_pack_digest: [u8; 32], top_k_base: u16, feature_caps: &[u16]) -> [u8; 32] {
     let mut buf = Vec::new();
     buf.extend_from_slice(&sae_pack_digest);
@@ -2716,10 +2717,8 @@ fn limits_cfg_digest(
 }
 
 pub struct CfgRootDigestInputs<'a> {
-    pub llm: &'a dyn LlmBackend,
+    pub backend_cfg_digests: &'a BackendCfgDigestPack,
     pub tap_specs: &'a [TapSpec],
-    pub worldmodel_cfg: &'a WorldModelCfgSnapshot,
-    pub rlm_cfg: &'a RlmCfgSnapshot,
     pub sae_pack_digest: Option<[u8; 32]>,
     pub mapping: &'a FeatureToBrainMap,
     pub limits: &'a Limits,
@@ -2733,24 +2732,17 @@ pub fn cfg_root_digest_pack(inputs: CfgRootDigestInputs<'_>) -> Option<CfgRootDi
     if inputs.mapping.map_digest == [0u8; 32] {
         return None;
     }
-    let backend_id = inputs.llm.backend_identifier();
-    if backend_id.is_empty() {
-        return None;
-    }
-    let model_revision = inputs.llm.model_revision();
-    if model_revision.is_empty() {
-        return None;
-    }
-    if inputs.worldmodel_cfg.mode.is_empty()
-        || inputs.worldmodel_cfg.encoder_id.is_empty()
-        || inputs.worldmodel_cfg.predictor_id.is_empty()
+    if inputs.backend_cfg_digests.language_cfg_digest == [0u8; 32]
+        || inputs.backend_cfg_digests.worldmodel_cfg_digest == [0u8; 32]
+        || inputs.backend_cfg_digests.rlm_cfg_digest == [0u8; 32]
     {
         return None;
     }
     let hook_digest = hook_config_digest(inputs.tap_specs);
-    let language_digest = language_cfg_digest(backend_id, &model_revision, hook_digest);
-    let worldmodel_digest = worldmodel_cfg_digest(inputs.worldmodel_cfg);
-    let rlm_digest = rlm_cfg_digest(inputs.rlm_cfg);
+    let language_digest =
+        language_cfg_digest(inputs.backend_cfg_digests.language_cfg_digest, hook_digest);
+    let worldmodel_digest = inputs.backend_cfg_digests.worldmodel_cfg_digest;
+    let rlm_digest = inputs.backend_cfg_digests.rlm_cfg_digest;
     let sae_pack_digest = inputs.sae_pack_digest.unwrap_or([0u8; 32]);
     let sae_digest = sae_cfg_digest(
         sae_pack_digest,
@@ -2944,10 +2936,6 @@ fn write_u64(buf: &mut Vec<u8>, value: u64) {
 }
 
 fn write_i32(buf: &mut Vec<u8>, value: i32) {
-    buf.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_i64(buf: &mut Vec<u8>, value: i64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 

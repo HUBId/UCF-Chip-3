@@ -8,6 +8,7 @@ publish = false
 [workspace]
 members = [
     "crates/chip2",
+    "crates/lnss_assets",
     "crates/lnss_core",
     "crates/lnss_lifecycle",
     "crates/lnss_worldmodulation",
@@ -28,6 +29,7 @@ resolver = "2"
 [features]
 default = []
 lnss = [
+    "lnss_assets",
     "lnss_lifecycle",
     "lnss_core",
     "lnss_worldmodulation",
@@ -58,6 +60,7 @@ lnss-chip2-bridge = ["lnss_bluebridge/lnss-chip2-bridge"]
 lnss-chip4-query = ["lnss_lifecycle/lnss-chip4-query", "lnss_runtime/lnss-chip4-query"]
 
 [dependencies]
+lnss_assets = { path = "crates/lnss_assets", optional = true }
 lnss_core = { path = "crates/lnss_core", optional = true }
 lnss_lifecycle = { path = "crates/lnss_lifecycle", optional = true }
 lnss_worldmodulation = { path = "crates/lnss_worldmodulation", optional = true }

@@ -1,5 +1,5 @@
 [package]
-name = "lnss_core"
+name = "lnss_assets"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
@@ -8,15 +8,8 @@ publish = false
 [dependencies]
 blake3 = { workspace = true }
 serde = { workspace = true }
-hex = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-lnss_assets = { path = "../lnss_assets" }
-
-[features]
-default = []
-lang-candle = []
-wm-candle = []
-rlm-candle = []
 
 [dev-dependencies]
-serde_json = { workspace = true }
+tempfile = "3"

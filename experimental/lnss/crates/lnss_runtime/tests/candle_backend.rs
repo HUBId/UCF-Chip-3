@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use lnss_core::{
     BrainTarget, ControlIntentClass, EmotionFieldSnapshot, PolicyMode, RecursionPolicy, TapKind,
-    TapSpec,
+    RlmCoreAdapter, TapSpec, WorldModelCoreAdapter,
 };
 use lnss_hooks::TapRegistry;
 use lnss_lifecycle::LifecycleIndex;
@@ -14,7 +14,8 @@ use lnss_rig::InMemoryRigClient;
 use lnss_rlm::RlmController;
 use lnss_runtime::{
     CandleConfig, CandleLlmBackend, FeedbackConsumer, HookProvider, Limits, LlmBackend,
-    LnssRuntime, MappingAdaptationConfig, TapRegistryProvider, DEFAULT_MAX_MECHINT_BYTES,
+    LnssRuntime, MappingAdaptationConfig, RuntimeLanguageBackend, TapRegistryProvider,
+    DEFAULT_MAX_MECHINT_BYTES,
 };
 use lnss_sae::CandleSaeBackend;
 use lnss_worldmodel::WorldModelCoreStub;
@@ -118,23 +119,33 @@ fn candle_end_to_end_is_deterministic() {
     let mechint =
         JsonlMechIntWriter::new(&tmp_path, Some(DEFAULT_MAX_MECHINT_BYTES)).expect("jsonl writer");
     let rig = InMemoryRigClient::default();
+    let limits = Limits::default();
+    let language_backend = RuntimeLanguageBackend::new(
+        Box::new(backend),
+        Box::new(TapRegistryProvider::new(registry.clone(), true)),
+        limits.clone(),
+    );
+    let worldmodel_backend = WorldModelCoreAdapter::new(WorldModelCoreStub);
+    let rlm_backend = RlmCoreAdapter::new(RlmController::default());
     let mut runtime = LnssRuntime {
-        llm: Box::new(backend),
-        hooks: Box::new(TapRegistryProvider::new(registry.clone(), true)),
-        worldmodel: Box::new(WorldModelCoreStub),
-        rlm: Box::new(RlmController::default()),
-        orchestrator: lnss_core::CoreOrchestrator,
+        orchestrator: lnss_core::CoreOrchestrator::new(
+            Box::new(worldmodel_backend),
+            Box::new(language_backend),
+            Box::new(rlm_backend),
+        ),
         sae: Box::new(CandleSaeBackend::new(4)),
         mechint: Box::new(mechint),
         pvgs: None,
         rig: Box::new(rig),
         mapper,
-        limits: Limits::default(),
+        limits,
         injection_limits: lnss_runtime::InjectionLimits::default(),
         active_sae_pack_digest: None,
         active_liquid_params_digest: None,
         active_cfg_root_digest: None,
         shadow_cfg_root_digest: None,
+        backend_reason_codes: Vec::new(),
+        pending_backend_reason_codes: Vec::new(),
         #[cfg(feature = "lnss-liquid-ode")]
         active_liquid_params: None,
         feedback: FeedbackConsumer::default(),

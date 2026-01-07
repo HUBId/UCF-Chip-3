@@ -4,7 +4,7 @@ mod liquid_backend_tests {
 
     use lnss_core::{
         BrainTarget, ControlIntentClass, EmotionFieldSnapshot, FeatureToBrainMap, PolicyMode,
-        RecursionPolicy, TapKind, TapSpec,
+        RecursionPolicy, RlmCoreAdapter, TapKind, TapSpec, WorldModelCoreAdapter,
     };
     use lnss_lifecycle::LifecycleIndex;
     use lnss_mechint::JsonlMechIntWriter;
@@ -12,7 +12,7 @@ mod liquid_backend_tests {
     use lnss_rlm::RlmController;
     use lnss_runtime::{
         FeedbackConsumer, HookProvider, Limits, LiquidOdeBackend, LiquidOdeConfig, LlmBackend,
-        LnssRuntime, MappingAdaptationConfig,
+        LnssRuntime, MappingAdaptationConfig, RuntimeLanguageBackend,
     };
     use lnss_sae::StubSaeBackend;
     use lnss_worldmodel::WorldModelCoreStub;
@@ -157,23 +157,33 @@ mod liquid_backend_tests {
         let target = BrainTarget::new("v1", "pop", 1, "syn", 800);
         let mapper = FeatureToBrainMap::new(1, vec![(1, target)]);
 
+        let limits = Limits::default();
+        let language_backend_a = RuntimeLanguageBackend::new(
+            Box::new(backend_a),
+            Box::new(hooks_a),
+            limits.clone(),
+        );
+        let worldmodel_backend_a = WorldModelCoreAdapter::new(WorldModelCoreStub);
+        let rlm_backend_a = RlmCoreAdapter::new(RlmController::default());
         let mut runtime_a = LnssRuntime {
-            llm: Box::new(backend_a),
-            hooks: Box::new(hooks_a),
-            worldmodel: Box::new(WorldModelCoreStub),
-            rlm: Box::new(RlmController::default()),
-            orchestrator: lnss_core::CoreOrchestrator,
+            orchestrator: lnss_core::CoreOrchestrator::new(
+                Box::new(worldmodel_backend_a),
+                Box::new(language_backend_a),
+                Box::new(rlm_backend_a),
+            ),
             sae: Box::new(StubSaeBackend::new(4)),
             mechint: Box::new(mechint_a),
             pvgs: None,
             rig: Box::new(rig_a),
             mapper: mapper.clone(),
-            limits: Limits::default(),
+            limits: limits.clone(),
             injection_limits: lnss_runtime::InjectionLimits::default(),
             active_sae_pack_digest: None,
             active_liquid_params_digest: None,
             active_cfg_root_digest: None,
             shadow_cfg_root_digest: None,
+            backend_reason_codes: Vec::new(),
+            pending_backend_reason_codes: Vec::new(),
             active_liquid_params: Some(cfg.clone()),
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),
@@ -197,23 +207,29 @@ mod liquid_backend_tests {
             pred_error_threshold: 128,
             trigger_proposals_enabled: false,
         };
+        let language_backend_b =
+            RuntimeLanguageBackend::new(Box::new(backend_b), Box::new(hooks_b), limits.clone());
+        let worldmodel_backend_b = WorldModelCoreAdapter::new(WorldModelCoreStub);
+        let rlm_backend_b = RlmCoreAdapter::new(RlmController::default());
         let mut runtime_b = LnssRuntime {
-            llm: Box::new(backend_b),
-            hooks: Box::new(hooks_b),
-            worldmodel: Box::new(WorldModelCoreStub),
-            rlm: Box::new(RlmController::default()),
-            orchestrator: lnss_core::CoreOrchestrator,
+            orchestrator: lnss_core::CoreOrchestrator::new(
+                Box::new(worldmodel_backend_b),
+                Box::new(language_backend_b),
+                Box::new(rlm_backend_b),
+            ),
             sae: Box::new(StubSaeBackend::new(4)),
             mechint: Box::new(mechint_b),
             pvgs: None,
             rig: Box::new(rig_b),
             mapper,
-            limits: Limits::default(),
+            limits,
             injection_limits: lnss_runtime::InjectionLimits::default(),
             active_sae_pack_digest: None,
             active_liquid_params_digest: None,
             active_cfg_root_digest: None,
             shadow_cfg_root_digest: None,
+            backend_reason_codes: Vec::new(),
+            pending_backend_reason_codes: Vec::new(),
             active_liquid_params: Some(cfg),
             feedback: FeedbackConsumer::default(),
             adaptation: MappingAdaptationConfig::default(),

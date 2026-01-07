@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "lnss")]
+pub use lnss_assets;
+#[cfg(feature = "lnss")]
 pub use lnss_bluebridge;
 #[cfg(feature = "lnss")]
 pub use lnss_core;
